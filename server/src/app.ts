@@ -10,6 +10,7 @@ import type { Message, Scope } from './inbox.js'
 import { heartbeatTallinn, listTimeTallinn } from './time.js'
 import { XmlSyntaxError, el, toXml } from './xml.js'
 import { simRoutes } from './sim.js'
+import { registerViban, vibanSimRoutes } from './viban/routes.js'
 
 export interface AppOptions {
   emulator: Emulator
@@ -210,6 +211,12 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   app.post('/account-statement', report('statement'))
   app.post('/account-balance', report('balance'))
 
-  if (opts.sim !== false) app.register(simRoutes(emulator), { prefix: '/_sim' })
+  // --- Virtual IBANs ---------------------------------------------------------------
+  registerViban(app, emulator, caller)
+
+  if (opts.sim !== false) {
+    app.register(simRoutes(emulator), { prefix: '/_sim' })
+    app.register(vibanSimRoutes(emulator), { prefix: '/_sim/viban' })
+  }
   return app
 }

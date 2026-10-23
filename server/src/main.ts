@@ -22,6 +22,7 @@ const emulator = await Emulator.fromSeed(seed, {
   xsdDir: existsSync(xsdDir) ? xsdDir : undefined,
   strictIban: env.STRICT_IBAN !== '0',
   pain00103Until: env.PAIN_001_001_03_UNTIL,
+  vibanErrors: env.VIBAN_ERRORS === 'sync' ? 'sync' : 'inbox',
 })
 if (!existsSync(xsdDir)) console.error('note: no XSDs in reference/xsd (scripts/fetch-reference.sh); pain.001 gets structural checks only')
 

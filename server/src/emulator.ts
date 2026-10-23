@@ -12,6 +12,8 @@ import { normalizeIban } from './iban.js'
 import { servicerRef } from './ids.js'
 import { Journal } from './statements/journal.js'
 import { AccountReports, type ReportsOptions } from './statements/reports.js'
+import { VibanSchemas } from './viban/messages.js'
+import { VibanService, type ErrorDelivery } from './viban/service.js'
 
 export interface Seed {
   bank?: Partial<Bank>
@@ -28,6 +30,8 @@ export interface EmulatorOptions {
   pain00103Until?: string
   /** Statement page size and per-request transaction cap (tests make them small). */
   reports?: ReportsOptions
+  /** How VIBAN business errors are delivered (docs/decisions.md 200); default inbox. */
+  vibanErrors?: ErrorDelivery
 }
 
 export const DEFAULT_BANK: Bank = { bic: 'LHVBEE22', name: 'open-banking emulator' }
@@ -44,6 +48,7 @@ export class Emulator {
   readonly bank: Bank
   readonly journal = new Journal()
   readonly reports: AccountReports
+  readonly viban: VibanService
 
   constructor(opts: EmulatorOptions & { bank?: Partial<Bank> } = {}) {
     this.clock = opts.clock ?? systemClock
@@ -52,8 +57,11 @@ export class Emulator {
     this.inbox = new Inbox(this.clock)
     this.bank = { ...DEFAULT_BANK, ...opts.bank }
     const xsd = opts.xsdDir ? new XsdValidator(opts.xsdDir) : undefined
+    this.viban = new VibanService(this.directory, this.inbox, this.clock, {
+      schemas: opts.xsdDir ? new VibanSchemas(opts.xsdDir) : undefined, errors: opts.vibanErrors,
+    })
     this.engine = new PaymentEngine(this.directory, this.ledger, this.rails, this.inbox, this.clock, this.bank, {
-      strictIban: opts.strictIban, pain00103Until: opts.pain00103Until ?? '2026-11-15', xsd,
+      strictIban: opts.strictIban, pain00103Until: opts.pain00103Until ?? '2026-11-15', xsd, virtual: this.viban.registry,
       onBooking: (_c, b) => { this.journal.record(b) },
     })
     this.reports = new AccountReports({
@@ -70,7 +78,9 @@ export class Emulator {
   async addCustomer(c: CustomerInput) {
     const customer = this.directory.add(c)
     for (const a of c.accounts ?? []) {
-      if (typeof a === 'string' || !a.balances) continue
+      if (typeof a === 'string') continue
+      if (a.viban) this.viban.registry.agreement(a.iban)
+      if (!a.balances) continue
       for (const [ccy, amount] of Object.entries(a.balances)) await this.fund(a.iban, amount, ccy)
     }
     return customer

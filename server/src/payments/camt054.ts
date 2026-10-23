@@ -21,6 +21,11 @@ export interface Booking {
   counterparty: { name?: string; iban?: string; account?: string; bic?: string; code?: string }
   remittance?: string
   reference?: string
+  /**
+   * The VIBAN the entry went through when `account` is its master account: shown as the
+   * own party, Dbtr/DbtrAcct on a debit and Cdtr/CdtrAcct on a credit (P 06).
+   */
+  virtual?: { iban: string; name?: string; country?: string; address?: string }
 }
 
 export function camt054(b: Booking, version: '02' | '08', bank: { bic: string; name: string }): string {
@@ -32,15 +37,21 @@ export function camt054(b: Booking, version: '02' | '08', bank: { bic: string; n
   const cp = b.counterparty
   const cpParty = cp.name ? (v8 ? el('Pty', el('Nm', cp.name.slice(0, 140))) : [el('Nm', cp.name.slice(0, 140))]) : null
   const cpAcct = cp.iban ? el('Id', el('IBAN', cp.iban)) : cp.account ? el('Id', el('Othr', el('Id', cp.account))) : null
-  const cpRole = b.direction === 'DBIT' ? 'Cdtr' : 'Dbtr'
+  const vb = b.virtual
+  const vAdr = vb?.country ? el('PstlAdr', el('Ctry', vb.country), opt('AdrLine', vb.address?.slice(0, 70))) : null
+  const vParty = vb?.name ? (v8 ? el('Pty', el('Nm', vb.name.slice(0, 140)), vAdr) : [el('Nm', vb.name.slice(0, 140)), vAdr]) : null
+  const vAcct = vb ? el('Id', el('IBAN', vb.iban)) : null
+  const [dbtr, dbtrAcct, cdtr, cdtrAcct] = b.direction === 'DBIT' ? [vParty, vAcct, cpParty, cpAcct] : [cpParty, cpAcct, vParty, vAcct]
   const ownAgent = el('FinInstnId', el(bicTag, bank.bic.slice(0, 8)), el('Nm', bank.name))
   const cpAgent = cp.bic ? el('FinInstnId', el(bicTag, cp.bic.slice(0, 8))) : null
   const ustrd = b.remittance && b.remittance.length > 140 ? b.remittance.slice(0, 137) + '…' : b.remittance
 
-  const relatedParties = cpParty || cpAcct
+  const relatedParties = dbtr || dbtrAcct || cdtr || cdtrAcct
     ? el('RltdPties',
-        cpParty ? el(cpRole, cpParty) : null,
-        cpAcct ? el(`${cpRole}Acct`, cpAcct) : null)
+        dbtr ? el('Dbtr', dbtr) : null,
+        dbtrAcct ? el('DbtrAcct', dbtrAcct) : null,
+        cdtr ? el('Cdtr', cdtr) : null,
+        cdtrAcct ? el('CdtrAcct', cdtrAcct) : null)
     : null
   const debtorAgent = b.direction === 'DBIT' ? ownAgent : cpAgent
   const creditorAgent = b.direction === 'DBIT' ? cpAgent : ownAgent

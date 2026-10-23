@@ -20,7 +20,7 @@ export interface CustomerInput {
   code: string
   country: string
   name: string
-  accounts?: (string | { iban: string; balances?: Record<string, string> })[]
+  accounts?: (string | { iban: string; balances?: Record<string, string>; /** Master account agreement for VIBANs. */ viban?: boolean })[]
   camt054?: '02' | '08'
   connected?: (CustomerKey | [string, string])[]
 }

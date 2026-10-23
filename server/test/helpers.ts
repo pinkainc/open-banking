@@ -14,11 +14,20 @@ import { parseXml } from '../src/xml.js'
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 /**
  * The bank's published XSDs and samples, used by reference, never copied here: the
- * local docs mirror (LHV_DOCS_DIR, default ../docs.lhv-connect) when present, else what
+ * local docs mirror (LHV_DOCS_DIR, default the nearest ../docs.lhv-connect up the tree) when present, else what
  * scripts/fetch-reference.sh downloaded into reference/. Tests that need them skip
  * with a message when neither exists.
  */
-export const MIRROR_FILES = join(resolve(process.env.LHV_DOCS_DIR ?? join(ROOT, '../docs.lhv-connect')), '_raw/partners/assets/files')
+export const MIRROR_DIR = process.env.LHV_DOCS_DIR ? resolve(process.env.LHV_DOCS_DIR) : findMirror()
+export const MIRROR_FILES = join(MIRROR_DIR, '_raw/partners/assets/files')
+/** ../docs.lhv-connect next to the repo, also from a git worktree nested inside it (.claude/worktrees/x). */
+function findMirror(): string {
+  for (let dir = ROOT; ; dir = dirname(dir)) {
+    const candidate = join(dir, '../docs.lhv-connect')
+    if (existsSync(join(candidate, '_raw'))) return resolve(candidate)
+    if (dirname(dir) === dir) return resolve(ROOT, '../docs.lhv-connect')
+  }
+}
 const MIRROR = existsSync(join(MIRROR_FILES, 'XSD/pain.001.001.09.xsd'))
 export const XSD_DIR = MIRROR ? join(MIRROR_FILES, 'XSD') : join(ROOT, 'reference/xsd')
 export const HAVE_REFERENCE = existsSync(join(XSD_DIR, 'pain.001.001.09.xsd'))
