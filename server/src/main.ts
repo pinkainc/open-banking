@@ -35,6 +35,8 @@ if (env.EOD_STATEMENTS !== '0') setInterval(() => emulator.reports.tick(), 60 * 
 setInterval(() => { emulator.directDebit.tick().catch((e) => console.error('direct debit settlement failed:', e)) }, 60 * 1000).unref()
 // FX: SPOT deals settle in the first hour of their settlement date; checked every minute.
 setInterval(() => { emulator.fx.tick().catch((e) => console.error('FX settlement failed:', e)) }, 60 * 1000).unref()
+// EE webhooks: retries fall due on the clock; checked every 15 seconds.
+setInterval(() => { emulator.webhooksEe.tick().catch((e) => console.error('EE webhook delivery failed:', e)) }, 15 * 1000).unref()
 for (const signal of ['SIGTERM', 'SIGINT'] as const) process.on(signal, () => process.exit(0))
 const port = Number(env.PORT ?? 8443)
 await app.listen({ port, host: env.HOST ?? '127.0.0.1' })

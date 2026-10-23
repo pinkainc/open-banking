@@ -25,7 +25,11 @@ export class Inbox {
   /** Ids that existed and are gone (confirmed or expired), with their owner: a repeat DELETE is 200. */
   #gone = new Map<string, string>()
   #seq = 0
+  #listeners: ((m: Message) => void)[] = []
   constructor(private clock: Clock, private retentionMs = 5 * DAY_MS) {}
+
+  /** Called with every new message, after it is stored (EE webhook delivery). */
+  onAdd(listener: (m: Message) => void) { this.#listeners.push(listener) }
 
   add(m: { customer: CustomerKey; type: string; body: string; requestId?: string; contentType?: string }): Message {
     const msg: Message = {
@@ -34,6 +38,7 @@ export class Inbox {
       createdAt: this.clock.now(), body: m.body, contentType: m.contentType ?? 'application/xml', seq: ++this.#seq,
     }
     this.#messages.set(msg.id, msg)
+    for (const l of this.#listeners) l(msg)
     return msg
   }
 

@@ -1,6 +1,6 @@
 // The parts of the bank wired together: directory, ledger, rails, inbox, the payment
-// engine, SEPA Direct Debit, FX and service provider contracts. Ledger and rails are
-// interfaces; the defaults are in memory and the simulator.
+// engine, SEPA Direct Debit, FX, service provider contracts and the EE webhooks. Ledger
+// and rails are interfaces; the defaults are in memory and the simulator.
 import { systemClock, type Clock } from './clock.js'
 import { Directory, type CustomerInput } from './directory.js'
 import { Inbox } from './inbox.js'
@@ -10,6 +10,7 @@ import { XsdValidator } from './payments/xsd.js'
 import { DirectDebitService } from './directdebit/service.js'
 import { FxService } from './fx/service.js'
 import { Contracts } from './contracts/service.js'
+import { EeWebhooks, type Deliver } from './webhooks/ee.js'
 import { SimulatorRails, type Rails } from './rails.js'
 import { normalizeIban } from './iban.js'
 import { servicerRef } from './ids.js'
@@ -35,6 +36,8 @@ export interface EmulatorOptions {
   reports?: ReportsOptions
   /** How VIBAN business errors are delivered (docs/decisions.md 200); default inbox. */
   vibanErrors?: ErrorDelivery
+  /** How EE webhook payloads are sent (default HTTP POST); tests record them instead. */
+  webhookDeliver?: Deliver
 }
 
 export const DEFAULT_BANK: Bank = { bic: 'LHVBEE22', name: 'open-banking emulator' }
@@ -55,12 +58,14 @@ export class Emulator {
   readonly directDebit: DirectDebitService
   readonly fx: FxService
   readonly contracts: Contracts
+  readonly webhooksEe: EeWebhooks
 
   constructor(opts: EmulatorOptions & { bank?: Partial<Bank> } = {}) {
     this.clock = opts.clock ?? systemClock
     this.ledger = opts.ledger ?? new MemoryLedger()
     this.rails = opts.rails ?? new SimulatorRails()
     this.inbox = new Inbox(this.clock)
+    this.webhooksEe = new EeWebhooks(this.inbox, this.clock, { deliver: opts.webhookDeliver })
     this.bank = { ...DEFAULT_BANK, ...opts.bank }
     const xsd = opts.xsdDir ? new XsdValidator(opts.xsdDir) : undefined
     this.viban = new VibanService(this.directory, this.inbox, this.clock, {
