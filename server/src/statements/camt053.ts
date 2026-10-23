@@ -74,7 +74,17 @@ export function camt053(p: StatementPage): string {
   const entry = (e: JournalEntry) => {
     const amt = fromMinor(e.amount)
     const cp = e.counterparty
-    const own = { party: party(p.owner.name, p.owner.code), acct: account(e.account, undefined), agent: agent(p.bank.bic, p.bank.name) }
+    // An entry of a master account that went through a VIBAN shows the VIBAN as the own side
+    // (P 05 "Virtual/Agency account account number is displayed here", sample PAYMENT_VIBAN_SEPA
+    // 053A): the holder's name without Id ("this tag will be empty"), the VIBAN as account. The
+    // holder's address only in v08 ("when address data is available"); the 02 sample has none
+    // although the camt.054 of the same payment has it (decision 551).
+    const vb = e.virtual
+    const vAdr = v8 && vb?.country ? el('PstlAdr', el('Ctry', vb.country), opt('AdrLine', vb.address?.slice(0, 70))) : null
+    const vParty = vb?.name ? (v8 ? el('Pty', el('Nm', vb.name.slice(0, 140)), vAdr) : [el('Nm', vb.name.slice(0, 140))]) : null
+    const own = vb
+      ? { party: vParty, acct: account(vb.iban, undefined), agent: agent(p.bank.bic, p.bank.name) }
+      : { party: party(p.owner.name, p.owner.code), acct: account(e.account, undefined), agent: agent(p.bank.bic, p.bank.name) }
     const other = { party: party(cp.name, cp.code), acct: account(cp.iban, cp.account), agent: agent(cp.bic) }
     const [dbtr, cdtr] = e.direction === 'DBIT' ? [own, other] : [other, own]
     return el('Ntry',

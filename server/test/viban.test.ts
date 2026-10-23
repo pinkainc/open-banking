@@ -8,7 +8,8 @@ import { ibanChecksumOk, makeIban } from '../src/iban.js'
 import { VibanSchemas } from '../src/viban/messages.js'
 import { eeCheckDigit, type Viban, type VibanUser } from '../src/viban/registry.js'
 import { E, type VibanError } from '../src/viban/service.js'
-import { C1, C2, DE_IBAN, HAVE_REFERENCE, MIRROR_DIR, SP, XSD_DIR, balance, call, drain, pain001, sample, seed, setup, xsd, type Ctx } from './helpers.js'
+import { C1, C2, DE_IBAN, HAVE_REFERENCE, MIRROR_DIR, SP, XSD_DIR, balance, call, drain, pain001, report, reportError, sample, seed, setup, xsd, type Ctx } from './helpers.js'
+import { parseXml } from '../src/xml.js'
 
 let ctx: Ctx
 beforeEach(async () => { ctx = await setup() })
@@ -492,6 +493,13 @@ async function camtValid(es: ReturnType<typeof entries>) {
   if (!HAVE_REFERENCE) return
   for (const e of es) assert.deepEqual(await xsd.validate(e.body, e.ns), [], e.body)
 }
+/** The entries of the master's camt.053 for today (camt.060.001.05 → 08, .03 → 02; schema-checked by drain). */
+async function statementEntries(version: '05' | '03', iban = C1.iban) {
+  const { msgs } = await report(ctx, { version, kind: 'statement', iban })
+  return msgs.flatMap((m) => many<any>(m.doc.Document.BkToCstmrStmt.Stmt)).flatMap((st) => many<any>(st.Ntry).map((e) => ({
+    acct: st.Acct.Id.IBAN, ind: e.CdtDbtInd, ref: e.AcctSvcrRef, pties: e.NtryDtls.TxDtls.RltdPties ?? {},
+  })))
+}
 const incoming = (iban: string, amount = '25.00') =>
   call(ctx, { method: 'POST', url: '/_sim/incoming', body: { iban, amount, debtor: { name: 'Outside Payer', iban: DE_IBAN } } })
 
@@ -599,6 +607,34 @@ describe('payments from a VIBAN (decision 208)', () => {
     const [c] = entries(await drain(ctx, C2.code))
     assert.deepEqual([c.account, c.ind, c.dbtrAcct], [C2.iban, 'CRDT', v], 'the creditor sees the VIBAN, not the master')
     await camtValid([c])
+  })
+
+  test("the master's camt.053 shows the VIBAN as own side: holder name without Id, the VIBAN as account (decision 551)", async () => {
+    const v = await open({ user: USER(COMPANY({ name: 'Company of John' }), { country: 'GB' }) })
+    const credit = json(await incoming(v)).accountServicerReference
+    const r = await pay(pain001([{ debtorIban: v, debtorName: 'Company of John', txs: [{ amount: '5.00' }] }]))
+    assert.ok(r.sts.every((x) => x === 'ACSC'), r.sts.join())
+    await pay(pain001([{ debtorIban: C1.iban, debtorName: 'Demo Customer 1', txs: [{ amount: '1.00' }] }]))
+    const v8 = await statementEntries('05')
+    const viaV = (es: typeof v8) => es.filter((e) => e.ref === credit || e.pties.DbtrAcct?.Id?.IBAN === v)
+    // v08: Pty with the holder's name and address (country and address line, as in camt.054).
+    assert.deepEqual(viaV(v8).map((e) => [e.acct, e.ind, e.ind === 'CRDT' ? e.pties.Cdtr : e.pties.Dbtr, e.ind === 'CRDT' ? e.pties.CdtrAcct.Id.IBAN : e.pties.DbtrAcct.Id.IBAN]), [
+      [C1.iban, 'CRDT', { Pty: { Nm: 'Company of John', PstlAdr: { Ctry: 'GB', AdrLine: viaV(v8)[0].pties.Cdtr.Pty.PstlAdr.AdrLine } } }, v],
+      [C1.iban, 'DBIT', { Pty: { Nm: 'Company of John', PstlAdr: { Ctry: 'GB', AdrLine: viaV(v8)[1].pties.Dbtr.Pty.PstlAdr.AdrLine } } }, v],
+    ])
+    assert.equal(viaV(v8)[0].pties.Dbtr.Pty.Nm, 'Outside Payer', 'the counterparty is unchanged')
+    // v02: the name alone, as the published 053A.
+    const v2 = await statementEntries('03')
+    assert.deepEqual(viaV(v2).map((e) => [e.ind, e.ind === 'CRDT' ? e.pties.Cdtr : e.pties.Dbtr]), [['CRDT', { Nm: 'Company of John' }], ['DBIT', { Nm: 'Company of John' }]])
+    // A payment from the master itself keeps the owner with its Id and the master IBAN.
+    const own = v2.find((e) => e.ind === 'DBIT' && e.pties.DbtrAcct?.Id?.IBAN === C1.iban)!
+    assert.deepEqual(own.pties.Dbtr, { Nm: 'Demo Customer 1', Id: { OrgId: { Othr: { Id: C1.code } } } })
+    // camt.052: balances only, the VIBAN is never named; a request for the VIBAN itself is refused (decision 552).
+    for (const version of ['05', '03'] as const) {
+      const [m] = (await report(ctx, { version, kind: 'balance' })).msgs
+      assert.ok(m.doc.Document.BkToCstmrAcctRpt && !m.body.includes(v))
+      assert.ok(reportError((await report(ctx, { version, kind: 'balance', iban: v })).msgs[0]))
+    }
   })
 
   test('rejected when the name differs from the holder or the VIBAN is not ACTIVE', async () => {
@@ -774,5 +810,10 @@ describe('PAYMENT_VIBAN_SEPA sample', { skip: sample('PAYMENT_VIBAN_SEPA', 'PAYM
     for (const k of ['ind', 'amount', 'dbtr', 'dbtrCtry', 'dbtrAcct', 'cdtr', 'cdtrAcct'] as const) assert.equal(e[k], want[k], k)
     assert.equal(e.account, C1.iban, 'the master account, as the published Acct is the master')
     await camtValid(r.entries)
+    // The master's camt.053.001.02 (the sample's camt.060 asks for it) shows the parties as ACCOUNT_STATEMENT_CAMT.053A.
+    const [st] = (await statementEntries('03')).filter((x) => x.ind === 'DBIT')
+    const pub = parseXml(sample('PAYMENT_VIBAN_SEPA', 'ACCOUNT_STATEMENT_CAMT.053A.xml')!).Document.BkToCstmrStmt.Stmt
+    assert.equal(st.acct, C1.iban, 'the master: C1 stands in for the sample master')
+    assert.deepEqual(st.pties, pub.Ntry.NtryDtls.TxDtls.RltdPties)
   })
 })
