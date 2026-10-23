@@ -85,3 +85,34 @@ Ukupno 8 agenata i oko 430 poziva.
 - open-ledger kao pravi `Ledger` i pravi `Rails` bridgeovi.
 - Katalog: sekcija o merchant reportu (P 13) nije pročitana, a nije provjereno ni
   podržava li UK CHAPS. Ostalo je 5 `uncertain` operacija.
+
+## L4: SEPA direct debit (S1, 2026-10-23 navečer)
+
+Prva sesija iz lanca `docs/handoffs/`. Plan je u `docs/2026-10-23-plan-do-paritete.md`.
+
+| Agent | Effort | Poziva | Tokena konteksta | Ishod |
+|---|---|---|---|---|
+| L4 implementacija | high | 43 | 197k | moduli `server/src/directdebit/`, nespojeni, 0 testova, 0 odluka (`de08c4b`) |
+| L4 testovi i spajanje | high | 48 | 189k | spojeno, +45 testova, dužnički testovi parkirani kao `.wip.ts`, 0 odluka |
+| orkestrator, inline | — | ~15 | — | builder popravljen, +25 testova, odluke 300–318, sandbox pitanja 30–34 |
+
+Podjela na dva agenta ovdje nije bila dovoljna. Razina DD-a ima dvije strane (vjerovnik
+i dužnik), kalendar TARGET2 i tri vremenska prozora odbijanja, pa oba agenta stanu na
+guardu. Odluke su ostale nenapisane jer su bile zadnje na popisu zadataka. Ostatak je
+orkestrator dovršio sam, i to je bilo jeftinije od trećeg agenta.
+
+Zamke:
+
+1. **Agent je krivo dijagnosticirao parkirane testove.** Izvještaj je rekao da 16 testova
+   pada zbog `GrpHdr/CtrlSum`. Pravi uzrok bio je da LHV-ov pain.007.001.09 XSD (EPC
+   SDD Core C2PSP varijanta) traži i `GrpHdr/InitgPty` i `TxInf/OrgnlTxRef/MndtRltdInf`.
+   Do toga se došlo ispisom pain.002 odgovora, a zatim `xmllint --noout --schema` nad
+   generiranim zahtjevom. Pravilo: test builder prvo provući kroz xmllint, pa tek onda
+   sumnjati na servis.
+2. **CtrlSum mora biti zbroj iznosa**, a ne fiksnih `10.00`. Servis ga uspoređuje s
+   iznosom naplate, pa testovi s 30, 500 i 5 EUR padaju na "Faulty control sum".
+3. **Redoslijed provjera u `/_sim/direct-debit/incoming`:** VIBAN mora biti prije
+   traženja vlasnika računa. Inače VIBAN dužnik dobije 404 umjesto 409 AG01 (odluka 312).
+4. LHV-ovi XSD-ovi su stroži od ISO-a i neke provjere servisa čine nedostižnima
+   (odluka 317). Testovi za te tekstove zato šalju prazne vrijednosti, a ne izostavljene
+   elemente.
