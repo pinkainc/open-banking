@@ -19,6 +19,7 @@
 // Processing is synchronous: every message exists by the time POST /payment returns.
 import { BoundedMap, BoundedSet, DEFAULT_BOUNDS, type Bounds } from '../bounded.js'
 import type { Clock } from '../clock.js'
+import { codePage, fold } from '../cp1257.js'
 import { keyOf, type Customer, type Directory } from '../directory.js'
 import { ibanChecksumOk, ibanCountry, isSepaCountry, normalizeIban } from '../iban.js'
 import { servicerRef } from '../ids.js'
@@ -232,7 +233,12 @@ export class PaymentEngine {
   }
 
   /** The checks that need no money: a rejection, or what to execute. */
-  #check(block: Block, tx: Tx, customer: Customer): { status: TxStatus } | { plan: Plan } {
+  #check(rawBlock: Block, rawTx: Tx, customer: Customer): { status: TxStatus } | { plan: Plan } {
+    // Free text as the core keeps it, for the receiver bank's country (decision 526): what
+    // the reports echo, the notifications book and the rails receive.
+    const country = this.#receiverCountry(rawTx)
+    const block: Block = { ...rawBlock, debtorName: fold(rawBlock.debtorName, country) }
+    const tx: Tx = { ...rawTx, creditorName: fold(rawTx.creditorName, country), ustrd: fold(rawTx.ustrd, country), reference: fold(rawTx.reference, country) }
     const rj = (reason: string, scheme?: string): { status: TxStatus } => ({ status: { block, tx, status: 'RJCT', reason, scheme } })
     let amount: bigint
     try { amount = toMinor(tx.amount!) } catch { return rj(R.amount) }
@@ -250,7 +256,7 @@ export class PaymentEngine {
     // A VIBAN debtor must be ACTIVE and named as its holder; the master account pays.
     const debtorV = this.opts.virtual?.resolve(debtorIban)
     if (debtorV && debtorV.status !== 'ACTIVE') return rj(R.debtorInactive)
-    if (debtorV && !sameName(block.debtorName, debtorV.holder?.name)) return rj(R.debtorName)
+    if (debtorV && !sameName(rawBlock.debtorName, debtorV.holder?.name)) return rj(R.debtorName)
     const debtorAccount = debtorV?.master ?? debtorIban
     // A VIBAN creditor is credited on its master account, unless it is not ACTIVE.
     const creditorV = creditorIban ? this.opts.virtual?.resolve(creditorIban) : undefined
@@ -452,6 +458,14 @@ export class PaymentEngine {
     }
   }
 
+  /** The receiver bank's country: LHV's own for an account here, else the BIC's, else the IBAN's. */
+  #receiverCountry(tx: Tx): string | undefined {
+    const iban = tx.creditorIban ? normalizeIban(tx.creditorIban) : undefined
+    if (iban && this.directory.ownerOf(this.#account(iban))) return this.bank.bic.slice(4, 6).toUpperCase()
+    if (tx.creditorBic && tx.creditorBic.length >= 6) return tx.creditorBic.slice(4, 6).toUpperCase()
+    return iban ? ibanCountry(iban) : undefined
+  }
+
   /** The ledger account behind an IBAN: a VIBAN's master account, else the IBAN itself. */
   #account(iban: string) {
     const n = normalizeIban(iban)
@@ -483,8 +497,8 @@ export class PaymentEngine {
     this.#notify(owner, {
       account, virtual: v && virtualParty(v), owner: { name: owner.name, code: owner.code }, direction: 'CRDT', amount: p.amount, currency: p.currency,
       servicerRef: ref, scheme: p.scheme, bookedAt: this.clock.now(), endToEndId: p.endToEndId,
-      counterparty: { name: p.debtor.name, iban: p.debtor.iban ? normalizeIban(p.debtor.iban) : undefined, bic: p.debtor.bic },
-      remittance: p.remittance, reference: p.reference,
+      counterparty: { name: codePage(p.debtor.name), iban: p.debtor.iban ? normalizeIban(p.debtor.iban) : undefined, bic: p.debtor.bic },
+      remittance: codePage(p.remittance), reference: codePage(p.reference),
     })
     return { servicerRef: ref }
   }
