@@ -1,0 +1,18 @@
+{
+  "bank": { "bic": "LHVBEE22", "name": "open-banking emulator" },
+  "customers": [
+    {
+      "code": "12340001", "country": "EE", "name": "Demo Customer 1",
+      "accounts": [{ "iban": "EE337700771001260958", "balances": { "EUR": "10000.00", "USD": "500.00" } }]
+    },
+    {
+      "code": "12340002", "country": "EE", "name": "Demo Customer 2",
+      "accounts": [{ "iban": "EE267700771001260987", "balances": { "EUR": "100.00" } }]
+    },
+    {
+      "code": "10000001", "country": "EE", "name": "Demo Service Provider",
+      "accounts": [{ "iban": "EE707700771001260001", "balances": { "EUR": "1000.00" } }],
+      "connected": [{ "code": "12340001", "country": "EE" }, { "code": "12340002", "country": "EE" }]
+    }
+  ]
+}

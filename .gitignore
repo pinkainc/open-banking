@@ -1,0 +1,6 @@
+node_modules/
+.rec/
+# Dev certificates and keys (scripts/dev-ca.sh). Never commit keys.
+.certs/
+# Reference material downloaded by scripts/fetch-reference.sh (XSDs, sample XML).
+reference/
