@@ -31,7 +31,7 @@ recordings against the reference sandbox exist.
 | 24 | XSDs | Not committed: `scripts/fetch-reference.sh` downloads them with pinned checksums; without them, structural checks only. Tests read XSDs and samples from the local docs mirror (`LHV_DOCS_DIR`, default `../docs.lhv-connect`) when present, else from `reference/`, and skip with a message when neither exists. |
 | 25 | `X-Bank-Code` | `LHVEE` on every response, errors and `/_sim` included (`bankCode` option of `buildApp`). |
 | 26 | Body limit | Bodies over 5 MB are 413 with `<Errors><Error><ErrorCode>413</ErrorCode><Description>Request Entity Too Large</Description>…`. The reference's nginx answers an HTML page; the error document follows the 503 sample's numeric-code form instead. |
-| 27 | `X-Idempotency-Key` | On every Connect POST: a key that already got a 2xx from the same certificate holder within 24 h (injectable clock) is 409 with `ErrorCode` `CONFLICT`; a value that is not a UUID is 400. A failed request does not use up its key. Not applied to `/_sim`. |
+| 27 | `X-Idempotency-Key` | On every Connect POST: a key that already got a 2xx from the same certificate holder within 24 h (injectable clock) is 409 with `ErrorCode` `CONFLICT`; a value that is not a UUID is 400. A failed request does not use up its key. Not applied to `/_sim`. UK host only since decision 500. |
 | 28 | Empty list | `GET /messages` with nothing pending is 204 without a body (GitBook "204 - no more messages"), not an empty array. |
 
 ## L2
@@ -125,3 +125,9 @@ recordings against the reference sandbox exist.
 | 422 | EE webhook errors | P 15 documents no error bodies. A malformed body, missing or non-http(s) `url`, or an `eventType` other than GENERAL_WEBHOOK is 400 BAD_REQUEST in the messages API JSON envelope; an unknown (or another customer's) `subscriptionReference` on PUT/DELETE is 404 NOT_FOUND `Requested resource not found`. http URLs are accepted (local development); LHV may require https. |
 | 423 | EE webhook payload | `eventId` a string of a running number ("1", as the P 15 sample; the table says Numeric), one event per message and subscription. `eventTimestamp` (when the message was announced) and `messageCreatedTime` in UTC with `+00:00` and milliseconds, as the sample. `messageRequestId` is left out for messages without one (notifications). `bankCode` always LHVEE. No signature header. Sent as `Content-Type: application/json`. |
 | 424 | EE webhook subscriptions and contracts | A subscription a service provider made for a customer (Client-Code) belongs to that customer, as decision 420 says: when the provider's contract ends it keeps delivering to the provider's URL, the customer lists and can remove it, the provider gets 403 like every other call for that customer. Not documented (sandbox question 42). |
+
+## L0 debts (S3)
+
+| # | Topic | Choice |
+| --- | --- | --- |
+| 500 | Host flavour | `buildApp({ flavour })`, env `CONNECT_FLAVOUR`: `EE` (connect.lhv.eu, default) or `UK` (connect.lhv.com). It sets the default `X-Bank-Code` (LHVEE / LHVUK) and switches the UK-only features: `X-Idempotency-Key` (decision 27) and response compression (decision 503). On the EE host the header is ignored altogether, a non-UUID value included; duplicates are caught by the business keys only (pain.001/pain.008/pain.007/camt.060 `MsgId`), as `ssot/ee-vs-uk.md` says. The UK host's proxying to EE (`X-Bank-Code: LHVEE` on proxied answers) is not modelled: one flavour per server. (noćni rad, potvrditi) |

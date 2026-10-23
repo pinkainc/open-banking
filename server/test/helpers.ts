@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import type { FastifyInstance, FastifyRequest } from 'fastify'
 import Ajv2020 from 'ajv/dist/2020.js'
 import addFormats from 'ajv-formats'
-import { buildApp } from '../src/app.js'
+import { buildApp, type AppOptions } from '../src/app.js'
 import { ManualClock } from '../src/clock.js'
 import { Emulator, type EmulatorOptions, type Seed } from '../src/emulator.js'
 import { XsdValidator } from '../src/payments/xsd.js'
@@ -53,7 +53,7 @@ export function seed(): Seed {
 
 export interface Ctx { app: FastifyInstance; emulator: Emulator; clock: ManualClock }
 
-export async function setup(opts: EmulatorOptions = {}, s: Seed = seed()): Promise<Ctx> {
+export async function setup(opts: EmulatorOptions = {}, s: Seed = seed(), appOpts: Partial<AppOptions> = {}): Promise<Ctx> {
   const clock = new ManualClock('2026-03-10T08:00:00Z')
   const emulator = await Emulator.fromSeed(s, { clock, xsdDir: HAVE_REFERENCE ? XSD_DIR : undefined, ...opts })
   const identify = (req: FastifyRequest) => {
@@ -62,7 +62,7 @@ export async function setup(opts: EmulatorOptions = {}, s: Seed = seed()): Promi
     if (serial === undefined && cn === undefined) return undefined
     return { serialNumber: serial as string | undefined, commonName: cn as string | undefined, certSerial: '0A1B', validFrom: 'Jan  1 00:00:00 2026 GMT', validTo: 'Jan  1 00:00:00 2028 GMT' }
   }
-  const app = buildApp({ emulator, identify })
+  const app = buildApp({ emulator, identify, ...appOpts })
   await app.ready()
   return { app, emulator, clock }
 }

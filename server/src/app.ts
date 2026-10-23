@@ -24,9 +24,17 @@ export interface AppOptions {
   sim?: boolean
   logger?: boolean
   https?: { key: string | Buffer; cert: string | Buffer; ca: string | Buffer }
-  /** X-Bank-Code on every response (LHVEE or LHVUK); default LHVEE. */
+  /**
+   * Which host this server plays (docs/decisions.md 500): EE (connect.lhv.eu, the
+   * default) or UK (connect.lhv.com). Only UK has X-Idempotency-Key and response
+   * compression.
+   */
+  flavour?: Flavour
+  /** X-Bank-Code on every response; default LHVEE, LHVUK for the UK flavour. */
   bankCode?: string
 }
+
+export type Flavour = 'EE' | 'UK'
 
 /** Request bodies above this are refused with 413 (the reference's nginx limit). */
 export const BODY_LIMIT = 5 * 1024 * 1024
@@ -45,7 +53,8 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   // Request bodies other than JSON (pain.001 XML, BDOC test payloads) arrive as text.
   app.addContentTypeParser('*', { parseAs: 'string' }, (_req, body, done) => done(null, body))
 
-  const bankCode = opts.bankCode ?? 'LHVEE'
+  const flavour: Flavour = opts.flavour ?? 'EE'
+  const bankCode = opts.bankCode ?? (flavour === 'UK' ? 'LHVUK' : 'LHVEE')
   app.addHook('onRequest', async (_req, reply) => { reply.header('X-Bank-Code', bankCode) })
 
   app.setErrorHandler((err: any, _req, reply) => {
@@ -70,12 +79,13 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   }
   const accepted = (reply: FastifyReply, id: string) => reply.code(202).header('Message-Request-Id', id).send()
 
-  // X-Idempotency-Key: a key seen on a successful POST within 24 hours is answered 409.
+  // X-Idempotency-Key (UK host only; the EE host knows duplicates by business keys such
+  // as the pain.001 MsgId): a key seen on a successful POST within 24 hours is answered 409.
   const idempotency = new Map<string, number>()
   const idemKey = (req: FastifyRequest) => {
     const v = req.headers['x-idempotency-key']
     const key = Array.isArray(v) ? v[0] : v
-    if (key === undefined || req.method !== 'POST' || req.url.startsWith('/_sim')) return undefined
+    if (flavour !== 'UK' || key === undefined || req.method !== 'POST' || req.url.startsWith('/_sim')) return undefined
     return `${keyOf(caller(req).user)}|${key.toLowerCase()}`
   }
   app.addHook('preHandler', async (req) => {

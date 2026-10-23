@@ -8,13 +8,24 @@ import { parseXml } from '../src/xml.js'
 import { C2, call, setup, type Ctx } from './helpers.js'
 
 describe('http', () => {
-  let ctx: Ctx
-  before(async () => { ctx = await setup() })
+  let ctx: Ctx, ee: Ctx
+  // X-Idempotency-Key is a UK-host feature (decision 500): these run as the UK flavour.
+  before(async () => { ctx = await setup({}, undefined, { flavour: 'UK' }); ee = await setup() })
 
-  test('X-Bank-Code on every response', async () => {
+  test('X-Bank-Code on every response: LHVEE on the EE host, LHVUK on the UK host', async () => {
     for (const url of ['/heartbeat', '/messages/next', '/messages/count', '/messages/RESx']) {
-      assert.equal((await call(ctx, { url })).headers['x-bank-code'], 'LHVEE', url)
+      assert.equal((await call(ee, { url })).headers['x-bank-code'], 'LHVEE', url)
+      assert.equal((await call(ctx, { url })).headers['x-bank-code'], 'LHVUK', url)
     }
+  })
+
+  test('the EE host ignores X-Idempotency-Key: a repeat and a non-UUID value are processed', async () => {
+    const key = randomUUID()
+    for (const k of [key, key, 'abc']) {
+      const r = await call(ee, { url: '/heartbeat', method: 'POST', body: 'x', headers: { 'X-Idempotency-Key': k } })
+      assert.equal(r.statusCode, 202, k)
+    }
+    assert.deepEqual(JSON.parse((await call(ee, { url: '/messages/count' })).body), { count: 3 })
   })
 
   test('a body over 5 MB is 413', async () => {

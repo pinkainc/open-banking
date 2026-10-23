@@ -26,7 +26,10 @@ const emulator = await Emulator.fromSeed(seed, {
 })
 if (!existsSync(xsdDir)) console.error('note: no XSDs in reference/xsd (scripts/fetch-reference.sh); pain.001 gets structural checks only')
 
-const app = buildApp({ emulator, https: tls, sim: env.SIM !== '0' })
+// CONNECT_FLAVOUR=UK plays connect.lhv.com (X-Idempotency-Key, compression); default EE.
+const flavour = (env.CONNECT_FLAVOUR ?? 'EE').toUpperCase()
+if (flavour !== 'EE' && flavour !== 'UK') throw new Error(`CONNECT_FLAVOUR must be EE or UK, not ${flavour}`)
+const app = buildApp({ emulator, https: tls, sim: env.SIM !== '0', flavour })
 if (env.LOG) app.addHook('onResponse', async (req, reply) => console.error(`${req.method} ${req.url} ${reply.statusCode}`))
 setInterval(() => emulator.inbox.purge(), 60 * 60 * 1000).unref()
 // Automatic end-of-day statements: checked every minute, sent once per finished day.
