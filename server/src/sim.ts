@@ -173,6 +173,14 @@ export function simRoutes(emulator: Emulator) {
       return { ok: true }
     })
 
+    // SEPA Instant to this account is attempted and fails: automatic selection falls back to SEPA.
+    app.post('/rails/instant-failure', async (req) => {
+      const b = (req.body ?? {}) as { account?: string }
+      if (!b.account) throw bad('account is required')
+      simRails().instantFails(normalizeIban(b.account))
+      return { ok: true }
+    })
+
     app.get('/rails/sent', async () => ({
       payments: simRails().sent.map((p) => ({ ...p, amount: fromMinor(p.amount) })),
     }))

@@ -238,3 +238,49 @@ describe('manual review (decision 522)', () => {
     }
   })
 })
+
+describe('SEPA Instant falls back to SEPA (decision 523)', () => {
+  const instantFails = (account = DE_IBAN) => call(ctx, { method: 'POST', url: '/_sim/rails/instant-failure', body: { account } })
+
+  test('automatic: ACSP (INST), ACWC "Payment processed as European payment" (SEPA), ACSC (SEPA) + camt.054', async () => {
+    await instantFails()
+    const r = await pay(one({ amount: '7.00', creditorIban: DE_IBAN }))
+    assert.deepEqual(r.reports.map((x) => x.txs.map((t) => [t.sts, t.scheme, t.reason])), [
+      [['ACSP', 'INST', undefined]], [['ACWC', 'SEPA', 'Payment processed as European payment']], [['ACSC', 'SEPA', undefined]],
+    ])
+    assert.equal(r.reports[0].grpSts, 'ACSP')
+    assert.ok(r.reports.slice(1).every((x) => x.grpSts === undefined))
+    const refs = new Set(r.reports.map((x) => x.txs[0].ref))
+    assert.equal(refs.size, 1, 'one AcctSvcrRef throughout')
+    assert.deepEqual(r.notes.map((n) => [n.ind, n.amount]), [['DBIT', '7.00']])
+    assert.equal(await balance(ctx, C1.iban), '9993.00')
+    const sent = (await call(ctx, { url: '/_sim/rails/sent' })).json().payments
+    assert.deepEqual(sent.map((p: any) => [p.scheme, p.outcome.status]), [['INST', 'unavailable'], ['SEPA', 'settled']])
+    // The camt.054 shows the scheme the money actually went by.
+    assert.match(r.raw.find((m) => m.type === 'CREDIT_DEBIT_NOTIFICATION')!.body, /SEPA/)
+  })
+
+  test('SEPA rejects after the fallback: RJCT, funds released', async () => {
+    await instantFails()
+    await call(ctx, { method: 'POST', url: '/_sim/rails/reject', body: { account: DE_IBAN, reason: 'Account closed.' } })
+    const r = await pay(one({ amount: '7.00', creditorIban: DE_IBAN }))
+    assert.deepEqual(r.reports.map((x) => x.txs[0].sts), ['ACSP', 'ACWC', 'RJCT'])
+    assert.equal(r.reports[2].txs[0].reason, 'Account closed.')
+    assert.equal(await available(C1.iban), '10000.00')
+  })
+
+  test('requested INST is not changed: RJCT "Payment declined, try European payment."', async () => {
+    await instantFails()
+    const r = await pay(one({ amount: '7.00', creditorIban: DE_IBAN, scheme: 'INST' }))
+    assert.deepEqual(r.reports.map((x) => x.txs.map((t) => [t.sts, t.reason])), [[['ACSP', undefined]], [['RJCT', 'Payment declined, try European payment.']]])
+    assert.equal(await available(C1.iban), '10000.00')
+  })
+
+  test('only instant fails: requested SEPA to the same account settles; reset clears it', async () => {
+    await instantFails()
+    assert.deepEqual((await pay(one({ amount: '1.00', creditorIban: DE_IBAN, scheme: 'SEPA' }))).reports.map((x) => x.txs[0].sts), ['ACSP', 'ACSC'])
+    await call(ctx, { method: 'POST', url: '/_sim/rails/reset' })
+    assert.deepEqual((await pay(one({ amount: '1.00', creditorIban: DE_IBAN }))).reports.map((x) => x.txs[0].sts), ['ACSP', 'ACSC'])
+    assert.equal((await call(ctx, { method: 'POST', url: '/_sim/rails/instant-failure', body: {} })).statusCode, 400)
+  })
+})

@@ -11,6 +11,8 @@
 //     external              → funds reserved, ACSP in the first pain.002; then the rails
 //                             answer: settled → pain.002 ACSC + camt.054 DBIT,
 //                             rejected → pain.002 RJCT and the reservation released
+//                             An automatic SEPA Instant that fails at the rails: ACWC
+//                             "Payment processed as European payment", then SEPA
 //     manual review name    → funds reserved, ACSP, then PDNG "In manual review" until
 //                             /_sim decides
 //
@@ -74,6 +76,10 @@ export const R = {
   requestedByCustomer: 'Requested by customer.',
   regulatory: 'Payment declined. Regulatory reasons',
   manualReview: 'In manual review',
+  europeanPayment: 'Payment processed as European payment',
+  declinedTryEuropean: 'Payment declined, try European payment.',
+  instantForbidden: 'Instant payment forbidden, try European payment.',
+  technical: 'Technical problem. Try again',
 }
 
 /** Why a payment to a VIBAN that is not ACTIVE is refused: closed for good, or for now. */
@@ -296,8 +302,15 @@ export class PaymentEngine {
         notices: [{ customer: file.customer, booking: this.#debitBooking(file.customer, block, tx, p.ref, scheme) }],
       }
     }
+    // SEPA Instant attempted and failed: an automatic choice goes on as SEPA (ACWC first).
+    if (outcome.status === 'unavailable' && scheme === 'INST' && p.automatic) {
+      const sepa: Plan = { ...p, scheme: 'SEPA' }
+      const changed: TxStatus = { ...accepted, status: 'ACWC', reason: R.europeanPayment, scheme: 'SEPA' }
+      return { status: changed, next: () => this.#rails(file, sepa, { ...changed, status: 'ACSP', reason: undefined }) }
+    }
     await this.ledger.release(p.ref)
-    return { status: { ...accepted, status: 'RJCT', reason: outcome.reason, scheme } }
+    const reason = outcome.status === 'rejected' ? outcome.reason : scheme === 'INST' ? R.declinedTryEuropean : R.technical
+    return { status: { ...accepted, status: 'RJCT', reason, scheme } }
   }
 
   /** Parks a payment until /_sim decides: waiting for SCA in the internet bank, or in manual review. */
@@ -355,7 +368,7 @@ export class PaymentEngine {
     if (requested === 'INST' || requested === 'SEPA' || requested === 'TARGET2') {
       if (currency !== 'EUR') return { reject: R.currency }
       if (!sepa && requested !== 'TARGET2') return { reject: R.declined }
-      if (requested === 'INST' && !this.rails.instantReachable(creditorIban!)) return { reject: 'Instant payment forbidden, try European payment.' }
+      if (requested === 'INST' && !this.rails.instantReachable(creditorIban!)) return { reject: R.instantForbidden }
       return { scheme: requested }
     }
     if (currency === 'EUR' && sepa) return { scheme: this.rails.instantReachable(creditorIban!) ? 'INST' : 'SEPA' }

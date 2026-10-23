@@ -15,7 +15,11 @@ export interface OutgoingPayment {
   remittance?: string
 }
 
-export type RailsOutcome = { status: 'settled' } | { status: 'rejected'; reason: string }
+/**
+ * `unavailable`: the scheme itself could not take the payment (e.g. SEPA Instant failed
+ * after being attempted); the bank may retry it on another scheme.
+ */
+export type RailsOutcome = { status: 'settled' } | { status: 'rejected'; reason: string } | { status: 'unavailable' }
 
 /** A SEPA Direct Debit our creditor sends to a debtor at another bank (L4). */
 export interface OutgoingCollection {
@@ -47,16 +51,19 @@ export class SimulatorRails implements Rails {
   readonly collections: (OutgoingCollection & { outcome: CollectionOutcome })[] = []
   #rejects = new Map<string, string>()
   #noInstant = new Set<string>()
+  #instantFails = new Set<string>()
   #collectionRejects = new Map<string, string>()
 
   /** Payments to this account are rejected by the "scheme" with this reason. */
   reject(account: string, reason: string) { this.#rejects.set(account.toUpperCase(), reason) }
   /** This account cannot receive SEPA Instant (automatic selection falls back to SEPA). */
   noInstant(account: string) { this.#noInstant.add(account.toUpperCase()) }
+  /** SEPA Instant to this account is attempted and fails (the bank falls back to SEPA, ACWC). */
+  instantFails(account: string) { this.#instantFails.add(account.toUpperCase()) }
   /** Direct debits from this (external) debtor account are rejected with this SEPA code. */
   rejectCollections(debtorIban: string, code: string) { this.#collectionRejects.set(debtorIban.toUpperCase(), code) }
   reset() {
-    this.#rejects.clear(); this.#noInstant.clear(); this.#collectionRejects.clear()
+    this.#rejects.clear(); this.#noInstant.clear(); this.#instantFails.clear(); this.#collectionRejects.clear()
     this.sent.length = 0; this.collections.length = 0
   }
 
@@ -70,7 +77,8 @@ export class SimulatorRails implements Rails {
   async send(p: OutgoingPayment): Promise<RailsOutcome> {
     const target = (p.creditor.iban ?? p.creditor.account ?? '').toUpperCase()
     const reason = this.#rejects.get(target)
-    const outcome: RailsOutcome = reason ? { status: 'rejected', reason } : { status: 'settled' }
+    const outcome: RailsOutcome = p.scheme === 'INST' && this.#instantFails.has(target) ? { status: 'unavailable' }
+      : reason ? { status: 'rejected', reason } : { status: 'settled' }
     this.sent.push({ ...p, outcome })
     return outcome
   }
