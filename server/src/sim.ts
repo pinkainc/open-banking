@@ -8,6 +8,9 @@ import type { Emulator } from './emulator.js'
 import { fromMinor, toMinor } from './ledger.js'
 import { normalizeIban } from './iban.js'
 import { SimulatorRails } from './rails.js'
+import { isDate } from './statements/camt060.js'
+import { DEFAULT_LIMITS, type Limits, type ReportSettings } from './statements/reports.js'
+import { dateTallinn } from './time.js'
 
 export function simRoutes(emulator: Emulator) {
   const bad = (msg: string) => new ConnectError(400, 'BAD_REQUEST', msg)
@@ -80,6 +83,50 @@ export function simRoutes(emulator: Emulator) {
         debtor: b.debtor ?? { name: 'Simulated Debtor' }, remittance: b.remittance, reference: b.reference, endToEndId: b.endToEndId,
       })
       return { iban, accountServicerReference: r.servicerRef, balances: await balances(iban) }
+    })
+
+    // Account reports: automatic end-of-day statement and payment limits per customer.
+    const reportCustomer = (req: { params: unknown }) => {
+      const { country, code } = req.params as { country: string; code: string }
+      const c = emulator.directory.get({ code, country: country.toUpperCase() })
+      if (!c) throw new ConnectError(404, 'NOT_FOUND', `no customer ${country}/${code}`)
+      return c
+    }
+    const reportView = (c: { code: string; country: string }) => {
+      const s = emulator.reports.settings(c)
+      return { code: c.code, country: c.country, automaticStatement: s.automaticStatement ?? null, limits: { ...DEFAULT_LIMITS, ...s.limits } }
+    }
+    app.get('/reports/:country/:code', async (req) => reportView(reportCustomer(req)))
+    app.put('/reports/:country/:code', async (req) => {
+      const c = reportCustomer(req)
+      const b = (req.body ?? {}) as { automaticStatement?: unknown; limits?: Record<string, unknown> }
+      const s: ReportSettings = {}
+      if ('automaticStatement' in b) {
+        const v = b.automaticStatement
+        if (v !== null && v !== '08' && v !== '02') throw bad('automaticStatement must be "08", "02" or null')
+        s.automaticStatement = v ?? undefined
+      }
+      if (b.limits !== undefined) {
+        if (typeof b.limits !== 'object' || b.limits === null) throw bad('limits must be an object')
+        const limits: Partial<Limits> = {}
+        for (const [k, v] of Object.entries(b.limits)) {
+          if (k !== 'daily' && k !== 'monthly' && k !== 'instant') throw bad(`unknown limit ${k}`)
+          amount(v)
+          limits[k] = v as string
+        }
+        s.limits = { ...emulator.reports.settings(c).limits, ...limits }
+      }
+      emulator.reports.configure(c, s)
+      return reportView(c)
+    })
+    // Sends the automatic statements of a finished day now (default: every day finished
+    // since the last run, as the clock-driven tick does).
+    app.post('/end-of-day', async (req) => {
+      const b = (req.body ?? {}) as { date?: unknown }
+      if (b.date === undefined) return { messages: emulator.reports.tick() }
+      if (typeof b.date !== 'string' || !isDate(b.date)) throw bad('date must be YYYY-MM-DD')
+      if (b.date >= dateTallinn(emulator.clock.now())) throw bad('date must be a finished day (Europe/Tallinn)')
+      return { date: b.date, messages: emulator.reports.endOfDay(b.date) }
     })
 
     app.post('/rails/reject', async (req) => {

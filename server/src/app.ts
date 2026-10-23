@@ -196,6 +196,20 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     return accepted(reply, id)
   })
 
+  // --- Account information ---------------------------------------------------------
+  // camt.060 in, 202 now; the camt.053 pages / camt.052 report (or an <Errors> document
+  // of the same type) arrive in the inbox. A body that is not a camt.060 at all is
+  // answered there too, as errStatement_RequestInvalid.
+  const report = (kind: 'statement' | 'balance') => async (req: FastifyRequest, reply: FastifyReply) => {
+    const c = caller(req)
+    const id = requestId()
+    const body = typeof req.body === 'string' ? req.body : ''
+    await (kind === 'statement' ? emulator.reports.statement(body, c.customer, id) : emulator.reports.balance(body, c.customer, id))
+    return accepted(reply, id)
+  }
+  app.post('/account-statement', report('statement'))
+  app.post('/account-balance', report('balance'))
+
   if (opts.sim !== false) app.register(simRoutes(emulator), { prefix: '/_sim' })
   return app
 }

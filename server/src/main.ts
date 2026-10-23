@@ -28,6 +28,8 @@ if (!existsSync(xsdDir)) console.error('note: no XSDs in reference/xsd (scripts/
 const app = buildApp({ emulator, https: tls, sim: env.SIM !== '0' })
 if (env.LOG) app.addHook('onResponse', async (req, reply) => console.error(`${req.method} ${req.url} ${reply.statusCode}`))
 setInterval(() => emulator.inbox.purge(), 60 * 60 * 1000).unref()
+// Automatic end-of-day statements: checked every minute, sent once per finished day.
+if (env.EOD_STATEMENTS !== '0') setInterval(() => emulator.reports.tick(), 60 * 1000).unref()
 for (const signal of ['SIGTERM', 'SIGINT'] as const) process.on(signal, () => process.exit(0))
 const port = Number(env.PORT ?? 8443)
 await app.listen({ port, host: env.HOST ?? '127.0.0.1' })

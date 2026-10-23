@@ -137,3 +137,75 @@ export async function balance(ctx: Ctx, iban: string, ccy = 'EUR') {
   const b = (await ctx.emulator.ledger.balances(iban))[ccy]
   return b ? (Number(b.balance) / 100).toFixed(2) : '0.00'
 }
+
+// --- Account reports (L2) ------------------------------------------------------------
+
+export interface ReportReq {
+  /** camt.060 version: '05' (default) or '03'. */
+  version?: '05' | '03'
+  kind?: 'statement' | 'balance'
+  iban?: string
+  frDt?: string | null
+  toDt?: string
+  frTm?: string
+  toTm?: string
+  prtry?: string
+  msgId?: string
+  /** ReqdMsgNmId; default the right answer for kind and version. */
+  reqd?: string
+}
+
+let rq = 0
+/** A camt.060.001.05/.03 Account Reporting Request. frDt null leaves RptgPrd out. */
+export function camt060(o: ReportReq = {}) {
+  const v = o.version ?? '05'
+  const kind = o.kind ?? 'statement'
+  const reqd = o.reqd ?? (kind === 'statement' ? (v === '05' ? 'camt.053.001.08' : 'camt.053.001.02') : (v === '05' ? 'camt.052.001.08' : 'camt.052.001.06'))
+  const frDt = o.frDt === undefined ? '2026-03-10' : o.frDt
+  // FrToTm is optional in .05 and mandatory in .03 (ignored for DATE requests).
+  const frTm = o.frTm ?? (v === '03' ? '00:00:00' : undefined)
+  const tm = frTm ? `<FrToTm><FrTm>${frTm}</FrTm>${o.toTm ? `<ToTm>${o.toTm}</ToTm>` : ''}</FrToTm>` : ''
+  const prd = frDt === null ? '' : `<RptgPrd><FrToDt><FrDt>${frDt}</FrDt>${o.toDt ? `<ToDt>${o.toDt}</ToDt>` : ''}</FrToDt>${tm}<Tp>ALLL</Tp></RptgPrd>`
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.060.001.${v}">
+  <AcctRptgReq>
+    <GrpHdr><MsgId>${o.msgId ?? `RPT-${++rq}-${Date.now()}`}</MsgId><CreDtTm>2026-03-10T10:00:00Z</CreDtTm></GrpHdr>
+    <RptgReq>
+      <ReqdMsgNmId>${reqd}</ReqdMsgNmId>
+      <Acct><Id><IBAN>${o.iban ?? C1.iban}</IBAN></Id></Acct>
+      <AcctOwnr><Pty/></AcctOwnr>
+      ${prd}
+      ${o.prtry ? `<ReqdBalTp><CdOrPrtry><Prtry>${o.prtry}</Prtry></CdOrPrtry></ReqdBalTp>` : ''}
+    </RptgReq>
+  </AcctRptgReq>
+</Document>`
+}
+
+/**
+ * POSTs a camt.060 to /account-statement or /account-balance (202 expected) and returns
+ * the inbox messages answering it, in order, with their headers.
+ */
+export async function report(ctx: Ctx, o: ReportReq | string, opts: { kind?: 'statement' | 'balance'; as?: string; headers?: Record<string, string> } = {}) {
+  const kind = opts.kind ?? (typeof o === 'string' ? 'statement' : o.kind ?? 'statement')
+  const body = typeof o === 'string' ? o : camt060({ ...o, kind })
+  const res = await call(ctx, { method: 'POST', url: kind === 'statement' ? '/account-statement' : '/account-balance', body, as: opts.as, headers: opts.headers })
+  if (res.statusCode !== 202) throw new Error(`expected 202, got ${res.statusCode}: ${res.body}`)
+  const id = res.headers['message-request-id'] as string
+  const msgs = await drain(ctx, opts.as ?? C1.code, opts.headers)
+  return { id, msgs: msgs.filter((m) => m.requestId === id), all: msgs }
+}
+
+/** The <Error> of an <Errors> answer. */
+export function reportError(m: { doc: any }) {
+  const e = m.doc?.Errors?.Error
+  return e ? { code: String(e.ErrorCode), description: String(e.Description), field: e.Field === undefined ? undefined : String(e.Field) } : undefined
+}
+
+/** Asserts a message against its published XSD when there is one; returns whether it was checked. */
+export async function schemaValid(body: string): Promise<boolean> {
+  const ns = /xmlns="urn:iso:std:iso:20022:tech:xsd:([^"]+)"/.exec(body)?.[1]
+  if (!HAVE_REFERENCE || !ns || !xsd.has(ns)) return false
+  const errors = await xsd.validate(body, ns)
+  if (errors.length) throw new Error(`${ns} is not schema-valid: ${errors.join('; ')}\n${body.slice(0, 4000)}`)
+  return true
+}
