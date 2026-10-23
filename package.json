@@ -12,6 +12,7 @@
     "start": "tsx server/src/main.ts",
     "typecheck": "tsc -p .",
     "test": "node --import tsx --test 'server/test/**/*.test.ts'",
+    "coverage": "c8 --include 'server/src/**' --exclude server/src/main.ts --reporter text --reporter text-summary --reporter html --report-dir .rec/coverage npm test",
     "check": "scripts/check.sh",
     "dev-ca": "scripts/dev-ca.sh",
     "fetch-reference": "scripts/fetch-reference.sh"
@@ -23,6 +24,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
+    "c8": "^12.0.0",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   }
