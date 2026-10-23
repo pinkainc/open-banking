@@ -286,6 +286,15 @@ describe('synchronous refusals', () => {
     const r = await call(ctx, { method: 'POST', url: '/payment', body: 'PK..', contentType: 'application/vnd.etsi.asic-e+zip' })
     assert.equal(r.statusCode, 415)
   })
+  test('POST /payments/oneoff was removed on 06.01.2026: 404, nothing queued (decision 520)', async () => {
+    for (const contentType of ['application/xml', 'application/json']) {
+      const r = await call(ctx, { method: 'POST', url: '/payments/oneoff', body: contentType === 'application/xml' ? one({ amount: '1.00' }) : '{}', contentType })
+      assert.equal(r.statusCode, 404, r.body)
+      assert.equal(r.headers['message-request-id'], undefined)
+    }
+    assert.equal((await call(ctx, { url: '/messages/next' })).statusCode, 204)
+    assert.equal(await balance(ctx, C1.iban), '10000.00')
+  })
 })
 
 describe('pain.001.001.03', () => {
