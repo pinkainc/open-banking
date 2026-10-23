@@ -1,68 +1,71 @@
 # TODO
 
-How L0–L3 were built and what to watch for: [docs/2026-10-23-orkestracija-subagenata.md](docs/2026-10-23-orkestracija-subagenata.md).
+Working list, kept in the repo so progress survives between sessions. Checked items are
+done and verified (tests green in `npm run check`). Decisions go into
+[docs/decisions.md](docs/decisions.md).
 
-## Done: L0 + L1 (2026-10-23)
+Plan to full parity, session by session: [docs/2026-10-23-plan-do-paritete.md](docs/2026-10-23-plan-do-paritete.md);
+handoff per session in [docs/handoffs/](docs/handoffs/) (chain rules and status in its README).
+How L0–L3 were built: [docs/2026-10-23-orkestracija-subagenata.md](docs/2026-10-23-orkestracija-subagenata.md).
 
-Server, 99 node:test cases (all green in `npm run check`), README, `npm run coverage`.
-Spec mismatches against the docs mirror fixed: messages-API 404/400 as JSON, DELETE of
-a never-existing id 404, bulk delete 200/207/400, empty list 204, `X-Bank-Code`, 413
-above 5 MB, `X-Idempotency-Key` 409, heartbeat `AuthorizedUser` = certificate holder
-(docs/decisions.md 8, 9, 11, 25-28).
+Legend: `[x]` done · `[ ]` open · `[~]` in progress · `(?)` needs a sandbox recording first ·
+`→ Sn` planned session
 
-## Done: L2 + L3 (2026-10-23)
+## L0 — transport, identity, inbox
 
-Statements and balances (decisions 100–116) and virtual IBANs (200–212), built in
-parallel worktrees and merged; `npm run check` 204/204, no skips with the docs mirror.
+- [x] mTLS identity, service-provider scoping, heartbeat (GET, `/mq`, POST), inbox (next / list / count / get / delete / bulk delete), `Filter-Response-Type`, 5-day expiry
+- [x] Spec fixes from the docs mirror: messages-API 404/400 as JSON, DELETE of a never-existing id 404, bulk delete 200/207/400, empty list 204, `X-Bank-Code`, 413 above 5 MB, `X-Idempotency-Key` 409, heartbeat `AuthorizedUser` = certificate holder (decisions 8, 9, 11, 25–28)
+- [ ] `X-Idempotency-Key` (decision 28) is documented only for the UK host; the EE host detects duplicates by pain.001 `MsgId` alone (mirror `ssot/ee-vs-uk.md`). Scope it per host → S3
+- [ ] Per-contract service grants: 403 "User has not been granted the requested service" (services list per customer in the seed) → S3
+- [ ] Certificate validity checks with their documented 403 texts (not yet valid, expired, "User authentication certificate is different than expected") → S3
+- [ ] gzip/deflate of inbox messages ≥10 MB (`Accept-Encoding`), 500 without it → S3
+- [ ] Bounded memory: inbox tombstones and remembered MsgIds / idempotency keys grow without limit → S3
+- [ ] (?) Repeat DELETE, bulk statuses, heartbeat/mq type, idempotency and 413 on the EE host (`ssot/sandbox-questions.md`) → S8
 
-## Open in L2 / L3
+## L1 — payments core
 
-- VIBAN shown in camt.053 / camt.052 of the master account (samples camt.060 and
-  camt.053A in `PAYMENT_VIBAN_SEPA`).
-- Payment limits (10k daily / 100k monthly / 15k instant) are reported, not enforced.
-- camt.053.001.02 and camt.052.001.06 get structural checks only (no published XSD);
-  the public ISO 20022 schemas would allow real validation.
-- Bank postal address (`PstlAdr`) is missing from statements.
-- Sandbox: are statement and VIBAN business errors inbox messages (decisions 100, 200;
-  sandbox question 11)? How do INTM balances look?
+- [x] `POST /payment` pain.001.001.09 / .03, XSD validation, pain.002 group and transaction errors, camt.054 for every debit and credit, scheme selection on simulated rails
+- [ ] `payment.oneoff` → S3
+- [ ] Pending payments (SCA in the internet bank → PDNG, approve via `/_sim`), manual review (PDNG NARR) → S3
+- [ ] ACWC "Payment processed as European payment" when an automatic instant payment falls back to SEPA after being attempted → S3
+- [ ] Code page 1257 folding of free text echoed into pain.002 / camt.054 → S3
+- [ ] Duplicate-payment detection (InstrId), daily/monthly limits enforced (10k / 100k / 15k instant) → S3
+- [ ] PSP use-case samples (`PAYMENT_PSP_USECASES/case1..8`) once agency accounts exist; `PAYMENT_SWIFT_*` with their own expectations → S6
 
-## Open in L0 / L1
+## L2 — account information
 
-- `X-Idempotency-Key` (decision 28) is documented only for the UK host (docs.lhv.com);
-  the EE host detects duplicates by pain.001 `MsgId` alone (mirror `ssot/ee-vs-uk.md`).
-  Scope it per host.
+- [x] camt.060 → camt.053.001.08 / .02 and camt.052.001.08 / .06, paging, INTM, `errStatement_*`, automatic end-of-day statement (decisions 100–116)
+- [ ] Real XSD validation of camt.053.001.02 and camt.052.001.06 with the public ISO 20022 schemas → S3
+- [ ] Bank postal address (`PstlAdr`) in statements → S3
+- [ ] (?) Are statement business errors inbox messages (decision 100, sandbox question 11)? How do INTM balances look? → S8
 
-- Per-contract service grants: 403 "User has not been granted the requested service"
-  (needs a services list per customer in the seed).
-- Certificate validity checks with their documented 403 texts (not yet valid, expired,
-  "User authentication certificate is different than expected" when the certificate is
-  not the one on the contract). Today any certificate from the trusted CA whose code
-  is known is accepted.
-- gzip/deflate of inbox messages ≥10 MB (`Accept-Encoding`), 500 without it.
-- ACWC "Payment processed as European payment" when an automatic instant payment falls
-  back to SEPA after being attempted (today the fallback is decided up front, no ACWC).
-- Code page 1257 folding of free text echoed into pain.002 / camt.054.
-- Bounded memory: inbox tombstones (ids kept so a repeat DELETE is 200) and remembered
-  MsgIds / idempotency keys grow without limit.
-- Run the PSP use-case samples (`PAYMENT_PSP_USECASES/case1..8`) once agency accounts
-  and ultimate-debtor fields exist (L6), and `PAYMENT_SWIFT_*` with their own expectations.
-- Sandbox recordings: work through the mirror's `ssot/sandbox-questions.md` (repeat
-  DELETE, bulk statuses, heartbeat/mq type, idempotency and 413 on the EE host) and
-  revise the decisions they settle.
+## L3 — virtual IBANs
 
-## Next levels
+- [x] open / bulk / modify / info / close, 13 error codes, status notifications, payments to and from VIBANs (decisions 200–212)
+- [ ] VIBAN shown in camt.053 / camt.052 of the master account (samples camt.060 and camt.053A in `PAYMENT_VIBAN_SEPA`) → S3
+- [ ] (?) VIBAN business errors: HTTP 4xx or inbox message (decision 200)? → S8
 
-- Pending payments (SCA in the internet bank → PDNG, approve via /_sim), manual review (PDNG NARR).
-- SEPA direct debit: pain.008, pain.007, collection notifications.
-- JSON services: FX trade offers, contracts, webhooks. EE and UK webhooks are two different
-  systems (mirror `ssot/ee-vs-uk.md`); the UK HMAC golden value is in the mirror.
-- UK flavour: `/accounts/*` (PascalCase JSON, AWS-style error bodies), CoP, Bacs, messages v2,
-  `x-bank-code: LHVEE` routing to EE services.
-- Agency account synchronisation (indirect scheme access).
-- Verification of payee.
-- Duplicate-payment detection (InstrId), daily/monthly limits, code page 1257 conversion.
-- Conformance harness: record exchanges against connect.test.lhv.eu once a sandbox
-  certificate exists; compare like open-ledger's conformance/ with a divergences file.
-- open-ledger as the backing `Ledger` (SDK/HTTP); real rails bridges (SEPA, SEPA Inst,
-  UK Faster Payments) behind `Rails`.
-- Persistence (Postgres) for inbox and ledger.
+## L4 — SEPA direct debit → S1
+
+- [~] `dd.sepa.collection` pain.008 → pain.002, pain.007, `dd.sepa.incoming_notification`, `dd.sepa.incoming_collection_refusal`, refunds in camt.054
+
+## L5 — value-added services
+
+- [ ] FX trade offers, contracts, EE webhooks → S2
+- [ ] VoP / CoP requester, messages v2, requests API → S4
+- [ ] Signed payments: `heartbeat.post` + BDOC/ASiC-E on `/payment`
+
+## UK flavour → S5
+
+- [ ] `/accounts/*` (PascalCase JSON, AWS-style error bodies), `x-bank-code: LHVEE` routing to EE services
+- [ ] UK webhooks with X-LHV-HMAC (golden value in the mirror), history, replay
+- [ ] Bacs: incoming notification, mandates, collection reject
+
+## L6 — agency / indirect scheme access → S6
+
+- [ ] Agency account synchronisation (+ v2), routing tables, VoP / CoP responder roles, merchant report
+
+## Core and conformance
+
+- [ ] Persistence (Postgres) for inbox and ledger; open-ledger as the backing `Ledger`; real rails bridges behind `Rails` → S7
+- [ ] Conformance harness: record exchanges against connect.test.lhv.eu once a sandbox certificate exists, divergences file → S8
