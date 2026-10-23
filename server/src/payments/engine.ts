@@ -17,7 +17,7 @@
 //                             /_sim decides
 //
 // Processing is synchronous: every message exists by the time POST /payment returns.
-import { BoundedSet, DEFAULT_BOUNDS, type Bounds } from '../bounded.js'
+import { BoundedMap, BoundedSet, DEFAULT_BOUNDS, type Bounds } from '../bounded.js'
 import type { Clock } from '../clock.js'
 import { keyOf, type Customer, type Directory } from '../directory.js'
 import { ibanChecksumOk, ibanCountry, isSepaCountry, normalizeIban } from '../iban.js'
@@ -46,7 +46,14 @@ export interface EngineOptions {
   onBooking?: (customer: Customer, b: Booking) => void
   /** Virtual IBANs: booked on their master account (L3). */
   virtual?: VirtualAccounts
+  /**
+   * The customer's Connect payment limits in EUR minor units: daily and monthly totals with
+   * what booked debits already used, and the per-payment SEPA Instant limit (decision 524).
+   */
+  limits?: (c: Customer) => PaymentLimits
 }
+
+export interface PaymentLimits { dailyFree: bigint; monthlyFree: bigint; instant: bigint }
 
 const SCHEMES = new Set(['INST', 'SEPA', 'TARGET2', 'ALL'])
 
@@ -80,6 +87,9 @@ export const R = {
   declinedTryEuropean: 'Payment declined, try European payment.',
   instantForbidden: 'Instant payment forbidden, try European payment.',
   technical: 'Technical problem. Try again',
+  duplicatePayment: 'Duplicate payment.',
+  dailyLimit: 'Insufficient daily limit available.',
+  monthlyLimit: 'Insufficient monthly limit available.',
 }
 
 /** Why a payment to a VIBAN that is not ACTIVE is refused: closed for good, or for now. */
@@ -101,6 +111,8 @@ interface Plan {
   creditorIban?: string; creditorAccount?: string; creditorV?: VirtualAccount; creditorOwner?: Customer
   /** External payments only; `automatic` when no scheme was requested. */
   scheme?: Scheme; automatic?: boolean
+  /** Duplicate-payment key, when the payment has an InstrId (decision 525). */
+  instrKey?: string
 }
 type ParkedKind = 'SCA' | 'REVIEW'
 export interface ParkedPayment {
@@ -114,11 +126,18 @@ const sameName = (a: string | undefined, b: string | undefined) =>
 
 export class PaymentEngine {
   #seenMsgIds: BoundedSet<string>
+  /** Payments with an InstrId that are not (yet) rejected: customer, InstrId, accounts, currency, amount (decision 525). */
+  #instrIds: BoundedMap<string, string>
+  /** EUR debits accepted but not yet in the journal, counted against the limits. */
+  #inflight = new Map<string, { customer: string; amount: bigint }>()
   #parked = new Map<string, { kind: ParkedKind; file: FileRef; plan: Plan; status: TxStatus }>()
   constructor(
     private directory: Directory, private ledger: Ledger, private rails: Rails, private inbox: Inbox,
     private clock: Clock, private bank: Bank, private opts: EngineOptions = {},
-  ) { this.#seenMsgIds = new BoundedSet(clock, opts.msgIds ?? DEFAULT_BOUNDS.msgIds) }
+  ) {
+    this.#seenMsgIds = new BoundedSet(clock, opts.msgIds ?? DEFAULT_BOUNDS.msgIds)
+    this.#instrIds = new BoundedMap(clock, opts.msgIds ?? DEFAULT_BOUNDS.msgIds)
+  }
 
   /** Handles one POST /payment body. Throws XmlSyntaxError when the body is not XML at all. */
   async submit(xml: string, customer: Customer, requestId: string): Promise<void> {
@@ -223,6 +242,11 @@ export class PaymentEngine {
     const debtorIban = normalizeIban(block.debtorIban!)
     const creditorIban = tx.creditorIban ? normalizeIban(tx.creditorIban) : undefined
     if (creditorIban && creditorIban === debtorIban) return rj(R.sameAccount)
+    // The same InstrId alone is no duplicate (PAYMENT_MULTI repeats one in a file); the
+    // same payment again is (decision 525).
+    const instrKey = tx.instrId
+      ? [keyOf(customer), tx.instrId, debtorIban, creditorIban ?? tx.creditorOther ?? '', tx.currency, amount].join('|') : undefined
+    if (instrKey && this.#instrIds.has(instrKey)) return rj(R.duplicatePayment)
     // A VIBAN debtor must be ACTIVE and named as its holder; the master account pays.
     const debtorV = this.opts.virtual?.resolve(debtorIban)
     if (debtorV && debtorV.status !== 'ACTIVE') return rj(R.debtorInactive)
@@ -233,21 +257,37 @@ export class PaymentEngine {
     if (creditorV && creditorV.status !== 'ACTIVE') return rj(inactiveCreditor(creditorV).reason, 'INTERNAL')
     const creditorAccount = creditorV?.master ?? creditorIban
     const creditorOwner = creditorAccount ? this.directory.ownerOf(creditorAccount) : undefined
-    const base = { block, tx, amount, currency: tx.currency!, debtorIban, debtorAccount, creditorIban, creditorAccount, creditorV, ref: servicerRef() }
-    if (creditorOwner) return { plan: { ...base, creditorOwner } }
+    const base = { block, tx, amount, currency: tx.currency!, debtorIban, debtorAccount, creditorIban, creditorAccount, creditorV, ref: servicerRef(), instrKey }
+    const planned = (plan: Plan) => {
+      if (instrKey) this.#instrIds.set(instrKey, plan.ref)
+      return { plan }
+    }
+    if (creditorOwner) return planned({ ...base, creditorOwner })
 
     if (creditorIban && this.opts.strictIban !== false && !ibanChecksumOk(creditorIban)) return rj(R.accountNumber)
     const requested = tx.scheme ?? block.scheme
-    const chosen = this.#scheme(requested, tx.currency!, creditorIban)
+    const instantLimit = this.opts.limits?.(customer).instant
+    const chosen = this.#scheme(requested, tx.currency!, creditorIban, instantLimit === undefined || amount <= instantLimit)
     if ('reject' in chosen) return rj(chosen.reject)
-    return { plan: { ...base, scheme: chosen.scheme, automatic: requested !== 'INST' && requested !== 'SEPA' && requested !== 'TARGET2' } }
+    return planned({ ...base, scheme: chosen.scheme, automatic: requested !== 'INST' && requested !== 'SEPA' && requested !== 'TARGET2' })
   }
 
   /** A checked payment goes ahead: funds, then booking (internal) or the rails (external). */
   async #execute(file: FileRef, p: Plan): Promise<Step> {
     const { block, tx } = p
-    const rj = (reason: string, scheme?: string): Step => ({ status: { block, tx, status: 'RJCT', reason, scheme } })
+    const rj = (reason: string, scheme?: string): Step => {
+      this.#forget(p)
+      return { status: { block, tx, status: 'RJCT', reason, scheme } }
+    }
     const scheme = p.scheme ?? 'INTERNAL'
+    // Funds first, then the Connect limits (EUR payments only, decision 524).
+    if ((await this.ledger.available(p.debtorAccount, p.currency)) < p.amount) return rj(R.funds, scheme)
+    if (p.currency === 'EUR' && this.opts.limits) {
+      const l = this.opts.limits(file.customer)
+      const inflight = this.#inflightOf(file.customer)
+      if (p.amount > l.dailyFree - inflight) return rj(R.dailyLimit, scheme)
+      if (p.amount > l.monthlyFree - inflight) return rj(R.monthlyLimit, scheme)
+    }
     const review = MANUAL_REVIEW.has(normName(tx.creditorName))
     if (p.creditorOwner && !review) {
       try {
@@ -256,6 +296,7 @@ export class PaymentEngine {
         if (e instanceof InsufficientFunds) return rj(R.funds, scheme)
         throw e
       }
+      this.#hold(file.customer, p)
       return this.#internalBooked(file, p)
     }
     try {
@@ -264,6 +305,7 @@ export class PaymentEngine {
       if (e instanceof InsufficientFunds) return rj(R.funds, scheme)
       throw e
     }
+    this.#hold(file.customer, p)
     const accepted: TxStatus = { block, tx, status: 'ACSP', servicerRef: p.ref, scheme, ...(p.creditorOwner ? { creditorBic: this.bank.bic } : {}) }
     // Manual review (sanctions screening): accepted first, then PDNG until /_sim decides.
     if (review) return { status: accepted, next: async () => ({ status: this.#park('REVIEW', file, p, { ...accepted, status: 'PDNG', reason: R.manualReview }) }) }
@@ -308,9 +350,31 @@ export class PaymentEngine {
       const changed: TxStatus = { ...accepted, status: 'ACWC', reason: R.europeanPayment, scheme: 'SEPA' }
       return { status: changed, next: () => this.#rails(file, sepa, { ...changed, status: 'ACSP', reason: undefined }) }
     }
-    await this.ledger.release(p.ref)
+    await this.#release(p)
     const reason = outcome.status === 'rejected' ? outcome.reason : scheme === 'INST' ? R.declinedTryEuropean : R.technical
     return { status: { ...accepted, status: 'RJCT', reason, scheme } }
+  }
+
+  /** A rejected payment no longer blocks its InstrId. */
+  #forget(p: Plan) {
+    if (p.instrKey && this.#instrIds.get(p.instrKey) === p.ref) this.#instrIds.delete(p.instrKey)
+  }
+
+  /** Counts an accepted EUR debit against the limits until its camt.054 is booked in the journal. */
+  #hold(customer: Customer, p: Plan) {
+    if (p.currency === 'EUR') this.#inflight.set(p.ref, { customer: keyOf(customer), amount: p.amount })
+  }
+
+  async #release(p: Plan) {
+    await this.ledger.release(p.ref)
+    this.#inflight.delete(p.ref)
+    this.#forget(p)
+  }
+
+  #inflightOf(customer: Customer) {
+    let sum = 0n
+    for (const h of this.#inflight.values()) if (h.customer === keyOf(customer)) sum += h.amount
+    return sum
   }
 
   /** Parks a payment until /_sim decides: waiting for SCA in the internet bank, or in manual review. */
@@ -347,9 +411,10 @@ export class PaymentEngine {
       byFile.set(p.file, steps)
       const { block, tx } = p.plan
       if (p.kind === 'SCA') {
+        if (!approve) this.#forget(p.plan)
         steps.push(approve ? await this.#execute(p.file, p.plan) : { status: { block, tx, status: 'RJCT', reason: reason ?? R.requestedByCustomer, scheme: p.status.scheme } })
       } else if (!approve) {
-        await this.ledger.release(ref)
+        await this.#release(p.plan)
         steps.push({ status: { ...p.status, status: 'RJCT', reason: reason ?? R.regulatory } })
       } else if (p.plan.creditorOwner) {
         await this.ledger.commit(ref, p.plan.creditorAccount!)
@@ -363,15 +428,15 @@ export class PaymentEngine {
   }
 
   /** Scheme selection as documented: requested scheme if possible, else automatic. */
-  #scheme(requested: string | undefined, currency: string, creditorIban?: string): { scheme: Scheme } | { reject: string } {
+  #scheme(requested: string | undefined, currency: string, creditorIban: string | undefined, withinInstantLimit: boolean): { scheme: Scheme } | { reject: string } {
     const sepa = !!creditorIban && isSepaCountry(ibanCountry(creditorIban))
     if (requested === 'INST' || requested === 'SEPA' || requested === 'TARGET2') {
       if (currency !== 'EUR') return { reject: R.currency }
       if (!sepa && requested !== 'TARGET2') return { reject: R.declined }
-      if (requested === 'INST' && !this.rails.instantReachable(creditorIban!)) return { reject: R.instantForbidden }
+      if (requested === 'INST' && (!this.rails.instantReachable(creditorIban!) || !withinInstantLimit)) return { reject: R.instantForbidden }
       return { scheme: requested }
     }
-    if (currency === 'EUR' && sepa) return { scheme: this.rails.instantReachable(creditorIban!) ? 'INST' : 'SEPA' }
+    if (currency === 'EUR' && sepa) return { scheme: withinInstantLimit && this.rails.instantReachable(creditorIban!) ? 'INST' : 'SEPA' }
     return { scheme: 'SWIFT' }
   }
 
@@ -398,6 +463,7 @@ export class PaymentEngine {
   }
 
   #notify(customer: Customer, b: Booking) {
+    if (b.direction === 'DBIT') this.#inflight.delete(b.servicerRef)
     this.opts.onBooking?.(customer, b)
     // Notifications carry no Message-Request-Id.
     this.inbox.add({ customer, type: 'CREDIT_DEBIT_NOTIFICATION', body: camt054(b, customer.camt054, this.bank) })

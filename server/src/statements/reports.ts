@@ -236,7 +236,13 @@ export class AccountReports {
     return camt052({ version, created: now, at: now, date: today, iban, blocks })
   }
 
-  #limits(owner: Customer, now: Date, today: string): ReportBalance[] {
+  /**
+   * The customer's Connect payment limits now: totals, what today's / this month's EUR
+   * debits (Tallinn calendar) leave free, and the per-payment instant limit. The payment
+   * engine enforces these (decision 524).
+   */
+  paymentLimits(owner: Customer, now = this.d.clock.now()) {
+    const today = dateTallinn(now)
     const l = { ...DEFAULT_LIMITS, ...this.settings(owner).limits }
     let day = 0n, month = 0n
     for (const e of this.d.journal.all(owner.accounts)) {
@@ -247,12 +253,17 @@ export class AccountReports {
     }
     const free = (total: bigint, used: bigint) => (total > used ? total - used : 0n)
     const monthly = toMinor(l.monthly), daily = toMinor(l.daily)
+    return { monthly, daily, monthlyFree: free(monthly, month), dailyFree: free(daily, day), instant: toMinor(l.instant) }
+  }
+
+  #limits(owner: Customer, now: Date, _today: string): ReportBalance[] {
+    const { monthly, daily, monthlyFree, dailyFree, instant } = this.paymentLimits(owner, now)
     return [
       { prtry: 'PAYMENT_LIMIT_MONTHLY_TOTAL', amount: monthly },
-      { prtry: 'PAYMENT_LIMIT_MONTHLY_FREE', amount: free(monthly, month) },
+      { prtry: 'PAYMENT_LIMIT_MONTHLY_FREE', amount: monthlyFree },
       { prtry: 'PAYMENT_LIMIT_DAILY_TOTAL', amount: daily },
-      { prtry: 'PAYMENT_LIMIT_DAILY_FREE', amount: free(daily, day) },
-      { prtry: 'PAYMENT_LIMIT_INSTANT', amount: toMinor(l.instant) },
+      { prtry: 'PAYMENT_LIMIT_DAILY_FREE', amount: dailyFree },
+      { prtry: 'PAYMENT_LIMIT_INSTANT', amount: instant },
     ]
   }
 

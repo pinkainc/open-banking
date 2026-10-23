@@ -78,7 +78,7 @@ export class Emulator {
     })
     this.engine = new PaymentEngine(this.directory, this.ledger, this.rails, this.inbox, this.clock, this.bank, {
       strictIban: opts.strictIban, pain00103Until: opts.pain00103Until ?? '2026-11-15', xsd, virtual: this.viban.registry, msgIds,
-      onBooking: (_c, b) => { this.journal.record(b) },
+      onBooking: (_c, b) => { this.journal.record(b) }, limits: (c) => this.reports.paymentLimits(c),
     })
     this.directDebit = new DirectDebitService({
       directory: this.directory, ledger: this.ledger, rails: this.rails, inbox: this.inbox, clock: this.clock, bank: this.bank,
@@ -101,7 +101,14 @@ export class Emulator {
   }
 
   async addCustomer(c: CustomerInput) {
+    if (c.limits !== undefined) {
+      for (const [k, v] of Object.entries(c.limits)) {
+        if (k !== 'daily' && k !== 'monthly' && k !== 'instant') throw new Error(`unknown limit ${k}`)
+        toMinor(v as string)
+      }
+    }
     const customer = this.directory.add(c)
+    if (c.limits) this.reports.configure(customer, { limits: { ...c.limits } })
     for (const a of c.accounts ?? []) {
       if (typeof a === 'string') continue
       if (a.viban) this.viban.registry.agreement(a.iban)

@@ -1,6 +1,7 @@
-// Payments that wait: pending payments (SCA in the internet bank, decided via
-// /_sim/payments/pending) and the bank's manual review (PDNG "In manual review").
-// Every produced pain.002 / camt.054 is validated against the published XSDs.
+// Payment flows beyond the plain ones: pending payments (SCA in the internet bank,
+// decided via /_sim/payments/pending), manual review (PDNG "In manual review"), the
+// SEPA Instant → SEPA fallback (ACWC), limits and duplicate payments. Every produced
+// pain.002 / camt.054 is validated against the published XSDs.
 import assert from 'node:assert/strict'
 import { beforeEach, describe, test } from 'node:test'
 import { many } from '../src/xml.js'
@@ -282,5 +283,97 @@ describe('SEPA Instant falls back to SEPA (decision 523)', () => {
     await call(ctx, { method: 'POST', url: '/_sim/rails/reset' })
     assert.deepEqual((await pay(one({ amount: '1.00', creditorIban: DE_IBAN }))).reports.map((x) => x.txs[0].sts), ['ACSP', 'ACSC'])
     assert.equal((await call(ctx, { method: 'POST', url: '/_sim/rails/instant-failure', body: {} })).statusCode, 400)
+  })
+})
+
+describe('payment limits (decision 524)', () => {
+  const fund = (amount: string, iban = C1.iban) => call(ctx, { method: 'POST', url: `/_sim/accounts/${iban}/fund`, body: { amount } })
+  const sts = (r: Awaited<ReturnType<typeof pay>>) => r.reports.map((x) => x.txs.map((t) => t.reason ? `${t.sts} ${t.reason}` : t.sts))
+
+  test('daily 10 000 EUR by default: what the file already used counts, internal and reserved external alike', async () => {
+    await fund('50000.00')
+    const r = await pay(pain001([{ txs: [{ amount: '6000.00' }, { amount: '4000.01', creditorIban: DE_IBAN }, { amount: '4000.00', creditorIban: DE_IBAN }] }]))
+    assert.deepEqual(sts(r)[0], ['ACSC', 'RJCT Insufficient daily limit available.', 'ACSP'])
+    assert.equal(r.reports[0].grpSts, 'PART')
+    assert.deepEqual(sts(await pay(one({ amount: '0.01' }))), [['RJCT Insufficient daily limit available.']])
+    // The next Tallinn day has a fresh daily limit.
+    ctx.clock.advance(86_400_000)
+    assert.deepEqual(sts(await pay(one({ amount: '10000.00' }))), [['ACSC']])
+  })
+
+  test('monthly limit from the seed; funds are checked before limits', async () => {
+    const s = seed()
+    s.customers[0].limits = { monthly: '15000.00' }
+    s.customers[0].accounts = [{ iban: C1.iban, balances: { EUR: '30000.00' } }]
+    ctx = await setup({}, s)
+    assert.deepEqual(sts(await pay(one({ amount: '30000.01' }))), [['RJCT Insufficient funds available.']])
+    assert.deepEqual(sts(await pay(one({ amount: '9000.00' }))), [['ACSC']])
+    ctx.clock.advance(86_400_000)
+    assert.deepEqual(sts(await pay(one({ amount: '6000.01' }))), [['RJCT Insufficient monthly limit available.']])
+    assert.deepEqual(sts(await pay(one({ amount: '6000.00' }))), [['ACSC']])
+    // camt.052 PAYMENT_LIMITS reports the seed's limit.
+    assert.equal((await call(ctx, { url: `/_sim/reports/EE/${C1.code}` })).json().limits.monthly, '15000.00')
+  })
+
+  test('a payment rejected by the rails gives its limit back; other currencies are not limited', async () => {
+    await fund('20000.00')
+    await call(ctx, { method: 'POST', url: '/_sim/rails/reject', body: { account: DE_IBAN, reason: 'Account closed.' } })
+    assert.deepEqual(sts(await pay(one({ amount: '10000.00', creditorIban: DE_IBAN }))), [['ACSP'], ['RJCT Account closed.']])
+    assert.deepEqual(sts(await pay(one({ amount: '10000.00' }))), [['ACSC']])
+    assert.deepEqual(sts(await pay(one({ amount: '400.00', currency: 'USD', creditorIban: 'GB29NWBK60161331926819' }))).map((x) => x[0]), ['ACSP', 'ACSC'])
+  })
+
+  test('SEPA Instant per-payment limit (15 000 EUR default): above it automatic goes SEPA, requested INST is refused', async () => {
+    await fund('50000.00')
+    await call(ctx, { method: 'PUT', url: `/_sim/reports/EE/${C1.code}`, body: { limits: { daily: '100000.00', instant: '100.00' } } })
+    const scheme = async (amount: string, s?: string) => (await pay(one({ amount, creditorIban: DE_IBAN, scheme: s }))).reports[0].txs[0]
+    assert.equal((await scheme('100.00')).scheme, 'INST')
+    assert.equal((await scheme('100.01')).scheme, 'SEPA')
+    const refused = await scheme('100.01', 'INST')
+    assert.deepEqual([refused.sts, refused.reason], ['RJCT', 'Instant payment forbidden, try European payment.'])
+    await call(ctx, { method: 'PUT', url: `/_sim/reports/EE/${C1.code}`, body: { limits: { instant: '15000.00' } } })
+    assert.equal((await scheme('15000.00')).scheme, 'INST')
+    assert.equal((await scheme('15000.01')).scheme, 'SEPA')
+  })
+
+  test('a seed with an unknown limit or a bad amount is refused', async () => {
+    for (const limits of [{ weekly: '1.00' }, { daily: 'lots' }] as any[]) {
+      const s = seed()
+      s.customers[0].limits = limits
+      await assert.rejects(setup({}, s))
+    }
+  })
+})
+
+describe('duplicate payments (decision 525)', () => {
+  test('the same payment with the same InstrId again: RJCT "Duplicate payment.", nothing moves', async () => {
+    assert.equal((await pay(one({ amount: '2.00', instrId: 'DUP-1' }))).reports[0].txs[0].sts, 'ACSC')
+    const again = await pay(one({ amount: '2.00', instrId: 'DUP-1' }))
+    assert.deepEqual(again.reports[0].txs.map((t) => [t.sts, t.reason]), [['RJCT', 'Duplicate payment.']])
+    assert.equal(again.reports[0].grpSts, 'RJCT')
+    assert.equal(await balance(ctx, C1.iban), '9998.00')
+    // Also inside one file.
+    const file = await pay(pain001([{ txs: [{ amount: '1.00', instrId: 'DUP-2' }, { amount: '1.00', instrId: 'DUP-2' }] }]))
+    assert.deepEqual(file.reports[0].txs.map((t) => t.sts), ['ACSC', 'RJCT'])
+  })
+
+  test('the same InstrId for another amount, creditor or customer is no duplicate (PAYMENT_MULTI)', async () => {
+    await pay(one({ amount: '2.00', instrId: 'SAME' }))
+    assert.equal((await pay(one({ amount: '3.00', instrId: 'SAME' }))).reports[0].txs[0].sts, 'ACSC')
+    assert.equal((await pay(one({ amount: '2.00', instrId: 'SAME', creditorIban: DE_IBAN }))).reports[0].txs[0].sts, 'ACSP')
+    assert.equal((await pay(pain001([{ debtorIban: C2.iban, debtorName: 'Demo Customer 2', txs: [{ amount: '2.00', instrId: 'SAME', creditorIban: C1.iban }] }]), C2.code)).reports[0].txs[0].sts, 'ACSC')
+  })
+
+  test('a rejected payment can be sent again; a pending one counts', async () => {
+    assert.equal((await pay(one({ amount: '20000.00', instrId: 'R-1' }))).reports[0].txs[0].reason, 'Insufficient funds available.')
+    await call(ctx, { method: 'POST', url: `/_sim/accounts/${C1.iban}/fund`, body: { amount: '9000.00' } })
+    await call(ctx, { method: 'PUT', url: `/_sim/reports/EE/${C1.code}`, body: { limits: { daily: '20000.00' } } })
+    assert.equal((await pay(one({ amount: '19000.00', instrId: 'R-1' }))).reports[0].txs[0].sts, 'ACSC')
+    await setPending()
+    const ref = (await pay(one({ amount: '1.00', instrId: 'P-9' }))).reports[0].txs[0].ref!
+    assert.equal((await pay(one({ amount: '1.00', instrId: 'P-9' }))).reports[0].txs[0].reason, 'Duplicate payment.')
+    await decide('reject', { refs: [ref] })
+    await messages()
+    assert.equal((await pay(one({ amount: '1.00', instrId: 'P-9' }))).reports[0].txs[0].sts, 'PDNG')
   })
 })

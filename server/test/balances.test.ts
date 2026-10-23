@@ -101,11 +101,13 @@ describe('POST /account-balance (camt.052.001.08)', () => {
     test('limits set through /_sim/reports; a free limit never goes below zero', async () => {
       const put = await call(ctx, { method: 'PUT', url: '/_sim/reports/EE/12340001', body: { limits: { daily: '50.00', instant: '20.00' } } })
       assert.equal(put.json().limits.daily, '50.00')
-      await call(ctx, { method: 'POST', url: '/payment', body: pain001([{ txs: [{ amount: '60.00' }] }]) })
+      await call(ctx, { method: 'POST', url: '/payment', body: pain001([{ txs: [{ amount: '40.00' }] }]) })
       await drain(ctx)
+      // Lowered below what today's payments used (limits are enforced on payments, decision 524).
+      await call(ctx, { method: 'PUT', url: '/_sim/reports/EE/12340001', body: { limits: { daily: '30.00' } } })
       const bal = rpt(await balance({ prtry: 'PAYMENT_LIMITS' })).blocks[0].bal
-      assert.deepEqual(bal.slice(2), ['PAYMENT_LIMIT_MONTHLY_TOTAL 100000.00', 'PAYMENT_LIMIT_MONTHLY_FREE 99940.00',
-        'PAYMENT_LIMIT_DAILY_TOTAL 50.00', 'PAYMENT_LIMIT_DAILY_FREE 0.00', 'PAYMENT_LIMIT_INSTANT 20.00'])
+      assert.deepEqual(bal.slice(2), ['PAYMENT_LIMIT_MONTHLY_TOTAL 100000.00', 'PAYMENT_LIMIT_MONTHLY_FREE 99960.00',
+        'PAYMENT_LIMIT_DAILY_TOTAL 30.00', 'PAYMENT_LIMIT_DAILY_FREE 0.00', 'PAYMENT_LIMIT_INSTANT 20.00'])
     })
 
     test('an account without EUR still reports the limits in a EUR block', async () => {

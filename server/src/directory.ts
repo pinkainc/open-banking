@@ -41,6 +41,8 @@ export interface CustomerInput {
   services?: string[]
   certificates?: string[]
   payments?: 'DIRECT' | 'PENDING'
+  /** Connect payment limits in EUR (decisions 109, 524); kept by the account reports. */
+  limits?: { daily?: string; monthly?: string; instant?: string }
 }
 
 export class Directory {
