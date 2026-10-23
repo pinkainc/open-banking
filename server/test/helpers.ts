@@ -18,7 +18,8 @@ export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
  * scripts/fetch-reference.sh downloaded into reference/. Tests that need them skip
  * with a message when neither exists.
  */
-export const MIRROR_FILES = join(process.env.LHV_DOCS_DIR ? resolve(process.env.LHV_DOCS_DIR) : findMirror(), '_raw/partners/assets/files')
+export const MIRROR_DIR = process.env.LHV_DOCS_DIR ? resolve(process.env.LHV_DOCS_DIR) : findMirror()
+export const MIRROR_FILES = join(MIRROR_DIR, '_raw/partners/assets/files')
 /** ../docs.lhv-connect next to the repo, also from a git worktree nested inside it (.claude/worktrees/x). */
 function findMirror(): string {
   for (let dir = ROOT; ; dir = dirname(dir)) {
