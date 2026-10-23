@@ -65,7 +65,7 @@ Ukratko:
 
 - Posao rade Opus 5.5 subagenti, a glavna sesija orkestrira. Svaku razinu razbij na
   dva agenta: implementacija, pa testovi i spajanje na server. Context guard reže
-  svakog agenta na ~180k. Effort zadaj eksplicitno.
+  svakog agenta na granici `CONTEXT_GUARD_TOKENS` (300k od 2026-10-23). Effort zadaj eksplicitno.
 - Agentima su zabranjeni `README.md`, `TODO.md` i ovaj plan. Orkestrator ih ažurira
   nakon mergea.
 - Spec je `docs.lhv-connect/ssot/` plus mirror. Dokumentacija nije uvijek dosljedna

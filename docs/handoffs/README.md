@@ -42,7 +42,7 @@ povijest.
   zeleno, prvo to popravi. Repo još nema remote, pa nema ni `git pull`.
 - **Orkestracija:** posao rade Opus 5.5 subagenti (`model: "opus"`), glavna sesija
   orkestrira. Svaku razinu razbij na dva agenta: (a) implementacija modula, (b) testovi i
-  spajanje na server. Context guard ih reže na ~180k. Effort uvijek zadaj eksplicitno
+  spajanje na server. Context guard ih reže na granici iz `CONTEXT_GUARD_TOKENS` (300k od 2026-10-23, prije 180k). Effort uvijek zadaj eksplicitno
   (`high` za kod, `medium` za čitanje). Agent koji stane commita i ostavi popis; nastavak
   ide kroz novog agenta kojem se da hash commita.
 - **Paralelne razine** idu u zasebne worktreeje (`isolation: "worktree"`), a odluke se
