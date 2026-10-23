@@ -26,8 +26,8 @@ export interface Booking {
    * own party, Dbtr/DbtrAcct on a debit and Cdtr/CdtrAcct on a credit (P 06).
    */
   virtual?: { iban: string; name?: string; country?: string; address?: string }
-  /** Bank transaction family and sub-family; default ICDT / RCDT with OTHR (credit transfers). */
-  bankTxCode?: { family: string; subFamily: string }
+  /** Bank transaction domain, family and sub-family; default PMNT, ICDT / RCDT with OTHR (credit transfers). */
+  bankTxCode?: { domain?: string; family: string; subFamily: string }
   /** Direct debits: the mandate (Refs/MndtId). */
   mandateId?: string
   /** A returned or refunded payment: RtrInf (reason code, additional information lines). */
@@ -85,7 +85,7 @@ export function camt054(b: Booking, version: '02' | '08', bank: { bic: string; n
         v8 ? el('ValDt', el('DtTm', isoTallinn(b.bookedAt))) : el('ValDt', el('Dt', dateTallinn(b.bookedAt))),
         el('AcctSvcrRef', b.servicerRef),
         el('BkTxCd',
-          el('Domn', el('Cd', 'PMNT'), el('Fmly', el('Cd', b.bankTxCode?.family ?? (b.direction === 'DBIT' ? 'ICDT' : 'RCDT')), el('SubFmlyCd', b.bankTxCode?.subFamily ?? 'OTHR'))),
+          el('Domn', el('Cd', b.bankTxCode?.domain ?? 'PMNT'), el('Fmly', el('Cd', b.bankTxCode?.family ?? (b.direction === 'DBIT' ? 'ICDT' : 'RCDT')), el('SubFmlyCd', b.bankTxCode?.subFamily ?? 'OTHR'))),
           el('Prtry', el('Cd', b.scheme))),
         el('NtryDtls', el('TxDtls',
           el('Refs',

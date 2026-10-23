@@ -1,5 +1,5 @@
 // The parts of the bank wired together: directory, ledger, rails, inbox, the payment
-// engine and SEPA Direct Debit. Ledger and rails are interfaces; the defaults are in memory and the
+// engine, SEPA Direct Debit and FX. Ledger and rails are interfaces; the defaults are in memory and the
 // simulator.
 import { systemClock, type Clock } from './clock.js'
 import { Directory, type CustomerInput } from './directory.js'
@@ -8,6 +8,7 @@ import { MemoryLedger, toMinor, type Ledger } from './ledger.js'
 import { PaymentEngine, type Bank } from './payments/engine.js'
 import { XsdValidator } from './payments/xsd.js'
 import { DirectDebitService } from './directdebit/service.js'
+import { FxService } from './fx/service.js'
 import { SimulatorRails, type Rails } from './rails.js'
 import { normalizeIban } from './iban.js'
 import { servicerRef } from './ids.js'
@@ -51,6 +52,7 @@ export class Emulator {
   readonly reports: AccountReports
   readonly viban: VibanService
   readonly directDebit: DirectDebitService
+  readonly fx: FxService
 
   constructor(opts: EmulatorOptions & { bank?: Partial<Bank> } = {}) {
     this.clock = opts.clock ?? systemClock
@@ -69,6 +71,10 @@ export class Emulator {
     this.directDebit = new DirectDebitService({
       directory: this.directory, ledger: this.ledger, rails: this.rails, inbox: this.inbox, clock: this.clock, bank: this.bank,
       xsd, virtual: this.viban.registry, strictIban: opts.strictIban, onBooking: (_c, b) => { this.journal.record(b) },
+    })
+    this.fx = new FxService({
+      directory: this.directory, ledger: this.ledger, inbox: this.inbox, clock: this.clock, bank: this.bank,
+      onBooking: (_c, b) => { this.journal.record(b) },
     })
     this.reports = new AccountReports({
       directory: this.directory, ledger: this.ledger, journal: this.journal, inbox: this.inbox, clock: this.clock, bank: this.bank, xsd,

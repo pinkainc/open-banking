@@ -5,6 +5,8 @@ import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { FastifyInstance, FastifyRequest } from 'fastify'
+import Ajv2020 from 'ajv/dist/2020.js'
+import addFormats from 'ajv-formats'
 import { buildApp } from '../src/app.js'
 import { ManualClock } from '../src/clock.js'
 import { Emulator, type EmulatorOptions, type Seed } from '../src/emulator.js'
@@ -84,7 +86,7 @@ export async function drain(ctx: Ctx, as = C1.code, headers: Record<string, stri
     const res = await call(ctx, { url: '/messages/next', as, headers })
     if (res.statusCode === 204) return out
     const id = res.headers['message-response-id'] as string
-    out.push({ id, type: res.headers['message-response-type'] as string, requestId: res.headers['message-request-id'] as string | undefined, body: res.body, doc: parseXml(res.body) })
+    out.push({ id, type: res.headers['message-response-type'] as string, requestId: res.headers['message-request-id'] as string | undefined, body: res.body, doc: res.body.trimStart().startsWith('{') ? undefined : parseXml(res.body) })
     await call(ctx, { method: 'DELETE', url: `/messages/${id}`, as, headers })
   }
   throw new Error('inbox does not drain')
@@ -348,4 +350,38 @@ export function ddEntry(m: { doc: any }) {
     returnCode: s(tx.RtrInf?.Rsn?.Cd), returnInfo: list<unknown>(tx.RtrInf?.AddtlInf).map(String),
     cdtr: s(tx.RltdPties?.Cdtr?.Nm ?? tx.RltdPties?.Cdtr?.Pty?.Nm), dbtr: s(tx.RltdPties?.Dbtr?.Nm ?? tx.RltdPties?.Dbtr?.Pty?.Nm),
   }
+}
+
+// --- JSON services (L5a: FX, contracts, EE webhooks) --------------------------------
+
+/** The JSON Schemas (draft 2020-12) of the docs mirror's ssot; the server never loads them. */
+export const JSON_SCHEMA_DIR = join(MIRROR_DIR, 'ssot/json-schemas')
+export const HAVE_JSON_SCHEMAS = existsSync(join(JSON_SCHEMA_DIR, 'fx-trade-offer.request.json'))
+export const NO_JSON_SCHEMAS = HAVE_JSON_SCHEMAS ? false : 'no JSON schemas (docs mirror ssot/json-schemas)'
+
+const ajv = new (Ajv2020 as unknown as typeof Ajv2020.default)({ allErrors: true, strict: true, allowUnionTypes: true })
+;(addFormats as unknown as typeof addFormats.default)(ajv)
+const compiled = new Map<string, ReturnType<typeof ajv.compile>>()
+
+/**
+ * Asserts a JSON body (string or parsed) against ssot/json-schemas/<name>.json, e.g.
+ * jsonValid('fx-trade-offer.response', body). Returns the parsed body; without the
+ * mirror it only parses.
+ */
+export function jsonValid(name: string, body: string | unknown): any {
+  const v = typeof body === 'string' ? JSON.parse(body) : body
+  if (!HAVE_JSON_SCHEMAS) return v
+  let validate = compiled.get(name)
+  if (!validate) {
+    validate = ajv.compile(JSON.parse(readFileSync(join(JSON_SCHEMA_DIR, `${name}.json`), 'utf8')))
+    compiled.set(name, validate)
+  }
+  if (!validate(v)) throw new Error(`${name}: ${ajv.errorsText(validate.errors)}\n${JSON.stringify(v).slice(0, 2000)}`)
+  return v
+}
+
+/** Every pending JSON message of a caller (drained), parsed. */
+export async function jsonDrain(ctx: Ctx, as = C1.code, headers: Record<string, string> = {}) {
+  const msgs = await drain(ctx, as, headers)
+  return msgs.map((m) => ({ ...m, json: m.body.startsWith('{') ? JSON.parse(m.body) : undefined }))
 }

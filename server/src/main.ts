@@ -33,6 +33,8 @@ setInterval(() => emulator.inbox.purge(), 60 * 60 * 1000).unref()
 if (env.EOD_STATEMENTS !== '0') setInterval(() => emulator.reports.tick(), 60 * 1000).unref()
 // SEPA Direct Debit: collections due are settled at 11:30 CET; checked every minute.
 setInterval(() => { emulator.directDebit.tick().catch((e) => console.error('direct debit settlement failed:', e)) }, 60 * 1000).unref()
+// FX: SPOT deals settle in the first hour of their settlement date; checked every minute.
+setInterval(() => { emulator.fx.tick().catch((e) => console.error('FX settlement failed:', e)) }, 60 * 1000).unref()
 for (const signal of ['SIGTERM', 'SIGINT'] as const) process.on(signal, () => process.exit(0))
 const port = Number(env.PORT ?? 8443)
 await app.listen({ port, host: env.HOST ?? '127.0.0.1' })
