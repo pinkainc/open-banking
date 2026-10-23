@@ -33,7 +33,7 @@ export function simRoutes(emulator: Emulator) {
   return async (app: FastifyInstance) => {
     app.get('/customers', async () => ({
       customers: await Promise.all(emulator.directory.all().map(async (c) => ({
-        code: c.code, country: c.country, name: c.name, camt054: c.camt054,
+        code: c.code, country: c.country, name: c.name, camt054: c.camt054, payments: c.payments ?? 'DIRECT',
         ...(c.connected ? { connected: c.connected } : {}),
         accounts: await Promise.all(c.accounts.map(async (iban) => ({ iban, balances: await balances(iban) }))),
       }))),
@@ -50,6 +50,32 @@ export function simRoutes(emulator: Emulator) {
         return reply.code(201).send({ code: c.code, country: c.country, accounts: c.accounts })
       } catch (e) { throw bad((e as Error).message) }
     })
+
+    // Per-customer settings an account manager would switch: payment confirmation.
+    app.patch('/customers/:country/:code', async (req) => {
+      const { country, code } = req.params as { country: string; code: string }
+      const c = emulator.directory.get({ code, country })
+      if (!c) throw new ConnectError(404, 'NOT_FOUND', `no customer ${country}/${code}`)
+      const b = (req.body ?? {}) as { payments?: unknown }
+      if (b.payments !== undefined) {
+        if (b.payments !== 'DIRECT' && b.payments !== 'PENDING') throw bad('payments must be DIRECT or PENDING')
+        c.payments = b.payments
+      }
+      return { code: c.code, country: c.country, payments: c.payments ?? 'DIRECT' }
+    })
+
+    // Payments waiting in the internet bank (SCA) or in the bank's manual review.
+    app.get('/payments/pending', async () => ({ payments: emulator.engine.parked() }))
+    for (const action of ['approve', 'reject'] as const) {
+      app.post(`/payments/pending/${action}`, async (req) => {
+        const b = (req.body ?? {}) as { refs?: unknown; reason?: unknown }
+        if (!Array.isArray(b.refs) || b.refs.length === 0 || !b.refs.every((r) => typeof r === 'string')) throw bad('refs must be a non-empty array of AcctSvcrRef strings')
+        if (b.reason !== undefined && (action === 'approve' || typeof b.reason !== 'string' || !b.reason)) throw bad('reason is a non-empty string, for reject only')
+        const unknown = await emulator.engine.decide(b.refs as string[], action === 'approve', b.reason as string | undefined)
+        if (unknown.length) throw new ConnectError(404, 'NOT_FOUND', `not pending: ${unknown.join(', ')}`)
+        return { [action === 'approve' ? 'approved' : 'rejected']: b.refs }
+      })
+    }
 
     app.get('/accounts/:iban', async (req) => {
       const iban = normalizeIban((req.params as { iban: string }).iban)

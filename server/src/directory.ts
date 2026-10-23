@@ -24,6 +24,11 @@ export interface Customer extends CustomerKey {
    * (decision 502); undefined: any certificate with the customer's code. `[]`: none.
    */
   certificates?: string[]
+  /**
+   * How POST /payment is confirmed (P 08 "Payment confirmation"): DIRECT processing
+   * (default) or PENDING, waiting for SCA in the internet bank (decision 521).
+   */
+  payments?: 'DIRECT' | 'PENDING'
 }
 
 export interface CustomerInput {
@@ -35,6 +40,7 @@ export interface CustomerInput {
   connected?: (CustomerKey | [string, string])[]
   services?: string[]
   certificates?: string[]
+  payments?: 'DIRECT' | 'PENDING'
 }
 
 export class Directory {
@@ -42,11 +48,13 @@ export class Directory {
   #accountOwner = new Map<string, string>()
 
   add(input: CustomerInput): Customer {
+    if (input.payments !== undefined && input.payments !== 'DIRECT' && input.payments !== 'PENDING') throw new Error('payments must be DIRECT or PENDING')
     const c: Customer = {
       code: input.code, country: input.country.toUpperCase(), name: input.name, accounts: [],
       camt054: input.camt054 ?? '02',
       ...(input.services ? { services: [...input.services] } : {}),
       ...(input.certificates ? { certificates: [...input.certificates] } : {}),
+      ...(input.payments ? { payments: input.payments } : {}),
       connected: input.connected?.map((k) => (Array.isArray(k) ? { code: k[0], country: k[1].toUpperCase() } : { code: k.code, country: k.country.toUpperCase() })),
     }
     this.#customers.set(keyOf(c), c)
