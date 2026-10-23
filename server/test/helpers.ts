@@ -363,6 +363,16 @@ const ajv = new (Ajv2020 as unknown as typeof Ajv2020.default)({ allErrors: true
 ;(addFormats as unknown as typeof addFormats.default)(ajv)
 const compiled = new Map<string, ReturnType<typeof ajv.compile>>()
 
+/** The compiled ssot schema <name>.json (cached). */
+function schemaOf(name: string) {
+  let validate = compiled.get(name)
+  if (!validate) {
+    validate = ajv.compile(JSON.parse(readFileSync(join(JSON_SCHEMA_DIR, `${name}.json`), 'utf8')))
+    compiled.set(name, validate)
+  }
+  return validate
+}
+
 /**
  * Asserts a JSON body (string or parsed) against ssot/json-schemas/<name>.json, e.g.
  * jsonValid('fx-trade-offer.response', body). Returns the parsed body; without the
@@ -371,11 +381,7 @@ const compiled = new Map<string, ReturnType<typeof ajv.compile>>()
 export function jsonValid(name: string, body: string | unknown): any {
   const v = typeof body === 'string' ? JSON.parse(body) : body
   if (!HAVE_JSON_SCHEMAS) return v
-  let validate = compiled.get(name)
-  if (!validate) {
-    validate = ajv.compile(JSON.parse(readFileSync(join(JSON_SCHEMA_DIR, `${name}.json`), 'utf8')))
-    compiled.set(name, validate)
-  }
+  const validate = schemaOf(name)
   if (!validate(v)) throw new Error(`${name}: ${ajv.errorsText(validate.errors)}\n${JSON.stringify(v).slice(0, 2000)}`)
   return v
 }
@@ -384,4 +390,22 @@ export function jsonValid(name: string, body: string | unknown): any {
 export async function jsonDrain(ctx: Ctx, as = C1.code, headers: Record<string, string> = {}) {
   const msgs = await drain(ctx, as, headers)
   return msgs.map((m) => ({ ...m, json: m.body.startsWith('{') ? JSON.parse(m.body) : undefined }))
+}
+
+/** Asserts that a JSON body violates its ssot schema (requests the tests send wrong on purpose). */
+export function jsonInvalid(name: string, body: unknown): void {
+  if (!HAVE_JSON_SCHEMAS) return
+  if (schemaOf(name)(body)) throw new Error(`${name}: expected a schema violation\n${JSON.stringify(body)}`)
+}
+
+/**
+ * The ```json blocks of a docs mirror page (e.g. '12-foreign-exchange.md'), in order:
+ * the raw text and, when it parses, the value. Empty without the mirror.
+ */
+export function docJson(page: string): { raw: string; json?: any }[] {
+  const p = join(MIRROR_DIR, 'docs/partners', page)
+  if (!existsSync(p)) return []
+  return [...readFileSync(p, 'utf8').matchAll(/```json\n([\s\S]*?)```/g)].map((m) => {
+    try { return { raw: m[1], json: JSON.parse(m[1]) } } catch { return { raw: m[1] } }
+  })
 }

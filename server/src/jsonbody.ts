@@ -25,10 +25,18 @@ function lineColumn(text: string, offset: number) {
   return { line, column: offset - before.lastIndexOf('\n') }
 }
 
-/** Where Jackson points: the source echoed as a Java string literal, then line and column. */
+/** Jackson echoes at most this many characters of the source (JsonLocation.MAX_CONTENT_SNIPPET). */
+const SNIPPET = 500
+
+/**
+ * Where Jackson points: the source echoed raw between quotes (not escaped: the P 12 sample
+ * shows its newlines and quotes as they were sent), cut at 500 characters with
+ * "[truncated N chars]", then line and column.
+ */
 const at = (text: string, offset: number) => {
   const { line, column } = lineColumn(text, offset)
-  return `\n at [Source: (String)${JSON.stringify(text.slice(0, 500))}; line: ${line}, column: ${column}]`
+  const cut = text.length > SNIPPET ? `[truncated ${text.length - SNIPPET} chars]` : ''
+  return `\n at [Source: (String)"${text.slice(0, SNIPPET)}"${cut}; line: ${line}, column: ${column}]`
 }
 
 /** The offset of the second digit of the first number with a leading zero (outside strings). */
