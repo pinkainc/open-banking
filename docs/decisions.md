@@ -33,3 +33,18 @@ recordings against the reference sandbox exist.
 | 26 | Body limit | Bodies over 5 MB are 413 with `<Errors><Error><ErrorCode>413</ErrorCode><Description>Request Entity Too Large</Description>…`. The reference's nginx answers an HTML page; the error document follows the 503 sample's numeric-code form instead. |
 | 27 | `X-Idempotency-Key` | On every Connect POST: a key that already got a 2xx from the same certificate holder within 24 h (injectable clock) is 409 with `ErrorCode` `CONFLICT`; a value that is not a UUID is 400. A failed request does not use up its key. Not applied to `/_sim`. |
 | 28 | Empty list | `GET /messages` with nothing pending is 204 without a body (GitBook "204 - no more messages"), not an empty array. |
+
+## L3
+
+| # | Topic | Choice |
+| --- | --- | --- |
+| 200 | VIBAN business errors | 202 + an inbox message of the operation's type (`VIBAN_OPEN` …) whose body is `<Errors>`: the GitBook shows only 202 and 403 for `/viban/*`, and the mirror reads service-level errors as inbox messages. Switch with `VIBAN_ERRORS=sync` / `vibanErrors: 'sync'` / `POST /_sim/viban/errors` → the same `<Errors>` as the HTTP answer (403 FORBIDDEN, 500 TECHNICAL_ERROR, else 400). Not-well-formed XML is `INVALID_REQUEST` through the same channel. |
+| 201 | Check order | XML/root → birth dates and countries → XSD and required elements (`INVALID_REQUEST`) → master account (`INVALID_ACCOUNT`, `FORBIDDEN` MasterAccount, `MASTER_ACCOUNT_AGREEMENT_MISSING`) → VIBAN (`INVALID_VIBAN`, `FORBIDDEN` VirtualIBAN) → operation rules. Field checks run before the XSD so `INVALID_BIRTH_DATE` / `INVALID_COUNTRY` are reachable; all field errors of a request are listed together. `Field` is the bare element name (`BirthDate`). |
+| 202 | Agreement | Required for open, bulk and modify; info and close only need ownership. Set per account with `"viban": true` in the seed or `POST /_sim/viban/agreements`. |
+| 203 | Ownership | A VIBAN belongs to the customer owning its master account; service providers reach it with `Client-Code`/`Client-Country`. A VIBAN under another master (also another customer's) is `FORBIDDEN` "Unauthorized virtual IBAN.", not `INVALID_VIBAN`. |
+| 204 | ClientReference | Unique per customer over all its VIBANs, closed ones included. Modify may set it once when empty; omitting it keeps it. |
+| 205 | Numbers | EE: bank code 77, account `77` + 11-digit serial + 7-3-1 check digit (the published `EE…7777…` numbers pass the same checks); GB: master's bank code and sort code + account `7xxxxxxx`. ISO mod-97 check digits. |
+| 206 | Screening | ACTIVE unless a holder or representative name is on the simulator's list (`POST /_sim/viban/screening`) → ON_HOLD. Bank decisions via `POST /_sim/viban/:iban/status` (ON_HOLD→ACTIVE/REJECTED, ACTIVE⇄BLOCKED, →CLOSED) each send `VIBAN_STATUS_NOTIFICATION` (no Message-Request-Id); user-initiated changes do not. |
+| 207 | Payments to a VIBAN | Booked on the master account; camt.054 `Acct` = master, `Cdtr`/`CdtrAcct` = holder name + address country / VIBAN (P 06). Not ACTIVE: internal pain.001 RJCT "Creditor account is closed." (CLOSED, REJECTED) or "Account temporarily closed." (PENDING, ON_HOLD, BLOCKED); `/_sim/incoming` answers `returned: true` with AC04 / AC06, nothing booked or notified. |
+| 208 | Payments from a VIBAN | Debited from the master; RJCT "Debtor’s account not active." when not ACTIVE, "Invalid debtor’s name." when `Dbtr/Nm` differs from the holder (case and whitespace ignored); camt.054 `Dbtr`/`DbtrAcct` = holder / VIBAN. |
+| 209 | Dates | `DateActivated` / `DateClosed` are xs:date with the Tallinn offset (`2026-03-10+02:00`), as the samples. |

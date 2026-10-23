@@ -23,6 +23,7 @@ import { camt054, type Booking } from './camt054.js'
 import { decimalEq, decimalSum, painVersion, readPain001, structuralProblem, type Block, type PaymentFile, type Tx } from './pain001.js'
 import { aggregate, pain002, type StatusReport, type TxStatus } from './pain002.js'
 import type { XsdValidator } from './xsd.js'
+import type { VirtualAccount, VirtualAccounts } from '../viban/registry.js'
 
 export interface Bank { bic: string; name: string }
 
@@ -32,6 +33,8 @@ export interface EngineOptions {
   /** pain.001.001.03 is refused from this day on (the bank's announced end of support). */
   pain00103Until?: string
   xsd?: XsdValidator
+  /** Virtual IBANs: booked on their master account (L3). */
+  virtual?: VirtualAccounts
 }
 
 const SCHEMES = new Set(['INST', 'SEPA', 'TARGET2', 'ALL'])
@@ -55,7 +58,18 @@ export const R = {
   remittance: 'Description or reference number must be entered.',
   amount: 'Problem with amount. Contact bank',
   declined: 'Payment declined.',
+  debtorInactive: 'Debtor’s account not active.',
+  debtorName: 'Invalid debtor’s name.',
+  creditorClosed: 'Creditor account is closed.',
+  temporarilyClosed: 'Account temporarily closed.',
 }
+
+/** Why a payment to a VIBAN that is not ACTIVE is refused: closed for good, or for now. */
+export const inactiveCreditor = (v: VirtualAccount) =>
+  v.status === 'CLOSED' || v.status === 'REJECTED' ? { reason: R.creditorClosed, code: 'AC04' } : { reason: R.temporarilyClosed, code: 'AC06' }
+
+const sameName = (a: string | undefined, b: string | undefined) =>
+  !!a && !!b && a.replace(/\s+/g, ' ').trim().toLowerCase() === b.replace(/\s+/g, ' ').trim().toLowerCase()
 
 
 export class PaymentEngine {
@@ -106,7 +120,7 @@ export class PaymentEngine {
       if (b.ctrlSum !== undefined && !decimalEq(b.ctrlSum, decimalSum(b.txs.map((t) => t.amount!)))) return R.blockSum
     }
     for (const b of f.blocks) {
-      const owner = this.directory.ownerOf(b.debtorIban!)
+      const owner = this.directory.ownerOf(this.#account(b.debtorIban!))
       if (!owner) return R.senderAccount(normalizeIban(b.debtorIban!))
       if (keyOf(owner) !== keyOf(customer)) return R.noRights
     }
@@ -159,13 +173,22 @@ export class PaymentEngine {
     const debtorIban = normalizeIban(block.debtorIban!)
     const creditorIban = tx.creditorIban ? normalizeIban(tx.creditorIban) : undefined
     if (creditorIban && creditorIban === debtorIban) return rj(R.sameAccount)
+    // A VIBAN debtor must be ACTIVE and named as its holder; the master account pays.
+    const debtorV = this.opts.virtual?.resolve(debtorIban)
+    if (debtorV && debtorV.status !== 'ACTIVE') return rj(R.debtorInactive)
+    if (debtorV && !sameName(block.debtorName, debtorV.holder?.name)) return rj(R.debtorName)
+    const debtorAccount = debtorV?.master ?? debtorIban
+    // A VIBAN creditor is credited on its master account, unless it is not ACTIVE.
+    const creditorV = creditorIban ? this.opts.virtual?.resolve(creditorIban) : undefined
+    if (creditorV && creditorV.status !== 'ACTIVE') return rj(inactiveCreditor(creditorV).reason, 'INTERNAL')
+    const creditorAccount = creditorV?.master ?? creditorIban
 
-    const creditorOwner = creditorIban ? this.directory.ownerOf(creditorIban) : undefined
+    const creditorOwner = creditorAccount ? this.directory.ownerOf(creditorAccount) : undefined
     const ref = servicerRef()
     if (creditorOwner) {
       // Internal payment: both accounts are here; booked at once.
       try {
-        await this.ledger.transfer({ ref, from: debtorIban, to: creditorIban!, amount, currency: tx.currency! })
+        await this.ledger.transfer({ ref, from: debtorAccount, to: creditorAccount!, amount, currency: tx.currency! })
       } catch (e) {
         if (e instanceof InsufficientFunds) return rj(R.funds, 'INTERNAL')
         throw e
@@ -173,7 +196,7 @@ export class PaymentEngine {
       bookings.push({ customer, booking: this.#debitBooking(customer, block, tx, ref, 'INTERNAL', this.bank.bic) })
       const creditRef = servicerRef()
       bookings.push({ customer: creditorOwner, booking: {
-        account: creditorIban!, owner: { name: creditorOwner.name, code: creditorOwner.code }, direction: 'CRDT',
+        account: creditorAccount!, virtual: creditorV && virtualParty(creditorV), owner: { name: creditorOwner.name, code: creditorOwner.code }, direction: 'CRDT',
         amount, currency: tx.currency!, servicerRef: creditRef, scheme: 'INTERNAL', bookedAt: this.clock.now(),
         instrId: tx.instrId, endToEndId: tx.endToEndId,
         counterparty: { name: block.debtorName ?? customer.name, iban: debtorIban, bic: this.bank.bic, code: customer.code },
@@ -187,7 +210,7 @@ export class PaymentEngine {
     if ('reject' in chosen) return rj(chosen.reject)
     const scheme = chosen.scheme
     try {
-      await this.ledger.reserve({ ref, account: debtorIban, amount, currency: tx.currency! })
+      await this.ledger.reserve({ ref, account: debtorAccount, amount, currency: tx.currency! })
     } catch (e) {
       if (e instanceof InsufficientFunds) return rj(R.funds, scheme)
       throw e
@@ -224,13 +247,21 @@ export class PaymentEngine {
   }
 
   #debitBooking(customer: Customer, block: Block, tx: Tx, ref: string, scheme: string, creditorBic?: string): Booking {
+    const iban = normalizeIban(block.debtorIban!)
+    const v = this.opts.virtual?.resolve(iban)
     return {
-      account: normalizeIban(block.debtorIban!), owner: { name: customer.name, code: customer.code }, direction: 'DBIT',
+      account: v?.master ?? iban, virtual: v && virtualParty(v), owner: { name: customer.name, code: customer.code }, direction: 'DBIT',
       amount: toMinor(tx.amount!), currency: tx.currency!, servicerRef: ref, scheme, bookedAt: this.clock.now(),
       pmtInfId: block.pmtInfId, instrId: tx.instrId, endToEndId: tx.endToEndId,
       counterparty: { name: tx.creditorName, iban: tx.creditorIban ? normalizeIban(tx.creditorIban) : undefined, account: tx.creditorOther, bic: creditorBic ?? tx.creditorBic },
       remittance: tx.ustrd, reference: tx.reference,
     }
+  }
+
+  /** The ledger account behind an IBAN: a VIBAN's master account, else the IBAN itself. */
+  #account(iban: string) {
+    const n = normalizeIban(iban)
+    return this.opts.virtual?.resolve(n)?.master ?? n
   }
 
   #report(customer: Customer, requestId: string, r: StatusReport) {
@@ -245,12 +276,16 @@ export class PaymentEngine {
   /** An incoming credit from outside (the simulator's SEPA / SEPA Instant credit). */
   async incoming(p: { iban: string; amount: bigint; currency: string; scheme: string; debtor: { name?: string; iban?: string; bic?: string }; remittance?: string; reference?: string; endToEndId?: string }) {
     const iban = normalizeIban(p.iban)
-    const owner = this.directory.ownerOf(iban)
+    const v = this.opts.virtual?.resolve(iban)
+    // To a VIBAN that is not ACTIVE: returned to the sender, nothing booked or notified.
+    if (v && v.status !== 'ACTIVE') return { returned: inactiveCreditor(v) }
+    const account = v?.master ?? iban
+    const owner = this.directory.ownerOf(account)
     if (!owner) throw new Error(`no account ${iban}`)
     const ref = servicerRef()
-    await this.ledger.transfer({ ref, from: this.rails.settlementAccount(p.scheme), to: iban, amount: p.amount, currency: p.currency })
+    await this.ledger.transfer({ ref, from: this.rails.settlementAccount(p.scheme), to: account, amount: p.amount, currency: p.currency })
     this.#notify(owner, {
-      account: iban, owner: { name: owner.name, code: owner.code }, direction: 'CRDT', amount: p.amount, currency: p.currency,
+      account, virtual: v && virtualParty(v), owner: { name: owner.name, code: owner.code }, direction: 'CRDT', amount: p.amount, currency: p.currency,
       servicerRef: ref, scheme: p.scheme, bookedAt: this.clock.now(), endToEndId: p.endToEndId,
       counterparty: { name: p.debtor.name, iban: p.debtor.iban ? normalizeIban(p.debtor.iban) : undefined, bic: p.debtor.bic },
       remittance: p.remittance, reference: p.reference,
@@ -258,5 +293,8 @@ export class PaymentEngine {
     return { servicerRef: ref }
   }
 }
+
+/** The VIBAN as the own party of a master account entry (camt.054 Dbtr / Cdtr). */
+const virtualParty = (v: VirtualAccount) => ({ iban: v.iban, name: v.holder?.name, country: v.holder?.country, address: v.holder?.address })
 
 export { XmlSyntaxError }

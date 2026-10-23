@@ -72,14 +72,18 @@ export function simRoutes(emulator: Emulator) {
       }
       if (!b.iban) throw bad('iban is required')
       const iban = normalizeIban(b.iban)
-      if (!emulator.directory.ownerOf(iban)) throw new ConnectError(404, 'NOT_FOUND', `no account ${iban}`)
+      const viban = emulator.viban.registry.get(iban)
+      if (!emulator.directory.ownerOf(iban) && !viban) throw new ConnectError(404, 'NOT_FOUND', `no account ${iban}`)
       const scheme = b.scheme ?? 'SEPA'
       if (!['SEPA', 'INST', 'SWIFT', 'TARGET2'].includes(scheme)) throw bad(`unknown scheme ${scheme}`)
       const r = await emulator.engine.incoming({
         iban, amount: amount(b.amount), currency: b.currency ?? 'EUR', scheme,
         debtor: b.debtor ?? { name: 'Simulated Debtor' }, remittance: b.remittance, reference: b.reference, endToEndId: b.endToEndId,
       })
-      return { iban, accountServicerReference: r.servicerRef, balances: await balances(iban) }
+      const account = viban?.master ?? iban
+      // A VIBAN that is not ACTIVE: the bank returns the payment (ISO reason AC04 / AC06).
+      if (r.returned) return { iban, returned: true, reason: r.returned.code, description: r.returned.reason, balances: await balances(account) }
+      return { iban, ...(viban ? { masterAccount: account } : {}), accountServicerReference: r.servicerRef, balances: await balances(account) }
     })
 
     app.post('/rails/reject', async (req) => {

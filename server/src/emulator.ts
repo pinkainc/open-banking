@@ -9,6 +9,8 @@ import { PaymentEngine, type Bank } from './payments/engine.js'
 import { XsdValidator } from './payments/xsd.js'
 import { SimulatorRails, type Rails } from './rails.js'
 import { normalizeIban } from './iban.js'
+import { VibanSchemas } from './viban/messages.js'
+import { VibanService, type ErrorDelivery } from './viban/service.js'
 
 export interface Seed {
   bank?: Partial<Bank>
@@ -23,6 +25,8 @@ export interface EmulatorOptions {
   xsdDir?: string
   strictIban?: boolean
   pain00103Until?: string
+  /** How VIBAN business errors are delivered (docs/decisions.md 200); default inbox. */
+  vibanErrors?: ErrorDelivery
 }
 
 export const DEFAULT_BANK: Bank = { bic: 'LHVBEE22', name: 'open-banking emulator' }
@@ -37,6 +41,7 @@ export class Emulator {
   readonly inbox: Inbox
   readonly engine: PaymentEngine
   readonly bank: Bank
+  readonly viban: VibanService
 
   constructor(opts: EmulatorOptions & { bank?: Partial<Bank> } = {}) {
     this.clock = opts.clock ?? systemClock
@@ -45,8 +50,11 @@ export class Emulator {
     this.inbox = new Inbox(this.clock)
     this.bank = { ...DEFAULT_BANK, ...opts.bank }
     const xsd = opts.xsdDir ? new XsdValidator(opts.xsdDir) : undefined
+    this.viban = new VibanService(this.directory, this.inbox, this.clock, {
+      schemas: opts.xsdDir ? new VibanSchemas(opts.xsdDir) : undefined, errors: opts.vibanErrors,
+    })
     this.engine = new PaymentEngine(this.directory, this.ledger, this.rails, this.inbox, this.clock, this.bank, {
-      strictIban: opts.strictIban, pain00103Until: opts.pain00103Until ?? '2026-11-15', xsd,
+      strictIban: opts.strictIban, pain00103Until: opts.pain00103Until ?? '2026-11-15', xsd, virtual: this.viban.registry,
     })
   }
 
@@ -59,7 +67,9 @@ export class Emulator {
   async addCustomer(c: CustomerInput) {
     const customer = this.directory.add(c)
     for (const a of c.accounts ?? []) {
-      if (typeof a === 'string' || !a.balances) continue
+      if (typeof a === 'string') continue
+      if (a.viban) this.viban.registry.agreement(a.iban)
+      if (!a.balances) continue
       for (const [ccy, amount] of Object.entries(a.balances)) await this.fund(a.iban, amount, ccy)
     }
     return customer
