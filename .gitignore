@@ -4,3 +4,5 @@ node_modules/
 .certs/
 # Reference material downloaded by scripts/fetch-reference.sh (XSDs, sample XML).
 reference/
+# Agent worktrees
+.claude/worktrees/

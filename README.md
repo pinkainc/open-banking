@@ -47,8 +47,8 @@ Test counts are `node:test` cases in `server/test/`, all green (`npm run check`)
 | --- | --- | --- | --- |
 | **L0** | mTLS identity (subject `serialNumber`, CN fallback), service-provider scoping (`Client-Code` / `Client-Country`, `Filter-Service-Provider`), documented FORBIDDEN errors, `X-Bank-Code`, 413 above 5 MB, `X-Idempotency-Key` → 409; heartbeat (GET, `/mq`, POST); inbox: next / list / count / get / delete / bulk delete, `Filter-Response-Type`, 5-day expiry | done, except per-contract service grants and gzip of ≥10 MB messages | **52** (auth 16, inbox 19, heartbeat 5, http 5, real mTLS 7) |
 | **L1** | `POST /payment` pain.001.001.09 and .03 (until 15.11.2026) with XSD validation; pain.002.001.10 / .03 reports with the documented group- and transaction-level error texts; camt.054.001.02 (.08 per customer) for every debit and credit, internal transfers notify both sides; automatic and requested scheme selection (INST / SEPA / TARGET2 / SWIFT) on simulated rails | done | **47** (payments 38, `/_sim` 9) |
-| **L2** | account statements and balances (camt.060 → camt.053 / camt.052) | not started | — |
-| **L3** | virtual IBANs | not started | — |
+| **L2** | account statements and balances: camt.060.001.05 / .03 → camt.053.001.08 / .02 (paged at 10 000, capped at 100 000, INTM balances) and camt.052.001.08 / .06 (intraday, DATE / DATETIME, PAYMENT_LIMITS, END_OF_DAY_BALANCE); `errStatement_*`; automatic end-of-day statement; Windows-1257 folding of free text | done; limits reported, not enforced | **52** (statements 31, balances 21) |
+| **L3** | virtual IBANs: open / bulk (1–1000) / modify / info / close, all 13 documented error codes, status notifications, screening → ON_HOLD, payments to and from VIBANs booked on the master account (camt.054 carries the VIBAN) | done | **53** (viban 53) |
 | **L4** | SEPA direct debit (pain.008, pain.007) | not started | — |
 | **L5** | verification of payee, FX, contracts, webhooks, messages v2, signed (BDOC/ASiC-E) requests | not started | — |
 | **L6** | agency accounts / indirect scheme access | not started | — |

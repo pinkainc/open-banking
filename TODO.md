@@ -8,7 +8,27 @@ a never-existing id 404, bulk delete 200/207/400, empty list 204, `X-Bank-Code`,
 above 5 MB, `X-Idempotency-Key` 409, heartbeat `AuthorizedUser` = certificate holder
 (docs/decisions.md 8, 9, 11, 25-28).
 
+## Done: L2 + L3 (2026-10-23)
+
+Statements and balances (decisions 100–116) and virtual IBANs (200–212), built in
+parallel worktrees and merged; `npm run check` 204/204, no skips with the docs mirror.
+
+## Open in L2 / L3
+
+- VIBAN shown in camt.053 / camt.052 of the master account (samples camt.060 and
+  camt.053A in `PAYMENT_VIBAN_SEPA`).
+- Payment limits (10k daily / 100k monthly / 15k instant) are reported, not enforced.
+- camt.053.001.02 and camt.052.001.06 get structural checks only (no published XSD);
+  the public ISO 20022 schemas would allow real validation.
+- Bank postal address (`PstlAdr`) is missing from statements.
+- Sandbox: are statement and VIBAN business errors inbox messages (decisions 100, 200;
+  sandbox question 11)? How do INTM balances look?
+
 ## Open in L0 / L1
+
+- `X-Idempotency-Key` (decision 28) is documented only for the UK host (docs.lhv.com);
+  the EE host detects duplicates by pain.001 `MsgId` alone (mirror `ssot/ee-vs-uk.md`).
+  Scope it per host.
 
 - Per-contract service grants: 403 "User has not been granted the requested service"
   (needs a services list per customer in the seed).
@@ -23,19 +43,19 @@ above 5 MB, `X-Idempotency-Key` 409, heartbeat `AuthorizedUser` = certificate ho
 - Bounded memory: inbox tombstones (ids kept so a repeat DELETE is 200) and remembered
   MsgIds / idempotency keys grow without limit.
 - Run the PSP use-case samples (`PAYMENT_PSP_USECASES/case1..8`) once agency accounts
-  and ultimate-debtor fields exist (L6), and `PAYMENT_SWIFT_*` / `PAYMENT_VIBAN_SEPA` with
-  their own expectations.
+  and ultimate-debtor fields exist (L6), and `PAYMENT_SWIFT_*` with their own expectations.
 - Sandbox recordings: work through the mirror's `ssot/sandbox-questions.md` (repeat
   DELETE, bulk statuses, heartbeat/mq type, idempotency and 413 on the EE host) and
   revise the decisions they settle.
 
 ## Next levels
 
-- Account statements and balances: camt.060 requests → camt.053 / camt.052 (.08 and older).
 - Pending payments (SCA in the internet bank → PDNG, approve via /_sim), manual review (PDNG NARR).
-- Virtual IBAN services (viban open/bulk/modify/info/close, status notifications).
 - SEPA direct debit: pain.008, pain.007, collection notifications.
-- JSON services: FX trade offers, contracts, webhooks (notifications/subscriptions).
+- JSON services: FX trade offers, contracts, webhooks. EE and UK webhooks are two different
+  systems (mirror `ssot/ee-vs-uk.md`); the UK HMAC golden value is in the mirror.
+- UK flavour: `/accounts/*` (PascalCase JSON, AWS-style error bodies), CoP, Bacs, messages v2,
+  `x-bank-code: LHVEE` routing to EE services.
 - Agency account synchronisation (indirect scheme access).
 - Verification of payee.
 - Duplicate-payment detection (InstrId), daily/monthly limits, code page 1257 conversion.
