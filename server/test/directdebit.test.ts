@@ -8,8 +8,9 @@ import { E, REASONS } from '../src/directdebit/service.js'
 import { easter, isTarget2Day, previousTarget2Day, settlementDate, submissionCutoff } from '../src/directdebit/target2.js'
 import { SimulatorRails } from '../src/rails.js'
 import {
-  C1, C2, CREDITOR_ID, DE_IBAN, FR_IBAN, HAVE_REFERENCE, SP, balance, call, ddDrain, ddEntry, ddStatus, pain008, sample, setup, type Ctx,
+  C1, C2, CREDITOR_ID, DE_IBAN, FR_IBAN, HAVE_REFERENCE, SP, balance, call, ddDrain, ddEntry, ddStatus, pain008, report, sample, schemaValid, setup, type Ctx,
 } from './helpers.js'
+import { many, text } from '../src/xml.js'
 
 let ctx: Ctx
 beforeEach(async () => { ctx = await setup() })
@@ -103,6 +104,35 @@ describe('collection from a debtor here', () => {
     const debit = ctx.emulator.journal.entries(C2.iban, ...range).filter((e) => e.scheme === 'SEPADD')
     const credit = ctx.emulator.journal.entries(C1.iban, ...range).filter((e) => e.scheme === 'SEPADD')
     assert.deepEqual([debit.length, debit[0].direction, credit.length, credit[0].direction], [1, 'DBIT', 1, 'CRDT'])
+  })
+
+  test('camt.053 entries carry the direct debit\'s own BkTxCd (IDDT / RDDT, ESDD), as its camt.054 does (decision 408)', async () => {
+    await collect(pain008([{ pmtInfId: 'PMT-ST', txs: [{ endToEndId: 'E2E-ST', amount: '7.25' }] }]))
+    await ddDrain(ctx)
+    await ddDrain(ctx, C2.code)
+    await settle()
+    const notes = new Map<string, ReturnType<typeof ddEntry>>()
+    for (const [who] of [[C1.code], [C2.code]]) {
+      for (const m of await ddDrain(ctx, who)) if (m.type === 'CREDIT_DEBIT_NOTIFICATION') notes.set(who, ddEntry(m))
+    }
+    const rows = []
+    for (const [who, iban] of [[C1.code, C1.iban], [C2.code, C2.iban]]) {
+      const r = await report(ctx, { kind: 'statement', iban, frDt: '2026-03-12' }, { as: who })
+      assert.equal(r.msgs.length, 1)
+      assert.ok(!r.msgs[0].doc.Errors, r.msgs[0].body)
+      await schemaValid(r.msgs[0].body)
+      const entries = many<any>(r.msgs[0].doc.Document.BkToCstmrStmt.Stmt).flatMap((st) => many<any>(st.Ntry)).filter((e) => e.BkTxCd.Prtry?.Cd === 'SEPADD')
+      assert.equal(entries.length, 1, who)
+      const e = entries[0]
+      const row = [who, e.CdtDbtInd, text(e.Amt), e.BkTxCd.Domn.Cd, e.BkTxCd.Domn.Fmly.Cd, e.BkTxCd.Domn.Fmly.SubFmlyCd, String(e.NtryDtls.TxDtls.Refs.PmtInfId), String(e.NtryDtls.TxDtls.Refs.EndToEndId)]
+      const n = notes.get(who)!
+      assert.deepEqual([n.ind, n.family, n.subFamily, n.pmtInfId], [row[1], row[4], row[5], row[6]], `${who}: camt.053 entry = camt.054`)
+      rows.push(row)
+    }
+    assert.deepEqual(rows, [
+      [C1.code, 'CRDT', '7.25', 'PMNT', 'IDDT', 'ESDD', 'PMT-ST', 'E2E-ST'],
+      [C2.code, 'DBIT', '7.25', 'PMNT', 'RDDT', 'ESDD', 'PMT-ST', 'E2E-ST'],
+    ])
   })
 
   test('AM04: not enough money on the settlement date; the debtor gets no message', async () => {
