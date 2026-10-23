@@ -1,7 +1,7 @@
 // The HTTP surface. Everything outside /_sim is the Connect-compatible API; /_sim is
 // the emulator's own control plane (customers, funding, incoming payments, rails).
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify'
-import { identifyFromTls, resolveCaller, type Caller, type Identify } from './auth.js'
+import { identifyFromTls, requireService, resolveCaller, SERVICE, type Caller, type Identify } from './auth.js'
 import { ConnectError, jsonError, notFound, sendError } from './errors.js'
 import { keyOf } from './directory.js'
 import type { Emulator } from './emulator.js'
@@ -64,7 +64,17 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     return sendError(reply, new ConnectError(status, status === 500 ? 'TECHNICAL_ERROR' : 'BAD_REQUEST', status === 500 ? 'Technical error' : err.message))
   })
 
-  const caller = (req: FastifyRequest): Caller => resolveCaller(req, emulator.directory, identify)
+  const caller = (req: FastifyRequest): Caller => {
+    const c = resolveCaller(req, emulator.directory, identify)
+    c.services = keyOf(c.customer) === keyOf(c.user) ? c.user.services : emulator.contracts.servicesFor(c.user, c.customer)
+    return c
+  }
+  /** The caller, once the contract is known to grant the service (decision 501). */
+  const granted = (req: FastifyRequest, service: string): Caller => {
+    const c = caller(req)
+    requireService(c, service)
+    return c
+  }
   const filterType = (req: FastifyRequest) => {
     const v = req.headers['filter-response-type']
     return (Array.isArray(v) ? v[0] : v) || undefined
@@ -106,7 +116,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
 
   // --- Communication test -------------------------------------------------------
   app.get('/heartbeat', async (req, reply) => {
-    caller(req)
+    granted(req, SERVICE.heartbeat)
     return reply.type('application/xml').send(toXml(el('HeartBeatResponse', el('TimeStamp', heartbeatTallinn(emulator.clock.now())))))
   })
 
@@ -121,14 +131,14 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     el('UserRequest', userRequest)))
 
   app.get('/heartbeat/mq', async (req, reply) => {
-    const c = caller(req)
+    const c = granted(req, SERVICE.heartbeat)
     const id = requestId()
     emulator.inbox.add({ customer: c.customer, type: 'HEARTBEAT', requestId: id, body: heartbeatMessage(c, '') })
     return accepted(reply, id)
   })
 
   app.post('/heartbeat', async (req, reply) => {
-    const c = caller(req)
+    const c = granted(req, SERVICE.heartbeat)
     const id = requestId()
     const body = typeof req.body === 'string' ? req.body : req.body ? JSON.stringify(req.body) : ''
     emulator.inbox.add({ customer: c.customer, type: 'HEARTBEAT', requestId: id, body: heartbeatMessage(c, body) })
@@ -201,6 +211,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     if (type.startsWith('application/vnd.etsi.asic-e+zip')) {
       throw new ConnectError(415, 'UNSUPPORTED', 'Signed payment containers are not supported by this server')
     }
+    requireService(c, SERVICE.payments)
     if (typeof req.body !== 'string' || !req.body.trim()) throw new ConnectError(400, 'BAD_REQUEST', 'The request body must be a pain.001 XML document')
     const id = requestId()
     try {
@@ -217,7 +228,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   // of the same type) arrive in the inbox. A body that is not a camt.060 at all is
   // answered there too, as errStatement_RequestInvalid.
   const report = (kind: 'statement' | 'balance') => async (req: FastifyRequest, reply: FastifyReply) => {
-    const c = caller(req)
+    const c = granted(req, kind === 'statement' ? SERVICE.statement : SERVICE.balance)
     const id = requestId()
     const body = typeof req.body === 'string' ? req.body : ''
     await (kind === 'statement' ? emulator.reports.statement(body, c.customer, id) : emulator.reports.balance(body, c.customer, id))

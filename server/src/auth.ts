@@ -41,6 +41,24 @@ export interface Caller {
   /** Customers whose messages the request may read. */
   visible: Set<string>
   cert: CertIdentity
+  /**
+   * Services granted for this request (decision 501): the customer's own contract when it
+   * acts for itself, the provider's contract with the customer otherwise. Undefined: all.
+   */
+  services?: string[]
+}
+
+/** Service names of P 14 that gate a route (decision 501). */
+export const SERVICE = {
+  heartbeat: 'HEARTBEAT',
+  statement: 'ACCOUNT_STATEMENT',
+  balance: 'ACCOUNT_BALANCE',
+  payments: 'PAYMENTS_WITHOUT_SIGNATURE',
+} as const
+
+/** 403 "User has not been granted the requested service" unless the service is enabled. */
+export function requireService(c: Caller, service: string) {
+  if (c.services && !c.services.includes(service)) throw forbidden('User has not been granted the requested service')
 }
 
 const header = (req: FastifyRequest, name: string) => {

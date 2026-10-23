@@ -14,6 +14,11 @@ export interface Customer extends CustomerKey {
   camt054: '02' | '08'
   /** Set when the customer is a service provider: the customers it acts for. */
   connected?: CustomerKey[]
+  /**
+   * Services enabled in the customer's own Connect contract (P 14 names, decision 501);
+   * undefined: every service. A provider's list is also what its new customer contracts get.
+   */
+  services?: string[]
 }
 
 export interface CustomerInput {
@@ -23,6 +28,7 @@ export interface CustomerInput {
   accounts?: (string | { iban: string; balances?: Record<string, string>; /** Master account agreement for VIBANs. */ viban?: boolean })[]
   camt054?: '02' | '08'
   connected?: (CustomerKey | [string, string])[]
+  services?: string[]
 }
 
 export class Directory {
@@ -33,6 +39,7 @@ export class Directory {
     const c: Customer = {
       code: input.code, country: input.country.toUpperCase(), name: input.name, accounts: [],
       camt054: input.camt054 ?? '02',
+      ...(input.services ? { services: [...input.services] } : {}),
       connected: input.connected?.map((k) => (Array.isArray(k) ? { code: k[0], country: k[1].toUpperCase() } : { code: k.code, country: k.country.toUpperCase() })),
     }
     this.#customers.set(keyOf(c), c)

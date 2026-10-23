@@ -18,7 +18,8 @@ export type ContractStatus = 'PENDING' | 'ACTIVE' | 'CLOSED'
 
 /**
  * The services of a new contract: P 14 takes them "from active service provider contract
- * configuration"; this is the set of the P 14 sample (decision 413).
+ * configuration", i.e. the provider's own `services` (decision 501); without one, the set
+ * of the P 14 sample (decision 413).
  */
 export const DEFAULT_SERVICES = ['ACCOUNT_STATEMENT', 'CREDIT_DEBIT_NOTIFICATION', 'ACCOUNT_BALANCE', 'PAYMENTS_WITHOUT_SIGNATURE', 'HEARTBEAT']
 /** Services listed with the customer's IBANs. */
@@ -61,6 +62,12 @@ export class Contracts {
 
   get(id: string) { return this.all.find((c) => c.id === id) }
 
+  /** Services of the provider's ACTIVE contract with the customer; none without one. */
+  servicesFor(provider: Customer, customer: CustomerKey): string[] {
+    const active = this.of(provider).find((c) => c.status === 'ACTIVE' && keyOf(c.customer) === keyOf(customer))
+    return active ? active.services : []
+  }
+
   /** POST /contracts. Throws ContractError when the contract cannot be created. */
   create(provider: Customer, customer: CustomerKey): { contract: Contract; container: string } {
     const target = this.directory.get(customer)
@@ -72,7 +79,7 @@ export class Contracts {
     const now = this.clock.now()
     const contract: Contract = {
       id: randomUUID(), provider: { code: provider.code, country: provider.country }, customer: { code: target.code, country: target.country },
-      status: 'PENDING', createdAt: now, changedAt: now, services: [...DEFAULT_SERVICES],
+      status: 'PENDING', createdAt: now, changedAt: now, services: [...(provider.services ?? DEFAULT_SERVICES)],
     }
     this.all.push(contract)
     const text = [
