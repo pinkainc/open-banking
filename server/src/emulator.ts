@@ -1,5 +1,5 @@
-// The parts of the bank wired together: directory, ledger, rails, inbox and the
-// payment engine. Ledger and rails are interfaces; the defaults are in memory and the
+// The parts of the bank wired together: directory, ledger, rails, inbox, the payment
+// engine and SEPA Direct Debit. Ledger and rails are interfaces; the defaults are in memory and the
 // simulator.
 import { systemClock, type Clock } from './clock.js'
 import { Directory, type CustomerInput } from './directory.js'
@@ -7,6 +7,7 @@ import { Inbox } from './inbox.js'
 import { MemoryLedger, toMinor, type Ledger } from './ledger.js'
 import { PaymentEngine, type Bank } from './payments/engine.js'
 import { XsdValidator } from './payments/xsd.js'
+import { DirectDebitService } from './directdebit/service.js'
 import { SimulatorRails, type Rails } from './rails.js'
 import { normalizeIban } from './iban.js'
 import { servicerRef } from './ids.js'
@@ -49,6 +50,7 @@ export class Emulator {
   readonly journal = new Journal()
   readonly reports: AccountReports
   readonly viban: VibanService
+  readonly directDebit: DirectDebitService
 
   constructor(opts: EmulatorOptions & { bank?: Partial<Bank> } = {}) {
     this.clock = opts.clock ?? systemClock
@@ -63,6 +65,10 @@ export class Emulator {
     this.engine = new PaymentEngine(this.directory, this.ledger, this.rails, this.inbox, this.clock, this.bank, {
       strictIban: opts.strictIban, pain00103Until: opts.pain00103Until ?? '2026-11-15', xsd, virtual: this.viban.registry,
       onBooking: (_c, b) => { this.journal.record(b) },
+    })
+    this.directDebit = new DirectDebitService({
+      directory: this.directory, ledger: this.ledger, rails: this.rails, inbox: this.inbox, clock: this.clock, bank: this.bank,
+      xsd, virtual: this.viban.registry, strictIban: opts.strictIban, onBooking: (_c, b) => { this.journal.record(b) },
     })
     this.reports = new AccountReports({
       directory: this.directory, ledger: this.ledger, journal: this.journal, inbox: this.inbox, clock: this.clock, bank: this.bank, xsd,
