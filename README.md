@@ -28,7 +28,7 @@ server follows that catalog. The test suite uses the mirror by path, never by co
   same group and transaction statuses and the same scheme selection as the published
   responses;
 - where the documentation is silent or contradicts itself, the choice is written down
-  in [`docs/decisions.md`](docs/decisions.md) (28 entries), each with its reason.
+  in [`docs/decisions.md`](docs/decisions.md) (77 entries), each with its reason.
 
 **Next: recordings of the reference sandbox.** Once a sandbox certificate exists, a
 script of questions only the sandbox can answer (repeat DELETE status, bulk-delete
@@ -49,12 +49,12 @@ Test counts are `node:test` cases in `server/test/`, all green (`npm run check`)
 | **L1** | `POST /payment` pain.001.001.09 and .03 (until 15.11.2026) with XSD validation; pain.002.001.10 / .03 reports with the documented group- and transaction-level error texts; camt.054.001.02 (.08 per customer) for every debit and credit, internal transfers notify both sides; automatic and requested scheme selection (INST / SEPA / TARGET2 / SWIFT) on simulated rails | done | **47** (payments 38, `/_sim` 9) |
 | **L2** | account statements and balances: camt.060.001.05 / .03 → camt.053.001.08 / .02 (paged at 10 000, capped at 100 000, INTM balances) and camt.052.001.08 / .06 (intraday, DATE / DATETIME, PAYMENT_LIMITS, END_OF_DAY_BALANCE); `errStatement_*`; automatic end-of-day statement; Windows-1257 folding of free text | done; limits reported, not enforced | **52** (statements 31, balances 21) |
 | **L3** | virtual IBANs: open / bulk (1–1000) / modify / info / close, all 13 documented error codes, status notifications, screening → ON_HOLD, payments to and from VIBANs booked on the master account (camt.054 carries the VIBAN) | done | **53** (viban 53) |
-| **L4** | SEPA direct debit (pain.008, pain.007) | not started | — |
+| **L4** | SEPA direct debit: `POST /direct-debit/collection` pain.008.001.08 → pain.002.001.10 (`DIRECT_DEBIT_OUTGOING`, ACCP then ACSC / RJCT at 11:30 CET on the TARGET2 settlement date, AM04), debtor notification pain.008 (`DIRECT_DEBIT_INCOMING_COLLECTION_NOTIFICATION`), `POST /direct-debit/incoming-collection` pain.007.001.09 refusal (cancel before the cut-off, return after it, refund within 8 weeks with camt.054 `RtrInf`), external creditors and R-transactions via `/_sim/direct-debit` | done; creditor-side pain.007 not implemented (endpoint not named, decision 309); Bacs DD is UK (S5) | **70** (creditor 44, debtor 25, real mTLS 1) |
 | **L5** | verification of payee, FX, contracts, webhooks, messages v2, signed (BDOC/ASiC-E) requests | not started | — |
 | **L6** | agency accounts / indirect scheme access | not started | — |
 
-Total: **99 tests, 99 passing**. Line coverage of `server/src` over the unit tests is
-about 99 % (`npm run coverage`, c8 through tsx source maps, so treat it as approximate).
+Total: **274 tests, 274 passing**. Line coverage of `server/src` over the unit tests is
+about 99.5 % (`npm run coverage`, c8 through tsx source maps, so treat it as approximate).
 Not yet compared against the real sandbox: everything above is "as documented", not
 "as recorded".
 

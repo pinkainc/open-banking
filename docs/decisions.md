@@ -73,3 +73,27 @@ recordings against the reference sandbox exist.
 | 210 | Docs mirror in tests | Refines 24: without `LHV_DOCS_DIR` the tests take the nearest `../docs.lhv-connect` walking up from the repo, so git worktrees nested in it (`.claude/worktrees/x`) find the mirror; there `reference/` is absent too, and 5 tests used to skip. The P 10 markdown replay needs the mirror (the page is not a downloadable file); with `reference/` only, that suite skips with a message. `fetch-reference.sh` also fetches the VIBAN XSDs and the PAYMENT_VIBAN_SEPA samples. |
 | 211 | Master account format | The VIBAN XSDs' IBAN pattern admits EE-style (2 letters + 18 digits) and GB-style numbers only, so any other master (a DE IBAN) is `INVALID_REQUEST`, not `INVALID_ACCOUNT`; `INVALID_ACCOUNT` is a well-formed number nobody holds, or a VIBAN given as master. |
 | 212 | Sample inconsistencies | The bulk sample's master `EE737700771001625166` has wrong IBAN check digits (the same BBAN as `EE83…` elsewhere): replayed as published it is `INVALID_ACCOUNT`, so the replay swaps in `EE83…`. The modify / info / notification sample responses do not echo their requests' names, so the replay compares element structure; the open samples are compared value for value except `VirtualIBAN`. |
+
+## L4
+
+| # | Topic | Choice |
+| --- | --- | --- |
+| 300 | Creditor report type | pain.002.001.10 answers to `POST /direct-debit/collection` arrive as `DIRECT_DEBIT_OUTGOING`. The catalog marks it inferred: the name appears only in the P 02 type list, never next to the endpoint (sandbox question 26). |
+| 301 | pain.008 version | Only pain.008.001.08. P 02 says .02 was replaced in November 2025 and `messages.md` lists it as retired, so a .02 file is a group RJCT. The version is read from the element name/prefix, because the XML parser drops `xmlns`. |
+| 302 | Sample inconsistencies | The published `DIRECT_DEBIT_SEPA/DIRECT_DEBIT_PAIN.008.xml` has the .02 namespace, `SvcLvl/Cd SEPA` where the XSD wants `Prtry SEPADD`, `LclInstrm NORM` where it wants `CORE`, and `DtAndPlcOfBirth` children in the wrong order. The replay patches those four and moves its dates to the test clock. |
+| 303 | Error text placeholders | The `[…]` in P 09 error texts is filled with the bare value, no brackets. |
+| 304 | Status flow | ACCP at submission (group and transactions), then per original file ACSC or RJCT at settlement. No ACSP step. |
+| 305 | Settlement | One attempt at 11:30 CET on the TARGET2 settlement date. A debtor without funds gives RJCT AM04 to the creditor and no message to the debtor. Earliest submission 14 days before, creditor cut-off 16:30 CET on the previous TARGET2 day (`directdebit/target2.ts`, Easter included). |
+| 306 | Refusal error texts | P 09 documents none for `/direct-debit/incoming-collection`, so the texts are ours (`E` in `directdebit/service.ts`), styled after the payment texts. |
+| 307 | Cancel notification | `DIRECT_DEBIT_INCOMING_CANCEL_NOTIFICATION` is a pain.002.001.10 whose `OrgnlMsgId` is the MsgId of the pain.008 notification the debtor received, with TxSts RJCT and the refusal reason code. Content is not documented. |
+| 308 | Refund cover | A refund the creditor's balance cannot cover is RJCT AM04 to the debtor; nothing is booked. |
+| 309 | Creditor pain.007 | Not implemented. The endpoint is not named and P 09 says reversal after settlement is manual (contact the bank). Sandbox question 27. |
+| 310 | DD agreement | No check for a direct debit agreement with the bank, and the debtor notification is always sent, although P 09 says the account manager enables it per customer. |
+| 311 | Faulty debtor account | The group-level "Faulty debtor account" error is never produced; a bad debtor IBAN is rejected per collection as "Invalid Creditor / Debtor IBAN format." |
+| 312 | VIBAN debtor | A collection against a virtual IBAN is rejected AG01 (pain.002 for our creditors, 409 from `/_sim/direct-debit/incoming`), checked before the account lookup. |
+| 313 | Agent without BIC | `FinInstnId/Othr/Id NOTPROVIDED` (EPC convention) instead of an empty `FinInstnId`, although LHV's XSD allows the empty one. |
+| 314 | Duplicate MsgId | Only files that pass the group-level checks are remembered (as decision 14), so the MsgId of a file refused as a whole can be sent again. |
+| 315 | Long status texts | Texts over 105 characters continue in further `AddtlInf` elements instead of being cut (P 09 block-level texts plus an id exceed 105). XSD error texts drop the `{urn:…}` namespace from element names. |
+| 316 | Refusal after cut-off | A refusal between the 10:30 CET cut-off and 11:30 CET settlement is accepted and the collection is returned right after settlement. P 09 says on the next TARGET2 day; the simulator does it at the same `tick`. |
+| 317 | XSD before service checks | LHV's pain.008 XSD requires `MndtId`, names and an amount ≥ 0.01, so "Mandate must be filled", AM02 and the missing-name texts are reachable only for blank values or without the XSD. LHV's pain.007 XSD requires `GrpHdr/InitgPty` and `TxInf/OrgnlTxRef/MndtRltdInf`; those are XSD errors, not refusal texts. |
+| 318 | Debtor refusal window | Refund on request within 8 weeks (56 days) of settlement; later RJCT, refund by e-mail per P 09. An R-transaction from the external side (`/_sim/direct-debit/return`) is accepted up to 13 months. |

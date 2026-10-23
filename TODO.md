@@ -45,9 +45,12 @@ Legend: `[x]` done · `[ ]` open · `[~]` in progress · `(?)` needs a sandbox r
 - [ ] VIBAN shown in camt.053 / camt.052 of the master account (samples camt.060 and camt.053A in `PAYMENT_VIBAN_SEPA`) → S3
 - [ ] (?) VIBAN business errors: HTTP 4xx or inbox message (decision 200)? → S8
 
-## L4 — SEPA direct debit → S1
+## L4 — SEPA direct debit
 
-- [~] `dd.sepa.collection` pain.008 → pain.002, pain.007, `dd.sepa.incoming_notification`, `dd.sepa.incoming_collection_refusal`, refunds in camt.054
+- [x] `dd.sepa.collection` pain.008.001.08 → pain.002, `dd.sepa.incoming_notification`, `dd.sepa.incoming_collection_refusal` (pain.007), refunds in camt.054, TARGET2 calendar, `/_sim/direct-debit` (decisions 300–318)
+- [ ] Statements (camt.053) do not carry the direct debit bank transaction codes → S3
+- [ ] DD agreement per customer, debtor notification enabled by the account manager (decision 310) → S3
+- [ ] (?) Creditor-side pain.007 endpoint (decision 309, sandbox q27); refusal texts, cancel notification, BkTxCd, refusal between cut-off and settlement (q30–34) → S8
 
 ## L5 — value-added services
 
