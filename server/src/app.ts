@@ -13,6 +13,8 @@ import { simRoutes } from './sim.js'
 import { registerViban, vibanSimRoutes } from './viban/routes.js'
 import { directDebitSimRoutes, registerDirectDebit } from './directdebit/routes.js'
 import { fxSimRoutes, registerFx } from './fx/routes.js'
+import { contractsSimRoutes, registerContracts } from './contracts/routes.js'
+import { jsonTextScope } from './jsonbody.js'
 
 export interface AppOptions {
   emulator: Emulator
@@ -222,11 +224,15 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   // --- Foreign exchange (EE, JSON) -------------------------------------------------------
   registerFx(app, emulator, caller)
 
+  // --- Contract management (EE, JSON, service providers) ----------------------------------
+  jsonTextScope(app, (scope) => registerContracts(scope, emulator, caller))
+
   if (opts.sim !== false) {
     app.register(simRoutes(emulator), { prefix: '/_sim' })
     app.register(vibanSimRoutes(emulator), { prefix: '/_sim/viban' })
     app.register(directDebitSimRoutes(emulator), { prefix: '/_sim/direct-debit' })
     app.register(fxSimRoutes(emulator), { prefix: '/_sim/fx' })
+    app.register(contractsSimRoutes(emulator), { prefix: '/_sim/contracts' })
   }
   return app
 }
