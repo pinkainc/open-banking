@@ -83,7 +83,12 @@ export function addDays(date: string, n: number): string {
   return d.toISOString().slice(0, 10)
 }
 
-export const isDate = (s: string | undefined): s is string => !!s && DATE.test(s) && !Number.isNaN(Date.parse(`${s}T00:00:00Z`))
+/** A real calendar date (2026-02-30 is not). */
+export const isDate = (s: string | undefined): s is string => {
+  if (!s || !DATE.test(s)) return false
+  const t = Date.parse(`${s}T00:00:00Z`)
+  return !Number.isNaN(t) && new Date(t).toISOString().slice(0, 10) === s
+}
 export const isTime = (s: string | undefined): s is string => !!s && TIME.test(s)
 
 /** Is the instant a Tallinn midnight? */

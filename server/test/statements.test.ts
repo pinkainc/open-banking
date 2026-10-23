@@ -10,7 +10,7 @@ import { fold1257 } from '../src/statements/codepage.js'
 import { MAX_TRANSACTIONS, PAGE_SIZE } from '../src/statements/reports.js'
 import { many, parseXml, text } from '../src/xml.js'
 import {
-  C1, C2, SP, call, camt060, drain, pain001, report, reportError, sample, schemaValid, setup, type Ctx, type ReportReq,
+  C1, C2, HAVE_REFERENCE, SP, call, camt060, drain, pain001, report, reportError, sample, schemaValid, setup, type Ctx, type ReportReq,
 } from './helpers.js'
 
 let ctx: Ctx
@@ -216,8 +216,10 @@ describe('POST /account-statement', () => {
       assert.deepEqual(await err('this is not xml <'), invalid)
       assert.deepEqual(await err(''), invalid)
       assert.deepEqual(await err(camt060().replace('camt.060.001.05', 'camt.060.001.04')), invalid)
-      assert.deepEqual(await err(camt060().replace('<AcctOwnr><Pty/></AcctOwnr>', '')), invalid)
-      assert.deepEqual(await err(camt060({ frDt: '2026-02-30' })), invalid)
+      // Only the schema catches a missing AcctOwnr.
+      if (HAVE_REFERENCE) assert.deepEqual(await err(camt060().replace('<AcctOwnr><Pty/></AcctOwnr>', '')), invalid)
+      // Not a calendar date: the schema says so, or (without it) the structural check with Field.
+      assert.equal((await err(camt060({ frDt: '2026-02-30' })))!.code, 'errStatement_RequestInvalid')
     })
     test('a ReqdMsgNmId that does not match the request version: RequestInvalid with Field', async () => {
       const f = (await err({ reqd: 'camt.052.001.08' }))!
