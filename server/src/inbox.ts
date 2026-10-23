@@ -22,6 +22,8 @@ export interface Scope { customers: Set<string>; type?: string }
 
 export class Inbox {
   #messages = new Map<string, Message>()
+  /** Ids that existed and are gone (confirmed or expired), with their owner: a repeat DELETE is 200. */
+  #gone = new Map<string, string>()
   #seq = 0
   constructor(private clock: Clock, private retentionMs = 5 * DAY_MS) {}
 
@@ -40,7 +42,7 @@ export class Inbox {
   /** Drops expired messages. Reads skip them anyway; this frees the memory. */
   purge(): number {
     let n = 0
-    for (const m of this.#messages.values()) if (this.#expired(m)) { this.#messages.delete(m.id); n++ }
+    for (const m of this.#messages.values()) if (this.#expired(m)) { this.#remove(m); n++ }
     return n
   }
 
@@ -64,9 +66,19 @@ export class Inbox {
     return m && this.#inScope(m, { customers: s.customers }) ? m : undefined
   }
 
-  /** Confirms a message. Deleting an unknown or already deleted id is not an error. */
-  delete(s: Scope, id: string): void {
+  #remove(m: Message) {
+    this.#messages.delete(m.id)
+    this.#gone.set(m.id, keyOf({ code: m.clientCode, country: m.clientCountry }))
+  }
+
+  /**
+   * Confirms a message. 'deleted' also covers an id deleted (or expired) before, as
+   * documented; 'unknown' is an id that never existed for this caller (404).
+   */
+  delete(s: Scope, id: string): 'deleted' | 'unknown' {
     const m = this.#messages.get(id)
-    if (m && s.customers.has(keyOf({ code: m.clientCode, country: m.clientCountry }))) this.#messages.delete(id)
+    if (m && s.customers.has(keyOf({ code: m.clientCode, country: m.clientCountry }))) { this.#remove(m); return 'deleted' }
+    const owner = this.#gone.get(id)
+    return owner !== undefined && s.customers.has(owner) ? 'deleted' : 'unknown'
   }
 }

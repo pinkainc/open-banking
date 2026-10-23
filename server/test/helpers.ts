@@ -12,9 +12,22 @@ import { XsdValidator } from '../src/payments/xsd.js'
 import { parseXml } from '../src/xml.js'
 
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
-export const XSD_DIR = join(ROOT, 'reference/xsd')
-export const SAMPLES_DIR = join(ROOT, 'reference/samples')
+/**
+ * The bank's published XSDs and samples, used by reference, never copied here: the
+ * local docs mirror (LHV_DOCS_DIR, default ../docs.lhv-connect) when present, else what
+ * scripts/fetch-reference.sh downloaded into reference/. Tests that need them skip
+ * with a message when neither exists.
+ */
+export const MIRROR_FILES = join(resolve(process.env.LHV_DOCS_DIR ?? join(ROOT, '../docs.lhv-connect')), '_raw/partners/assets/files')
+const MIRROR = existsSync(join(MIRROR_FILES, 'XSD/pain.001.001.09.xsd'))
+export const XSD_DIR = MIRROR ? join(MIRROR_FILES, 'XSD') : join(ROOT, 'reference/xsd')
 export const HAVE_REFERENCE = existsSync(join(XSD_DIR, 'pain.001.001.09.xsd'))
+export const NO_REFERENCE = HAVE_REFERENCE ? false : 'no published XSDs (docs mirror or scripts/fetch-reference.sh)'
+/** A published sample, e.g. sample('PAYMENT_SEPA', 'PAYMENT_PAIN.001.xml'); undefined when absent. */
+export function sample(scenario: string, file: string): string | undefined {
+  const p = MIRROR ? join(MIRROR_FILES, 'samples', scenario, file) : join(ROOT, 'reference/samples', `${scenario}__${file}`)
+  return existsSync(p) ? readFileSync(p, 'utf8') : undefined
+}
 export const xsd = new XsdValidator(XSD_DIR)
 
 export const C1 = { code: '12340001', country: 'EE', iban: 'EE337700771001260958' }
@@ -43,7 +56,7 @@ export async function setup(opts: EmulatorOptions = {}, s: Seed = seed()): Promi
   return { app, emulator, clock }
 }
 
-export interface Req { method?: string; url: string; as?: string; headers?: Record<string, string>; body?: string | object; contentType?: string }
+export interface Req { method?: string; url: string; as?: string | null; headers?: Record<string, string>; body?: string | object; contentType?: string }
 
 export async function call(ctx: Ctx, r: Req) {
   const headers: Record<string, string> = { ...(r.headers ?? {}) }
