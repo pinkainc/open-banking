@@ -1,5 +1,6 @@
 // Shared test set-up: an emulator on a manual clock with the dev seed, requests by
-// fastify inject (the certificate identity comes from a test header instead of TLS;
+// fastify inject (the certificate identity comes from test headers instead of TLS:
+// x-test-serial / x-test-cn, x-test-valid-from / -to, x-test-fingerprint;
 // mtls.test.ts covers the real transport), and a pain.001 writer for fixtures.
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
@@ -60,7 +61,12 @@ export async function setup(opts: EmulatorOptions = {}, s: Seed = seed(), appOpt
     const serial = req.headers['x-test-serial']
     const cn = req.headers['x-test-cn']
     if (serial === undefined && cn === undefined) return undefined
-    return { serialNumber: serial as string | undefined, commonName: cn as string | undefined, certSerial: '0A1B', validFrom: 'Jan  1 00:00:00 2026 GMT', validTo: 'Jan  1 00:00:00 2028 GMT' }
+    const h = (n: string) => req.headers[n] as string | undefined
+    return {
+      serialNumber: serial as string | undefined, commonName: cn as string | undefined, certSerial: '0A1B',
+      validFrom: h('x-test-valid-from') ?? 'Jan  1 00:00:00 2020 GMT', validTo: h('x-test-valid-to') ?? 'Jan  1 00:00:00 2030 GMT',
+      fingerprint256: h('x-test-fingerprint'),
+    }
   }
   const app = buildApp({ emulator, identify, ...appOpts })
   await app.ready()

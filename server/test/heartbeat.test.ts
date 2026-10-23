@@ -37,8 +37,8 @@ describe('heartbeat', () => {
     const h = m.doc.HeartBeatResponse
     assert.deepEqual(h.AuthorizedUser, { Name: 'Demo Customer 1', Code: C1.code })
     assert.equal(h.Certificates.Certificate.SerialNumber, '0A1B')
-    assert.equal(h.Certificates.Certificate.ValidFrom, '2026-01-01T00:00:00')
-    assert.equal(h.Certificates.Certificate.ValidTo, '2028-01-01T00:00:00')
+    assert.equal(h.Certificates.Certificate.ValidFrom, '2020-01-01T00:00:00')
+    assert.equal(h.Certificates.Certificate.ValidTo, '2030-01-01T00:00:00')
   })
 
   test('POST /heartbeat echoes the request in UserRequest (escaped)', async () => {

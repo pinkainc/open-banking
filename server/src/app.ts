@@ -1,7 +1,8 @@
 // The HTTP surface. Everything outside /_sim is the Connect-compatible API; /_sim is
 // the emulator's own control plane (customers, funding, incoming payments, rails).
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify'
-import { identifyFromTls, requireService, resolveCaller, SERVICE, type Caller, type Identify } from './auth.js'
+import { caCertificates, peerAcceptable, requireService, resolveCaller, SERVICE, tlsIdentify, type Caller, type Identify } from './auth.js'
+import type { TLSSocket } from 'node:tls'
 import { ConnectError, jsonError, notFound, sendError } from './errors.js'
 import { keyOf } from './directory.js'
 import type { Emulator } from './emulator.js'
@@ -44,11 +45,19 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 export function buildApp(opts: AppOptions): FastifyInstance {
   const { emulator } = opts
-  const identify = opts.identify ?? identifyFromTls
+  const cas = opts.https ? caCertificates(opts.https.ca) : []
+  const identify = opts.identify ?? tlsIdentify(cas)
   const base = { logger: opts.logger ?? false, bodyLimit: BODY_LIMIT }
+  // The TLS layer refuses every client certificate it cannot verify, except one from a
+  // trusted CA that is only outside its validity period: that one gets the documented
+  // 403 (decision 502). Node offers no verify hook, so the connection is dropped right
+  // after the handshake instead.
   const app = (opts.https
-    ? Fastify({ ...base, https: { ...opts.https, requestCert: true, rejectUnauthorized: true } })
+    ? Fastify({ ...base, https: { ...opts.https, requestCert: true, rejectUnauthorized: false } })
     : Fastify(base)) as unknown as FastifyInstance
+  if (opts.https) {
+    app.server.on('secureConnection', (socket: TLSSocket) => { if (!peerAcceptable(socket, cas)) socket.destroy() })
+  }
 
   // Request bodies other than JSON (pain.001 XML, BDOC test payloads) arrive as text.
   app.addContentTypeParser('*', { parseAs: 'string' }, (_req, body, done) => done(null, body))
@@ -65,7 +74,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   })
 
   const caller = (req: FastifyRequest): Caller => {
-    const c = resolveCaller(req, emulator.directory, identify)
+    const c = resolveCaller(req, emulator.directory, identify, emulator.clock.now())
     c.services = keyOf(c.customer) === keyOf(c.user) ? c.user.services : emulator.contracts.servicesFor(c.user, c.customer)
     return c
   }

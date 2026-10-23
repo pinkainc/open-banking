@@ -1,8 +1,11 @@
 // Who is calling, and on whose behalf. The transport has already verified the client
-// certificate against the trusted CA (mutual TLS); here the certificate subject is
-// mapped to a customer, and the Client-Code / Client-Country headers select the
-// customer a service provider acts for. Failures are the documented FORBIDDEN cases.
+// certificate against the trusted CA (mutual TLS; only a validity-period failure is let
+// through, to be answered here); the certificate subject is mapped to a customer, checked
+// against the certificates of its contract and the clock, and the Client-Code /
+// Client-Country headers select the customer a service provider acts for. Failures are
+// the documented FORBIDDEN cases.
 import type { FastifyRequest } from 'fastify'
+import { X509Certificate } from 'node:crypto'
 import type { TLSSocket } from 'node:tls'
 import { keyOf, type Customer, type Directory } from './directory.js'
 import { forbidden } from './errors.js'
@@ -15,23 +18,51 @@ export interface CertIdentity {
   certSerial?: string
   validFrom?: string
   validTo?: string
+  /** SHA-256 fingerprint, upper-case hex with colons (Node's `fingerprint256`). */
+  fingerprint256?: string
 }
 
 export type Identify = (req: FastifyRequest) => CertIdentity | undefined
 
-/** Reads the verified peer certificate of the TLS connection. */
-export const identifyFromTls: Identify = (req) => {
+/** OpenSSL verification results that only concern the validity period (decision 502). */
+const PERIOD_ERRORS = new Set(['CERT_HAS_EXPIRED', 'CERT_NOT_YET_VALID'])
+
+/** The CA certificates of a PEM bundle. */
+export function caCertificates(pem: string | Buffer): X509Certificate[] {
+  return (String(pem).match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g) ?? []).map((p) => new X509Certificate(p))
+}
+
+/**
+ * Whether the TLS layer accepted the peer, or refused it only for its validity period
+ * while a trusted CA did issue it (the period is then judged by resolveCaller).
+ */
+export function peerAcceptable(socket: TLSSocket, cas: X509Certificate[]): boolean {
+  if (socket.authorized) return true
+  const err = String(socket.authorizationError ?? '')
+  if (!PERIOD_ERRORS.has(err) || typeof socket.getPeerX509Certificate !== 'function') return false
+  const peer = socket.getPeerX509Certificate()
+  return !!peer && cas.some((ca) => peer.checkIssued(ca) && peer.verify(ca.publicKey))
+}
+
+/** Reads the peer certificate of the TLS connection; `cas` judges period-only failures. */
+export const tlsIdentify = (cas: X509Certificate[] = []): Identify => (req) => {
   const socket = req.raw.socket as TLSSocket
-  if (typeof socket.getPeerCertificate !== 'function' || !socket.authorized) return undefined
+  if (typeof socket.getPeerCertificate !== 'function' || !peerAcceptable(socket, cas)) return undefined
   const cert = socket.getPeerCertificate()
   if (!cert || !cert.subject) return undefined
   const s = cert.subject as unknown as Record<string, string | string[]>
   const one = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v)
   return {
     serialNumber: one(s.serialNumber), commonName: one(s.CN),
-    certSerial: cert.serialNumber, validFrom: cert.valid_from, validTo: cert.valid_to,
+    certSerial: cert.serialNumber, validFrom: cert.valid_from, validTo: cert.valid_to, fingerprint256: cert.fingerprint256,
   }
 }
+
+/** Accepts only certificates the TLS layer verified completely. */
+export const identifyFromTls: Identify = tlsIdentify()
+
+/** A certificate fingerprint in one form: upper-case hex without separators. */
+export const normalizeFingerprint = (f: string) => f.replace(/[^0-9a-f]/gi, '').toUpperCase()
 
 export interface Caller {
   /** The certificate holder. */
@@ -61,12 +92,29 @@ export function requireService(c: Caller, service: string) {
   if (c.services && !c.services.includes(service)) throw forbidden('User has not been granted the requested service')
 }
 
+/**
+ * The certificate against the user's contract (decision 502): one of the registered
+ * fingerprints when the contract lists any, and inside its validity period by `now`.
+ */
+function checkCertificate(user: Customer, cert: CertIdentity, now: Date) {
+  if (user.certificates) {
+    if (user.certificates.length === 0) throw forbidden("User doesn't have valid certificate for authentication")
+    const f = cert.fingerprint256 ? normalizeFingerprint(cert.fingerprint256) : undefined
+    if (!f || !user.certificates.some((c) => normalizeFingerprint(c) === f)) throw forbidden('User authentication certificate is different than expected')
+  }
+  const t = now.getTime()
+  const from = cert.validFrom ? Date.parse(cert.validFrom) : NaN
+  const to = cert.validTo ? Date.parse(cert.validTo) : NaN
+  if (!Number.isNaN(from) && from > t) throw forbidden('User authentication certificate is not yet valid')
+  if (!Number.isNaN(to) && to < t) throw forbidden('User authentication certificate is expired')
+}
+
 const header = (req: FastifyRequest, name: string) => {
   const v = req.headers[name.toLowerCase()]
   return Array.isArray(v) ? v[0] : v
 }
 
-export function resolveCaller(req: FastifyRequest, directory: Directory, identify: Identify): Caller {
+export function resolveCaller(req: FastifyRequest, directory: Directory, identify: Identify, now: Date = new Date()): Caller {
   const cert = identify(req)
   if (!cert) throw forbidden('User authentication certificate is missing')
   let code: string
@@ -81,6 +129,7 @@ export function resolveCaller(req: FastifyRequest, directory: Directory, identif
   if (matches.length === 0) throw forbidden("User doesn't exist")
   // A code registered in several countries: prefer the one holding a provider contract.
   const user = matches.find((c) => c.connected) ?? matches[0]
+  checkCertificate(user, cert, now)
 
   const clientCode = header(req, 'Client-Code')
   const clientCountry = header(req, 'Client-Country')

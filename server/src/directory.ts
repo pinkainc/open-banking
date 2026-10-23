@@ -19,6 +19,11 @@ export interface Customer extends CustomerKey {
    * undefined: every service. A provider's list is also what its new customer contracts get.
    */
   services?: string[]
+  /**
+   * SHA-256 fingerprints of the authentication certificates on the customer's contract
+   * (decision 502); undefined: any certificate with the customer's code. `[]`: none.
+   */
+  certificates?: string[]
 }
 
 export interface CustomerInput {
@@ -29,6 +34,7 @@ export interface CustomerInput {
   camt054?: '02' | '08'
   connected?: (CustomerKey | [string, string])[]
   services?: string[]
+  certificates?: string[]
 }
 
 export class Directory {
@@ -40,6 +46,7 @@ export class Directory {
       code: input.code, country: input.country.toUpperCase(), name: input.name, accounts: [],
       camt054: input.camt054 ?? '02',
       ...(input.services ? { services: [...input.services] } : {}),
+      ...(input.certificates ? { certificates: [...input.certificates] } : {}),
       connected: input.connected?.map((k) => (Array.isArray(k) ? { code: k[0], country: k[1].toUpperCase() } : { code: k.code, country: k.country.toUpperCase() })),
     }
     this.#customers.set(keyOf(c), c)
