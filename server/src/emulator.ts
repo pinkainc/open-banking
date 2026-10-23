@@ -9,6 +9,9 @@ import { PaymentEngine, type Bank } from './payments/engine.js'
 import { XsdValidator } from './payments/xsd.js'
 import { SimulatorRails, type Rails } from './rails.js'
 import { normalizeIban } from './iban.js'
+import { servicerRef } from './ids.js'
+import { Journal } from './statements/journal.js'
+import { AccountReports, type ReportsOptions } from './statements/reports.js'
 
 export interface Seed {
   bank?: Partial<Bank>
@@ -23,6 +26,8 @@ export interface EmulatorOptions {
   xsdDir?: string
   strictIban?: boolean
   pain00103Until?: string
+  /** Statement page size and per-request transaction cap (tests make them small). */
+  reports?: ReportsOptions
 }
 
 export const DEFAULT_BANK: Bank = { bic: 'LHVBEE22', name: 'open-banking emulator' }
@@ -37,6 +42,8 @@ export class Emulator {
   readonly inbox: Inbox
   readonly engine: PaymentEngine
   readonly bank: Bank
+  readonly journal = new Journal()
+  readonly reports: AccountReports
 
   constructor(opts: EmulatorOptions & { bank?: Partial<Bank> } = {}) {
     this.clock = opts.clock ?? systemClock
@@ -47,7 +54,11 @@ export class Emulator {
     const xsd = opts.xsdDir ? new XsdValidator(opts.xsdDir) : undefined
     this.engine = new PaymentEngine(this.directory, this.ledger, this.rails, this.inbox, this.clock, this.bank, {
       strictIban: opts.strictIban, pain00103Until: opts.pain00103Until ?? '2026-11-15', xsd,
+      onBooking: (_c, b) => { this.journal.record(b) },
     })
+    this.reports = new AccountReports({
+      directory: this.directory, ledger: this.ledger, journal: this.journal, inbox: this.inbox, clock: this.clock, bank: this.bank, xsd,
+    }, opts.reports)
   }
 
   static async fromSeed(seed: Seed, opts: EmulatorOptions = {}): Promise<Emulator> {
@@ -65,10 +76,21 @@ export class Emulator {
     return customer
   }
 
-  /** Puts money on an account without a notification (simulator set-up). */
+  /**
+   * Puts money on an account without a notification (simulator set-up). The statement
+   * shows it as an ordinary credit, so statements reconcile with the balance.
+   */
   async fund(iban: string, amount: string, currency: string) {
     const n = normalizeIban(iban)
-    if (!this.directory.ownerOf(n)) throw new Error(`no account ${n}`)
-    await this.ledger.transfer({ ref: `fund-${Date.now()}-${Math.random()}`, from: FUNDING, to: n, amount: toMinor(amount), currency })
+    const owner = this.directory.ownerOf(n)
+    if (!owner) throw new Error(`no account ${n}`)
+    const ref = servicerRef()
+    const minor = toMinor(amount)
+    await this.ledger.transfer({ ref, from: FUNDING, to: n, amount: minor, currency })
+    this.journal.record({
+      account: n, owner: { name: owner.name, code: owner.code }, direction: 'CRDT', amount: minor, currency,
+      servicerRef: ref, scheme: 'INTERNAL', bookedAt: this.clock.now(),
+      counterparty: { name: this.bank.name, bic: this.bank.bic }, remittance: 'Simulator funding',
+    })
   }
 }

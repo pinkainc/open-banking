@@ -32,6 +32,8 @@ export interface EngineOptions {
   /** pain.001.001.03 is refused from this day on (the bank's announced end of support). */
   pain00103Until?: string
   xsd?: XsdValidator
+  /** Called with every booking on a customer account (the statement journal listens here). */
+  onBooking?: (customer: Customer, b: Booking) => void
 }
 
 const SCHEMES = new Set(['INST', 'SEPA', 'TARGET2', 'ALL'])
@@ -238,6 +240,7 @@ export class PaymentEngine {
   }
 
   #notify(customer: Customer, b: Booking) {
+    this.opts.onBooking?.(customer, b)
     // Notifications carry no Message-Request-Id.
     this.inbox.add({ customer, type: 'CREDIT_DEBIT_NOTIFICATION', body: camt054(b, customer.camt054, this.bank) })
   }
