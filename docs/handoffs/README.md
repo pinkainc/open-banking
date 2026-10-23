@@ -28,7 +28,7 @@ povijest.
 | Sesija | Paket | Stanje | Commit | Operacije | Testovi | Napomena |
 | --- | --- | --- | --- | --- | --- | --- |
 | S1 | L4 SEPA direct debit | gotovo | 18f7fee | 17/58 | 274 | odluke 300–318, sandbox pitanja 30–34; vjerovnikov pain.007 nije implementiran (odluka 309) |
-| S2 | L5a JSON servisi (EE) | čeka | | | | može paralelno sa S1 |
+| S2 | L5a JSON servisi (EE) | gotovo | 550836f | 26/58 | 342 | odluke 400–424, sandbox pitanja 35–42; camt.053 sad nosi BkTxCd knjiženja (i za DD) |
 | S3 | Dugovi L0–L3 + pending | čeka | | | | |
 | S4 | VoP/CoP + messages v2 | čeka | | | | |
 | S5 | UK flavour | čeka | | | | |

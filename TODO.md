@@ -48,13 +48,16 @@ Legend: `[x]` done · `[ ]` open · `[~]` in progress · `(?)` needs a sandbox r
 ## L4 — SEPA direct debit
 
 - [x] `dd.sepa.collection` pain.008.001.08 → pain.002, `dd.sepa.incoming_notification`, `dd.sepa.incoming_collection_refusal` (pain.007), refunds in camt.054, TARGET2 calendar, `/_sim/direct-debit` (decisions 300–318)
-- [ ] Statements (camt.053) do not carry the direct debit bank transaction codes → S3
+- [x] Statements (camt.053) carry each booking's own BkTxCd, so direct debits show PMNT/IDDT/ESDD and PMNT/RDDT/ESDD (done in S2)
 - [ ] DD agreement per customer, debtor notification enabled by the account manager (decision 310) → S3
 - [ ] (?) Creditor-side pain.007 endpoint (decision 309, sandbox q27); refusal texts, cancel notification, BkTxCd, refusal between cut-off and settlement (q30–34) → S8
 
 ## L5 — value-added services
 
-- [ ] FX trade offers, contracts, EE webhooks → S2
+- [x] FX trade offers and confirmations (TODAY / SPOT on the ledger), contract management, EE webhooks with delivery and retries; every JSON body schema-validated (decisions 400–424)
+- [ ] FX: currency holiday calendars, TODAY cut-off, zero-decimal currencies (JPY); `contractStatus: failed` never produced; 10 s webhook delivery timeout untested
+- [ ] Route EE webhooks / EE services on the UK host by `x-bank-code: LHVEE` → S5
+- [ ] (?) FX: one or two confirmations for TODAY, rates, error texts; contracts status codes; EE webhook retries and ownership (sandbox q35–42) → S8
 - [ ] VoP / CoP requester, messages v2, requests API → S4
 - [ ] Signed payments: `heartbeat.post` + BDOC/ASiC-E on `/payment`
 

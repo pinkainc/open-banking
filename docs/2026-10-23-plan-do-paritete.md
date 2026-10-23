@@ -20,7 +20,7 @@ firme, odluka korisnika). Zato:
   primjera, testovi, i svaka pretpostavka zapisana u `docs/decisions.md` s brojem
   pitanja iz `docs.lhv-connect/ssot/sandbox-questions.md` ako ga ima;
 - lokalni SSOT (`docs.lhv-connect/ssot/`) je završen koliko se dalo iz dokumentacije;
-  preostalih 10 `uncertain` unosa i 34 sandbox pitanja (30–34 dodana u S1) zatvara tek S8;
+  preostalih 10 `uncertain` unosa i 42 sandbox pitanja (30–34 dodana u S1, 35–42 u S2) zatvara tek S8;
 - nova pitanja za sandbox dopisuju se u `sandbox-questions.md` (mirror repo, lokalno,
   nikad ne pushati).
 
@@ -47,7 +47,7 @@ se paralelni worktreeji ne sudare.
 | **S5** | UK flavour | `/accounts/*` (`accounts.list`, `accounts.transaction.get`, `accounts.payments.pending_rejected`, PascalCase JSON, AWS-style greške), UK webhookovi (`webhook.subscribe/list/get/update/delete/delivery/history/replay`, X-LHV-HMAC, golden vrijednost iz mirrora), Bacs (`notification.bacs_incoming`, `dd.bacs.*` ×4), `x-bank-code: LHVEE` routing na EE servise | +17 → 52 | 700– | isti klijent radi protiv EE i UK hosta; HMAC jednak golden vrijednosti |
 | **S6** | L6 agency + ostatak | `agent.account.sync` (+ v2 s VoP poljima), `agent.report.rtf`, `vop.incoming_notification`, `cop.incoming`, `acq.merchant_report` (sekcija P 13 još nije pročitana); plaćanja s agency računa; PSP use caseovi 1–8 iz mirrora kao e2e lanci | +6 → **58** | 800– | `PAYMENT_PSP_USECASES/case1..8` prolaze cijeli lanac |
 | **S7** | Trajnost i jezgra | Postgres za inbox i ledger; open-ledger kao `Ledger` (SDK/HTTP); prvi pravi `Rails` bridge ili jasno sučelje za njega; ograničena memorija | — | 900– | testovi zeleni i na memory i na Postgres storeu |
-| **S8** | Conformance harness *(blokirano: sandbox certifikat)* | Snimanje prema `connect.test.lhv.eu` po `sandbox-questions.md`, usporedba po uzoru na open-ledger `conformance/` s `divergences.json`; revizija odluka koje snimke riješe; zatvaranje 10 `uncertain` unosa u katalogu | — | revizije | svih 34 pitanja odgovoreno snimkom ili upisano kao odstupanje |
+| **S8** | Conformance harness *(blokirano: sandbox certifikat)* | Snimanje prema `connect.test.lhv.eu` po `sandbox-questions.md`, usporedba po uzoru na open-ledger `conformance/` s `divergences.json`; revizija odluka koje snimke riješe; zatvaranje 10 `uncertain` unosa u katalogu | — | revizije | svih 42 pitanja odgovoreno snimkom ili upisano kao odstupanje |
 
 **Procjena: 7 sesija koje se mogu odraditi bez sandboxa, plus S8 kad stigne
 certifikat.** S2 i S1 su neovisni i mogu ići paralelno u worktreejima. S5 je

@@ -116,3 +116,27 @@ Zamke:
 4. LHV-ovi XSD-ovi su stroži od ISO-a i neke provjere servisa čine nedostižnima
    (odluka 317). Testovi za te tekstove zato šalju prazne vrijednosti, a ne izostavljene
    elemente.
+
+## L5a: JSON servisi EE (S2, 2026-10-23/24)
+
+| Agent | Effort | Poziva | Tokena konteksta | Ishod |
+|---|---|---|---|---|
+| L5a implementacija | high | 58 | 198k | svih 9 operacija spojeno, 8 smoke testova, odluke 400–415 i 420–423, pitanja 35–41 (`ca55487`, `cb338ca`, `021c1c2`) |
+| L5a testovi | high | 63 | 189k | +60 testova (342), primatelj webhookova preko pravog HTTP-a, popravak Jackson teksta, odluke 416–417 i 424, pitanje 42 |
+
+Prva razina koja je stala u dva agenta bez dovršavanja u orkestratoru. Razlozi: guard je
+podignut na 300k, pa nijedan agent nije bio rezan; JSON servisi nemaju XSD zamke; a
+odluke su u promptu bile zadane *nakon svakog modula*, ne kao zadnji korak.
+
+Zamke i nalazi:
+
+1. **Sheme nisu u runtimeu.** `ssot/json-schemas/` je u mirroru koji se ne objavljuje, pa
+   ih koriste samo testovi (ajv 2020-12, devDependency). Server sam validira i vraća LHV
+   tekstove (odluka 400).
+2. **Jacksonov tekst greške parsiranja** u P 12 primjeru citira zahtjev doslovno (pravi
+   novi redovi i navodnici), a ne JSON-escapean. Prvi agent ga je escapeao; uhvatio ga je
+   replay primjera u drugom agentu (odluka 417).
+3. **camt.053 BkTxCd** se sad uzima iz knjiženja, što je usput promijenilo i DD stavke
+   izvoda. Zato je dodan regresijski test u L4.
+4. Isporuka webhooka ima injektabilan transport i `idle()`. Timeout od 10 s ostao je
+   netestiran jer nije injektabilan.
