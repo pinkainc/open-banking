@@ -379,9 +379,9 @@ export class DirectDebitService {
   async incoming(x: ExternalCollection): Promise<Collection> {
     await this.tick()
     const debtorIban = normalizeIban(x.debtorIban)
+    if (this.d.virtual?.resolve(debtorIban)) throw new DirectDebitError(409, 'collections from a virtual IBAN are refused (AG01)')
     const owner = this.d.directory.ownerOf(debtorIban)
     if (!owner) throw new DirectDebitError(404, `no account ${debtorIban}`)
-    if (this.d.virtual?.resolve(debtorIban)) throw new DirectDebitError(409, 'collections from a virtual IBAN are refused (AG01)')
     const today = dateTallinn(this.d.clock.now())
     const due = x.dueDate ?? settlementDate(addDays(today, 1))
     const c: Collection = {

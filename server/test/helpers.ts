@@ -289,17 +289,17 @@ export function pain008(blocks: DdBlockSpec[], o: { msgId?: string; nbOfTxs?: st
 
 let rv = 0
 /** A pain.007.001.09 refusal of one collection (or several, to test the one-only rule). */
-export function pain007(txs: { pmtInfId: string; endToEndId?: string; reason?: string | null }[], o: { msgId?: string; nbOfTxs?: string; ctrlSum?: string } = {}) {
+export function pain007(txs: { pmtInfId: string; endToEndId?: string; reason?: string | null; mandateId?: string; amount?: string }[], o: { msgId?: string; nbOfTxs?: string; ctrlSum?: string } = {}) {
   const msgId = o.msgId ?? `RVSL-${++rv}-${Date.now()}`
   const blocks = txs.map((t) => `
     <OrgnlPmtInfAndRvsl>
       <OrgnlPmtInfId>${t.pmtInfId}</OrgnlPmtInfId>
-      <TxInf>${t.endToEndId ? `<OrgnlEndToEndId>${t.endToEndId}</OrgnlEndToEndId>` : ''}${t.reason === null ? '' : `<RvslRsnInf><Rsn><Cd>${t.reason ?? 'MS02'}</Cd></Rsn></RvslRsnInf>`}</TxInf>
+      <TxInf>${t.endToEndId ? `<OrgnlEndToEndId>${t.endToEndId}</OrgnlEndToEndId>` : ''}${t.reason === null ? '' : `<RvslRsnInf><Rsn><Cd>${t.reason ?? 'MS02'}</Cd></Rsn></RvslRsnInf>`}<OrgnlTxRef><MndtRltdInf><MndtId>${t.mandateId ?? 'MANDATE-1'}</MndtId><DtOfSgntr>2026-01-15</DtOfSgntr></MndtRltdInf></OrgnlTxRef></TxInf>
     </OrgnlPmtInfAndRvsl>`).join('')
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.007.001.09">
   <CstmrPmtRvsl>
-    <GrpHdr><MsgId>${msgId}</MsgId><CreDtTm>2026-03-10T10:00:00</CreDtTm><NbOfTxs>${o.nbOfTxs ?? txs.length}</NbOfTxs>${o.ctrlSum ? `<CtrlSum>${o.ctrlSum}</CtrlSum>` : ''}</GrpHdr>
+    <GrpHdr><MsgId>${msgId}</MsgId><CreDtTm>2026-03-10T10:00:00</CreDtTm><NbOfTxs>${o.nbOfTxs ?? txs.length}</NbOfTxs><CtrlSum>${o.ctrlSum ?? (txs.reduce((s, t) => s + Math.round(Number(t.amount ?? '10.00') * 100), 0) / 100).toFixed(2)}</CtrlSum><InitgPty><Nm>Demo Customer 2</Nm></InitgPty></GrpHdr>
     <OrgnlGrpInf><OrgnlMsgId>NOTPROVIDED</OrgnlMsgId><OrgnlMsgNmId>pain.008.001.08</OrgnlMsgNmId></OrgnlGrpInf>${blocks}
   </CstmrPmtRvsl>
 </Document>`
