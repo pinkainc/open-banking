@@ -17,24 +17,55 @@ export interface OutgoingPayment {
 
 export type RailsOutcome = { status: 'settled' } | { status: 'rejected'; reason: string }
 
+/** A SEPA Direct Debit our creditor sends to a debtor at another bank (L4). */
+export interface OutgoingCollection {
+  ref: string
+  amount: bigint
+  currency: string
+  creditor: { name?: string; iban: string }
+  debtor: { name?: string; iban: string; bic?: string }
+  endToEndId: string
+  mandateId?: string
+  settlementDate: string
+}
+
+/** The debtor's bank: settled, or an R-transaction before settlement with a SEPA reason code. */
+export type CollectionOutcome = { status: 'settled' } | { status: 'rejected'; code: string }
+
 export interface Rails {
   send(p: OutgoingPayment): Promise<RailsOutcome>
   /** Is SEPA Instant available to this account? Decides automatic scheme selection. */
   instantReachable(iban: string): boolean
   /** The bank's ledger account that outgoing payments of a scheme are booked against. */
   settlementAccount(scheme: Scheme | string): string
+  /** Presents a direct debit to the debtor's bank on the settlement date. */
+  collect(c: OutgoingCollection): Promise<CollectionOutcome>
 }
 
 export class SimulatorRails implements Rails {
   readonly sent: (OutgoingPayment & { outcome: RailsOutcome })[] = []
+  readonly collections: (OutgoingCollection & { outcome: CollectionOutcome })[] = []
   #rejects = new Map<string, string>()
   #noInstant = new Set<string>()
+  #collectionRejects = new Map<string, string>()
 
   /** Payments to this account are rejected by the "scheme" with this reason. */
   reject(account: string, reason: string) { this.#rejects.set(account.toUpperCase(), reason) }
   /** This account cannot receive SEPA Instant (automatic selection falls back to SEPA). */
   noInstant(account: string) { this.#noInstant.add(account.toUpperCase()) }
-  reset() { this.#rejects.clear(); this.#noInstant.clear(); this.sent.length = 0 }
+  /** Direct debits from this (external) debtor account are rejected with this SEPA code. */
+  rejectCollections(debtorIban: string, code: string) { this.#collectionRejects.set(debtorIban.toUpperCase(), code) }
+  reset() {
+    this.#rejects.clear(); this.#noInstant.clear(); this.#collectionRejects.clear()
+    this.sent.length = 0; this.collections.length = 0
+  }
+
+  async collect(c: OutgoingCollection): Promise<CollectionOutcome> {
+    const code = this.#collectionRejects.get(c.debtor.iban.toUpperCase())
+    const outcome: CollectionOutcome = code ? { status: 'rejected', code } : { status: 'settled' }
+    this.collections.push({ ...c, outcome })
+    return outcome
+  }
 
   async send(p: OutgoingPayment): Promise<RailsOutcome> {
     const target = (p.creditor.iban ?? p.creditor.account ?? '').toUpperCase()

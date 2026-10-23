@@ -13,7 +13,7 @@ export class XsdValidator {
   /** Error messages (empty when valid). Throws when the schema is not available. */
   async validate(xml: string, ns: string): Promise<string[]> {
     const file = (n: string) => ({ fileName: `${n}.xsd`, contents: readFileSync(join(this.dir, `${n}.xsd`), 'utf8') })
-    const preload = ns === 'pain.001.001.09' && this.has('supl.001.001.01') ? [file('supl.001.001.01')] : []
+    const preload = (ns === 'pain.001.001.09' || ns === 'pain.008.001.08') && this.has('supl.001.001.01') ? [file('supl.001.001.01')] : []
     const r = await validateXML({ xml: [{ fileName: 'request.xml', contents: xml }], schema: [file(ns)], preload })
     return r.valid ? [] : r.errors.map((e) => e.message.replace(/^.*?Schemas validity error : /, '').trim())
   }
