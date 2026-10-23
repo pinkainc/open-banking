@@ -1,7 +1,7 @@
 // Account statements: POST /account-statement (camt.060.001.05 / .03) answered in the
 // inbox with camt.053.001.08 / .02 pages or an <Errors> document, and the automatic
-// end-of-day statement. Every camt.053.001.08 produced is validated against the
-// published XSD when it is available (camt.053.001.02 has none: structural checks).
+// end-of-day statement. Every camt.053 read from an inbox is validated against its schema:
+// camt.053.001.08 the published XSD, camt.053.001.02 the ISO 20022 one (decision 550).
 import assert from 'node:assert/strict'
 import { beforeEach, describe, test } from 'node:test'
 import { DAY_MS } from '../src/clock.js'
@@ -10,7 +10,7 @@ import { fold1257 } from '../src/statements/codepage.js'
 import { MAX_TRANSACTIONS, PAGE_SIZE } from '../src/statements/reports.js'
 import { many, parseXml, text } from '../src/xml.js'
 import {
-  C1, C2, SP, call, camt060, drain, pain001, report, reportError, sample, schemaValid, setup, xsd, type Ctx, type ReportReq,
+  C1, C2, HAVE_ISO, HAVE_REFERENCE, SP, call, camt060, drain, pain001, report, reportError, sample, schemaValid, setup, xsd, type Ctx, type ReportReq,
 } from './helpers.js'
 
 let ctx: Ctx
@@ -338,6 +338,9 @@ describe('camt.053.001.02 (answer to camt.060.001.03)', () => {
     assert.equal(msgs.length, 1)
     const m = msgs[0]
     assert.match(m.body, /xmlns="urn:iso:std:iso:20022:tech:xsd:camt\.053\.001\.02"/)
+    // Schema-checked against the ISO 20022 camt.053.001.02 XSD, which does reject a bad one.
+    if (HAVE_REFERENCE) assert.equal(await schemaValid(m.body), HAVE_ISO)
+    if (HAVE_REFERENCE && HAVE_ISO) await assert.rejects(schemaValid(m.body.replace('<Sts>BOOK</Sts>', '<Sts>BOOKED</Sts>')), /not schema-valid/)
     const s = m.doc.Document.BkToCstmrStmt
     assert.match(s.GrpHdr.CreDtTm, /^2026-03-10T10:00:00\.000000$/)
     const p = page(m)

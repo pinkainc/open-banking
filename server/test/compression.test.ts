@@ -4,7 +4,7 @@ import { gunzipSync, inflateSync } from 'node:zlib'
 import { before, describe, test } from 'node:test'
 import { COMPRESSION_THRESHOLD, negotiate } from '../src/compression.js'
 import { mockLargeStatement } from '../src/statements/mock-large.js'
-import { C1, HAVE_REFERENCE, call, schemaValid, setup, type Ctx } from './helpers.js'
+import { C1, HAVE_ISO, HAVE_REFERENCE, call, schemaValid, setup, type Ctx } from './helpers.js'
 
 /** An inbox message whose body is exactly `bytes` long. */
 function big(ctx: Ctx, bytes: number) {
@@ -76,7 +76,9 @@ describe('compression on the UK host', () => {
     const body = gunzipSync(r.rawPayload).toString()
     assert.ok(body.length >= 10_550_000 && body.length <= 10_700_000, String(body.length))
     assert.match(body, /xmlns="urn:iso:std:iso:20022:tech:xsd:camt\.053\.001\.02"/)
-    // The mirror has no camt.053.001.02 XSD; the same writer and entries as camt.053.001.08 do validate.
+    // The mock itself against the ISO camt.053.001.02 schema (decision 550); the same writer
+    // and entries as camt.053.001.08 against the published XSD.
+    if (HAVE_REFERENCE) assert.equal(await schemaValid(body), HAVE_ISO)
     if (HAVE_REFERENCE) assert.equal(await schemaValid(mockLargeStatement(ctx.clock.now(), ctx.emulator.bank, 300_000, '08')), true)
     assert.equal((await call(ctx, { url: '/messages/test/next?mockLargeMessage=true' })).statusCode, 500)
     // Without the flag it is the ordinary next message; the mock is in no inbox.

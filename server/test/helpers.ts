@@ -40,7 +40,13 @@ export function sample(scenario: string, file: string): string | undefined {
   const p = MIRROR ? join(MIRROR_FILES, 'samples', scenario, file) : join(ROOT, 'reference/samples', `${scenario}__${file}`)
   return existsSync(p) ? readFileSync(p, 'utf8') : undefined
 }
-export const xsd = new XsdValidator(XSD_DIR)
+/**
+ * The ISO 20022 schemas of the versions the bank publishes no XSD for (camt.053.001.02,
+ * camt.052.001.06), from the iso20022.org archive by scripts/fetch-reference.sh (decision 550).
+ */
+export const ISO_XSD_DIR = join(ROOT, 'reference/iso')
+export const HAVE_ISO = existsSync(join(ISO_XSD_DIR, 'camt.053.001.02.xsd')) && existsSync(join(ISO_XSD_DIR, 'camt.052.001.06.xsd'))
+export const xsd = new XsdValidator(XSD_DIR, ISO_XSD_DIR)
 
 export const C1 = { code: '12340001', country: 'EE', iban: 'EE337700771001260958' }
 export const C2 = { code: '12340002', country: 'EE', iban: 'EE267700771001260987' }
@@ -93,6 +99,8 @@ export async function drain(ctx: Ctx, as = C1.code, headers: Record<string, stri
     if (res.statusCode === 204) return out
     const id = res.headers['message-response-id'] as string
     out.push({ id, type: res.headers['message-response-type'] as string, requestId: res.headers['message-request-id'] as string | undefined, body: res.body, doc: res.body.trimStart().startsWith('{') ? undefined : parseXml(res.body) })
+    // Every statement and balance report read from an inbox is checked against its schema.
+    if (/xmlns="urn:iso:std:iso:20022:tech:xsd:camt\.05[23]\./.test(res.body.slice(0, 300))) await schemaValid(res.body)
     await call(ctx, { method: 'DELETE', url: `/messages/${id}`, as, headers })
   }
   throw new Error('inbox does not drain')
@@ -221,7 +229,9 @@ export function reportError(m: { doc: any }) {
 /** Asserts a message against its published XSD when there is one; returns whether it was checked. */
 export async function schemaValid(body: string): Promise<boolean> {
   const ns = /xmlns="urn:iso:std:iso:20022:tech:xsd:([^"]+)"/.exec(body)?.[1]
-  if (!HAVE_REFERENCE || !ns || !xsd.has(ns)) return false
+  if (!HAVE_REFERENCE || !ns) return false
+  // With the published and the ISO schemas at hand, a message without a schema is an error.
+  if (!xsd.has(ns)) { if (HAVE_ISO) throw new Error(`no XSD for ${ns}`); return false }
   const errors = await xsd.validate(body, ns)
   if (errors.length) throw new Error(`${ns} is not schema-valid: ${errors.join('; ')}\n${body.slice(0, 4000)}`)
   return true

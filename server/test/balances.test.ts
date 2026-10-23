@@ -1,12 +1,12 @@
 // Account balances: POST /account-balance (camt.060.001.05 / .03) answered in the inbox
 // with camt.052.001.08 / .06: intraday (ITBD, ITAV), PAYMENT_LIMITS and, in .08 only,
-// END_OF_DAY_BALANCE. Every camt.052.001.08 is validated against the published XSD
-// when available (camt.052.001.06 has none: structural checks).
+// END_OF_DAY_BALANCE. Every camt.052 is validated against its schema: camt.052.001.08 the
+// published XSD, camt.052.001.06 the ISO 20022 one (decision 550).
 import assert from 'node:assert/strict'
 import { beforeEach, describe, test } from 'node:test'
 import { DAY_MS } from '../src/clock.js'
 import { many, text } from '../src/xml.js'
-import { C2, SP, call, camt060, drain, pain001, report, reportError, schemaValid, setup, type Ctx, type ReportReq } from './helpers.js'
+import { C2, HAVE_ISO, HAVE_REFERENCE, SP, call, camt060, drain, pain001, report, reportError, schemaValid, setup, type Ctx, type ReportReq } from './helpers.js'
 
 let ctx: Ctx
 beforeEach(async () => { ctx = await setup() })
@@ -189,6 +189,8 @@ describe('camt.052.001.06 (answer to camt.060.001.03)', () => {
   test('local date-times with microseconds, intraday balances', async () => {
     const m = await balance({ version: '03' })
     assert.match(m.body, /xmlns="urn:iso:std:iso:20022:tech:xsd:camt\.052\.001\.06"/)
+    if (HAVE_REFERENCE) assert.equal(await schemaValid(m.body), HAVE_ISO)
+    if (HAVE_REFERENCE && HAVE_ISO) await assert.rejects(schemaValid(m.body.replace('<Cd>ITBD</Cd>', '<Cd>ITBDX</Cd>')), /not schema-valid/)
     const r = rpt(m)
     assert.equal(r.created, '2026-03-10T10:00:00.000000')
     assert.equal(r.blocks[0].from, '2026-03-10T10:00:00.000000')

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Everything that must be green before a commit: type check and unit tests.
-# Reference XSDs and samples are fetched once when missing (offline: those tests skip).
+# Reference XSDs, samples and the ISO 20022 schemas are fetched once when missing (offline:
+# those checks are skipped).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p .rec
-[ -d reference/xsd ] || scripts/fetch-reference.sh > .rec/fetch.log 2>&1 || echo "==> reference material unavailable (offline?); XSD tests will skip"
+{ [ -d reference/xsd ] && [ -d reference/iso ]; } || scripts/fetch-reference.sh > .rec/fetch.log 2>&1 || echo "==> reference material unavailable (offline?); XSD tests will skip"
 echo "==> typecheck" && npx tsc -p .
 echo "==> unit tests"
 npm test > .rec/test.log 2>&1 && ok=1 || ok=0
