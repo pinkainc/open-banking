@@ -82,7 +82,8 @@ export function camt053(p: StatementPage): string {
       el('CdtDbtInd', e.direction),
       el('Sts', v8 ? el('Cd', 'BOOK') : 'BOOK'),
       el('BookgDt', el('Dt', dateTallinn(e.bookedAt))),
-      el('ValDt', el('DtTm', v8 ? isoTallinn(e.bookedAt) : localTallinn(e.bookedAt).slice(0, 19))),
+      // camt.053.001.02 has no ValDt (the published V2 table and sample); v08 an offset datetime.
+      v8 ? el('ValDt', el('DtTm', isoTallinn(e.bookedAt))) : null,
       el('AcctSvcrRef', e.servicerRef),
       el('BkTxCd',
         el('Domn', el('Cd', 'PMNT'), el('Fmly', el('Cd', e.direction === 'DBIT' ? 'ICDT' : 'RCDT'), el('SubFmlyCd', 'OTHR'))),

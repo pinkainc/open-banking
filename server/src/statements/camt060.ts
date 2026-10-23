@@ -27,9 +27,9 @@ export function parseCamt060(xml: string): ReportRequest {
   let doc: any
   try { doc = parseXml(xml) } catch (e) { throw new RequestInvalid((e as Error).message) }
   const root = doc?.Document
-  const ns = typeof root?.['@xmlns'] === 'string' ? root['@xmlns'] : ''
-  const m = /^urn:iso:std:iso:20022:tech:xsd:camt\.060\.001\.(0[35])$/.exec(ns)
-  if (!m || typeof root.AcctRptgReq !== 'object') throw new RequestInvalid('not a camt.060.001.05 or camt.060.001.03 document')
+  // The parser drops namespace declarations (removeNSPrefix), so read it from the text.
+  const m = /<(?:\w+:)?Document[^>]*\sxmlns(?::\w+)?="urn:iso:std:iso:20022:tech:xsd:camt\.060\.001\.(0[35])"/.exec(xml)
+  if (!m || typeof root?.AcctRptgReq !== 'object') throw new RequestInvalid('not a camt.060.001.05 or camt.060.001.03 document')
   const req = root.AcctRptgReq
   const rr = many<any>(req.RptgReq)
   const r = rr[0] ?? {}
