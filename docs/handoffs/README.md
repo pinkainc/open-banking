@@ -27,7 +27,7 @@ povijest.
 
 | Sesija | Paket | Stanje | Commit | Operacije | Testovi | Napomena |
 | --- | --- | --- | --- | --- | --- | --- |
-| S1 | L4 SEPA direct debit | gotovo | _HEAD_ | 17/58 | 274 | odluke 300–318, sandbox pitanja 30–34; vjerovnikov pain.007 nije implementiran (odluka 309) |
+| S1 | L4 SEPA direct debit | gotovo | 18f7fee | 17/58 | 274 | odluke 300–318, sandbox pitanja 30–34; vjerovnikov pain.007 nije implementiran (odluka 309) |
 | S2 | L5a JSON servisi (EE) | čeka | | | | može paralelno sa S1 |
 | S3 | Dugovi L0–L3 + pending | čeka | | | | |
 | S4 | VoP/CoP + messages v2 | čeka | | | | |
