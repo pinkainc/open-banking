@@ -6,6 +6,7 @@ import { notificationMsgId } from '../ids.js'
 import { fromMinor } from '../ledger.js'
 import { dateTallinn, isoTallinn, localTallinn } from '../time.js'
 import { document, el, opt, toXml, type Node } from '../xml.js'
+import { postalAddress, type BankAddress } from './bank-address.js'
 import { fold1257 } from './codepage.js'
 import type { JournalEntry } from './journal.js'
 
@@ -35,7 +36,7 @@ export interface StatementPage {
   fullDays: boolean
   iban: string
   owner: { name: string; code: string }
-  bank: { bic: string; name: string }
+  bank: { bic: string; name: string; address?: BankAddress | null }
   blocks: StatementBlock[]
 }
 
@@ -137,7 +138,8 @@ export function camt053(p: StatementPage): string {
       el('Acct',
         el('Id', el('IBAN', p.iban)),
         el('Ccy', b.currency),
-        el('Svcr', el('FinInstnId', el(bicTag, p.bank.bic.slice(0, 8)), el('Nm', p.bank.name)))),
+        // The bank's postal address as the samples (decision 553); BIC and name as before.
+        el('Svcr', el('FinInstnId', el(bicTag, p.bank.bic.slice(0, 8)), el('Nm', p.bank.name), postalAddress(p.bank.address, v8)))),
       balance('OPBD', b.currency, b.opening, p.from),
       balance('CLBD', b.currency, b.closing, lastMs),
       el('TxsSummry',

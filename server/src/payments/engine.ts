@@ -31,9 +31,15 @@ import { camt054, type Booking } from './camt054.js'
 import { decimalEq, decimalSum, painVersion, readPain001, structuralProblem, type Block, type PainVersion, type PaymentFile, type Tx } from './pain001.js'
 import { aggregate, pain002, type StatusReport, type TxStatus } from './pain002.js'
 import type { XsdValidator } from './xsd.js'
+import type { BankAddress } from '../statements/bank-address.js'
 import type { VirtualAccount, VirtualAccounts } from '../viban/registry.js'
 
-export interface Bank { bic: string; name: string }
+export interface Bank {
+  bic: string
+  name: string
+  /** Postal address in statements (Svcr/FinInstnId/PstlAdr); default by BIC country, null for none (decision 553). */
+  address?: BankAddress | null
+}
 
 export interface EngineOptions {
   /** How many accepted MsgIds are remembered (decision 504). */

@@ -17,6 +17,7 @@ import { normalizeIban } from './iban.js'
 import { servicerRef } from './ids.js'
 import { Journal } from './statements/journal.js'
 import { AccountReports, type ReportsOptions } from './statements/reports.js'
+import { checkBankAddress, defaultBankAddress } from './statements/bank-address.js'
 import { VibanSchemas } from './viban/messages.js'
 import { VibanService, type ErrorDelivery } from './viban/service.js'
 
@@ -72,6 +73,8 @@ export class Emulator {
     this.inbox = new Inbox(this.clock, undefined, tombstones)
     this.webhooksEe = new EeWebhooks(this.inbox, this.clock, { deliver: opts.webhookDeliver })
     this.bank = { ...DEFAULT_BANK, ...opts.bank }
+    if (this.bank.address === undefined) this.bank.address = defaultBankAddress(this.bank.bic)
+    else if (this.bank.address) checkBankAddress(this.bank.address)
     const xsd = opts.xsdDir ? new XsdValidator(opts.xsdDir) : undefined
     this.viban = new VibanService(this.directory, this.inbox, this.clock, {
       schemas: opts.xsdDir ? new VibanSchemas(opts.xsdDir) : undefined, errors: opts.vibanErrors,

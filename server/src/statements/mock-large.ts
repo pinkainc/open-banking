@@ -2,7 +2,7 @@
 // mock account statement (CAMT.053) with dummy transactions, resulting in an uncompressed
 // payload of approximately 10.6MB", for trying response compression. A real camt.053.001.02
 // from the statement writer, for a dummy account; it is not stored in any inbox.
-import { camt053, type StatementVersion } from './camt053.js'
+import { camt053, type StatementPage, type StatementVersion } from './camt053.js'
 import type { JournalEntry } from './journal.js'
 
 /** Approximate uncompressed size of the published mock. */
@@ -11,7 +11,7 @@ const IBAN = 'EE382200221020145685'
 const OWNER = { name: 'Mock Statement Customer', code: '00000000' }
 
 /** camt.053.001.02 as published; `version` '08' only lets tests check the entries against an XSD the mirror has. */
-export function mockLargeStatement(now: Date, bank: { bic: string; name: string }, size = MOCK_SIZE, version: StatementVersion = '02'): string {
+export function mockLargeStatement(now: Date, bank: StatementPage['bank'], size = MOCK_SIZE, version: StatementVersion = '02'): string {
   const to = now.getTime()
   const from = to - 24 * 60 * 60 * 1000
   const build = (n: number) => {

@@ -10,7 +10,7 @@ import { fold1257 } from '../src/statements/codepage.js'
 import { MAX_TRANSACTIONS, PAGE_SIZE } from '../src/statements/reports.js'
 import { many, parseXml, text } from '../src/xml.js'
 import {
-  C1, C2, HAVE_ISO, HAVE_REFERENCE, SP, call, camt060, drain, pain001, report, reportError, sample, schemaValid, setup, xsd, type Ctx, type ReportReq,
+  C1, C2, HAVE_ISO, HAVE_REFERENCE, SP, call, camt060, drain, pain001, report, reportError, sample, schemaValid, seed, setup, xsd, type Ctx, type ReportReq,
 } from './helpers.js'
 
 let ctx: Ctx
@@ -449,5 +449,48 @@ describe('automatic end-of-day statement', () => {
     const bad = await call(ctx, { method: 'POST', url: '/_sim/end-of-day', body: { date: '2026-03-11' } })
     assert.equal(bad.statusCode, 400)
     assert.equal((await call(ctx, { method: 'POST', url: '/_sim/end-of-day', body: { date: '11.03.2026' } })).statusCode, 400)
+  })
+})
+
+describe('bank postal address in Svcr (decision 553)', () => {
+  const svcr = (m: Msg) => many<any>(m.doc.Document.BkToCstmrStmt.Stmt).map((s) => s.Acct.Svcr.FinInstnId)
+  const EE = { StrtNm: 'Tartu mnt.', BldgNb: '2', PstCd: '10145', TwnNm: 'Tallinn', CtrySubDvsn: 'Harjumaa', Ctry: 'EE' }
+
+  test('EE (default BIC LHVBEE22): Tartu mnt. 2 as P 05; v08 wraps the type in Cd, v02 does not', async () => {
+    const [m8] = (await statement()).msgs
+    assert.ok(svcr(m8).length > 1)
+    for (const f of svcr(m8)) assert.deepEqual(f.PstlAdr, { AdrTp: { Cd: 'BIZZ' }, ...EE })
+    assert.match(m8.body.replace(/\s+</g, '<'), /<Nm>open-banking emulator<\/Nm><PstlAdr><AdrTp><Cd>BIZZ<\/Cd><\/AdrTp><StrtNm>Tartu mnt\.<\/StrtNm><BldgNb>2<\/BldgNb><PstCd>10145<\/PstCd><TwnNm>Tallinn<\/TwnNm><CtrySubDvsn>Harjumaa<\/CtrySubDvsn><Ctry>EE<\/Ctry><\/PstlAdr>/)
+    const [m2] = (await statement({ version: '03' })).msgs
+    for (const f of svcr(m2)) assert.deepEqual(f.PstlAdr, { AdrTp: 'BIZZ', ...EE })
+    // The published camt.053.001.02 (PAYMENT_VIBAN_SEPA 053A) has the same block.
+    const pub = sample('PAYMENT_VIBAN_SEPA', 'ACCOUNT_STATEMENT_CAMT.053A.xml')
+    if (pub) assert.deepEqual(svcr(m2)[0].PstlAdr, parseXml(pub).Document.BkToCstmrStmt.Stmt.Acct.Svcr.FinInstnId.PstlAdr)
+  })
+
+  test('a GB BIC gets the UK address (1 Angel Court, no CtrySubDvsn), both versions schema-valid', async () => {
+    const s = seed()
+    s.bank = { bic: 'LHVBGB2L', name: 'LHV BANK LIMITED' }
+    ctx = await setup({}, s)
+    const UK = { StrtNm: 'Angel Court', BldgNb: '1', PstCd: 'EC2R 7HJ', TwnNm: 'London', Ctry: 'GB' }
+    const [m8] = (await statement()).msgs
+    assert.deepEqual(svcr(m8)[0], { BICFI: 'LHVBGB2L', Nm: 'LHV BANK LIMITED', PstlAdr: { AdrTp: { Cd: 'BIZZ' }, ...UK } })
+    const [m2] = (await statement({ version: '03' })).msgs
+    assert.deepEqual(svcr(m2)[0], { BIC: 'LHVBGB2L', Nm: 'LHV BANK LIMITED', PstlAdr: { AdrTp: 'BIZZ', ...UK } })
+  })
+
+  test('the seed sets another address or none; an address the schemas refuse stops the start', async () => {
+    const s = seed()
+    s.bank = { address: { StrtNm: 'Main St', TwnNm: 'Riga', Ctry: 'LV', AdrLine: ['Floor 3'] } }
+    ctx = await setup({}, s)
+    assert.deepEqual(svcr((await statement()).msgs[0])[0].PstlAdr, { StrtNm: 'Main St', TwnNm: 'Riga', Ctry: 'LV', AdrLine: 'Floor 3' })
+    s.bank = { address: null }
+    ctx = await setup({}, s)
+    const [m] = (await statement({ version: '03' })).msgs
+    assert.equal(svcr(m)[0].PstlAdr, undefined)
+    for (const address of [{ AdrTp: 'WORK' }, { Ctry: 'Estonia' }, { TwnNm: 'x'.repeat(36) }, { AdrLine: Array(8).fill('x') }, { Street: 'x' }]) {
+      s.bank = { address: address as any }
+      await assert.rejects(setup({}, s), /bank\.address/)
+    }
   })
 })
