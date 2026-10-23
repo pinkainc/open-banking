@@ -16,6 +16,8 @@ import { directDebitSimRoutes, registerDirectDebit } from './directdebit/routes.
 import { fxSimRoutes, registerFx } from './fx/routes.js'
 import { contractsSimRoutes, registerContracts } from './contracts/routes.js'
 import { jsonTextScope } from './jsonbody.js'
+import { COMPRESSION_THRESHOLD, compress, negotiate } from './compression.js'
+import { mockLargeStatement } from './statements/mock-large.js'
 import { eeWebhookSimRoutes, registerEeWebhooks } from './webhooks/ee-routes.js'
 
 export interface AppOptions {
@@ -33,6 +35,8 @@ export interface AppOptions {
   flavour?: Flavour
   /** X-Bank-Code on every response; default LHVEE, LHVUK for the UK flavour. */
   bankCode?: string
+  /** Message bodies of at least this many bytes are compressed (UK flavour; decision 503). */
+  compressionThreshold?: number
 }
 
 export type Flavour = 'EE' | 'UK'
@@ -90,11 +94,25 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   }
   const scope = (req: FastifyRequest, c: Caller): Scope => ({ customers: c.visible, type: filterType(req) })
 
-  const sendMessage = (reply: FastifyReply, m: Message) => {
+  // Response compression (UK host, decision 503): decided before any header is set, so a
+  // large message the client cannot take is a clean technical error.
+  const threshold = opts.compressionThreshold ?? COMPRESSION_THRESHOLD
+  const negotiateOrFail = (req: FastifyRequest) => {
+    const encoding = negotiate(req.headers['accept-encoding'])
+    if (!encoding) throw jsonError(500, 'TECHNICAL_ERROR', 'The message body is 10 MB or more: the request must accept gzip or deflate (Accept-Encoding)')
+    return encoding
+  }
+  const sendBody = (req: FastifyRequest, reply: FastifyReply, contentType: string, body: string) => {
+    if (flavour !== 'UK' || Buffer.byteLength(body) < threshold) return reply.code(200).type(contentType).send(body)
+    const encoding = negotiateOrFail(req)
+    return reply.code(200).type(contentType).header('Content-Encoding', encoding).header('Vary', 'Accept-Encoding').send(compress(body, encoding))
+  }
+  const sendMessage = (req: FastifyRequest, reply: FastifyReply, m: Message) => {
+    if (flavour === 'UK' && Buffer.byteLength(m.body) >= threshold) negotiateOrFail(req)
     reply.header('Message-Response-Id', m.id).header('Message-Response-Type', m.type)
       .header('Client-Code', m.clientCode).header('Client-Country', m.clientCountry)
     if (m.requestId) reply.header('Message-Request-Id', m.requestId)
-    return reply.code(200).type(m.contentType).send(m.body)
+    return sendBody(req, reply, m.contentType, m.body)
   }
   const accepted = (reply: FastifyReply, id: string) => reply.code(202).header('Message-Request-Id', id).send()
 
@@ -158,8 +176,21 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   app.get('/messages/next', async (req, reply) => {
     const c = caller(req)
     const m = emulator.inbox.next(scope(req, c))
-    return m ? sendMessage(reply, m) : reply.code(204).send()
+    return m ? sendMessage(req, reply, m) : reply.code(204).send()
   })
+
+  // UK prelive's compression test (G get-next-message-1): a ~10.6 MB mock camt.053 with
+  // dummy transactions; without mockLargeMessage=true it is GET /messages/next.
+  if (flavour === 'UK') {
+    app.get('/messages/test/next', async (req, reply) => {
+      const c = caller(req)
+      if (String((req.query as { mockLargeMessage?: string }).mockLargeMessage).toLowerCase() === 'true') {
+        return sendBody(req, reply, 'application/xml', mockLargeStatement(emulator.clock.now(), emulator.bank))
+      }
+      const m = emulator.inbox.next(scope(req, c))
+      return m ? sendMessage(req, reply, m) : reply.code(204).send()
+    })
+  }
 
   app.get('/messages/count', async (req) => {
     const c = caller(req)
@@ -190,7 +221,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     const c = caller(req)
     const m = emulator.inbox.get(scope(req, c), (req.params as { id: string }).id)
     if (!m) throw notFound()
-    return sendMessage(reply, m)
+    return sendMessage(req, reply, m)
   })
 
   app.delete('/messages/:id', async (req, reply) => {
