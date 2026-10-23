@@ -31,7 +31,7 @@ PREAMBLE='AUTONOMNI NOĆNI RAD. Korisnik spava i ne može odgovarati. Pravila za
 --- HANDOFF ---
 '
 
-note() { echo "$*" | tee -a "$SUMMARY"; }
+note() { printf "%s\n" "$@" | tee -a "$SUMMARY"; }
 notify() { osascript -e "display notification \"$1\" with title \"open-banking overnight\"" 2>/dev/null || true; }
 newest() { ls -t "$HANDOFFS"/*.md 2>/dev/null | head -1; }
 fail() { note "STOP: $*"; notify "STOP: $*"; exit 1; }
