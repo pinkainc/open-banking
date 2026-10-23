@@ -29,6 +29,12 @@ export interface Customer extends CustomerKey {
    * (default) or PENDING, waiting for SCA in the internet bank (decision 521).
    */
   payments?: 'DIRECT' | 'PENDING'
+  /**
+   * SEPA Direct Debit set-up by the account manager (P 09, decision 527): `agreement`
+   * lets the customer send collections, `debtorNotification` sends it the incoming
+   * collection notifications. Both off when absent.
+   */
+  directDebit?: { agreement?: boolean; debtorNotification?: boolean }
 }
 
 export interface CustomerInput {
@@ -43,6 +49,7 @@ export interface CustomerInput {
   payments?: 'DIRECT' | 'PENDING'
   /** Connect payment limits in EUR (decisions 109, 524); kept by the account reports. */
   limits?: { daily?: string; monthly?: string; instant?: string }
+  directDebit?: { agreement?: boolean; debtorNotification?: boolean }
 }
 
 export class Directory {
@@ -51,12 +58,17 @@ export class Directory {
 
   add(input: CustomerInput): Customer {
     if (input.payments !== undefined && input.payments !== 'DIRECT' && input.payments !== 'PENDING') throw new Error('payments must be DIRECT or PENDING')
+    const dd = input.directDebit
+    if (dd !== undefined && (typeof dd !== 'object' || dd === null || Object.entries(dd).some(([k, v]) => (k !== 'agreement' && k !== 'debtorNotification') || typeof v !== 'boolean'))) {
+      throw new Error('directDebit takes the booleans agreement and debtorNotification')
+    }
     const c: Customer = {
       code: input.code, country: input.country.toUpperCase(), name: input.name, accounts: [],
       camt054: input.camt054 ?? '02',
       ...(input.services ? { services: [...input.services] } : {}),
       ...(input.certificates ? { certificates: [...input.certificates] } : {}),
       ...(input.payments ? { payments: input.payments } : {}),
+      ...(input.directDebit ? { directDebit: { ...input.directDebit } } : {}),
       connected: input.connected?.map((k) => (Array.isArray(k) ? { code: k[0], country: k[1].toUpperCase() } : { code: k.code, country: k.country.toUpperCase() })),
     }
     this.#customers.set(keyOf(c), c)

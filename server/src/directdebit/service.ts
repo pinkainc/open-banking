@@ -207,6 +207,8 @@ export class DirectDebitService {
       const owner = this.d.directory.ownerOf(iban)
       if (!owner) return E.creditorAccount(iban)
       if (keyOf(owner) !== keyOf(customer)) return E.noRights(iban)
+      // Sending collections needs a Direct Debit agreement with the bank (decision 527).
+      if (!owner.directDebit?.agreement) return E.noRights(iban)
     }
     return undefined
   }
@@ -428,6 +430,8 @@ export class DirectDebitService {
   }
 
   #notifyDebtor(c: Collection) {
+    // Enabled per customer by the account manager (P 09, decision 527).
+    if (!c.debtorCustomer!.directDebit?.debtorNotification) return
     c.notificationMsgId = notificationMsgId()
     this.d.inbox.add({ customer: c.debtorCustomer!, type: DD_TYPES.notification, body: incomingCollection(c, c.notificationMsgId, this.d.clock.now()) })
   }

@@ -2,7 +2,7 @@
 // up customers and money, injects incoming payments and steers the simulated rails.
 // Bodies and answers are JSON; amounts are decimal strings ("12.50").
 import type { FastifyInstance } from 'fastify'
-import type { CustomerInput } from './directory.js'
+import type { Customer, CustomerInput } from './directory.js'
 import { ConnectError } from './errors.js'
 import type { Emulator } from './emulator.js'
 import { fromMinor, toMinor } from './ledger.js'
@@ -33,7 +33,7 @@ export function simRoutes(emulator: Emulator) {
   return async (app: FastifyInstance) => {
     app.get('/customers', async () => ({
       customers: await Promise.all(emulator.directory.all().map(async (c) => ({
-        code: c.code, country: c.country, name: c.name, camt054: c.camt054, payments: c.payments ?? 'DIRECT',
+        ...customerSettings(c), name: c.name, camt054: c.camt054,
         ...(c.connected ? { connected: c.connected } : {}),
         accounts: await Promise.all(c.accounts.map(async (iban) => ({ iban, balances: await balances(iban) }))),
       }))),
@@ -51,17 +51,24 @@ export function simRoutes(emulator: Emulator) {
       } catch (e) { throw bad((e as Error).message) }
     })
 
-    // Per-customer settings an account manager would switch: payment confirmation.
+    // Per-customer settings an account manager would switch: payment confirmation, direct debit.
+    const customerSettings = (c: Customer) => ({
+      code: c.code, country: c.country, payments: c.payments ?? 'DIRECT',
+      directDebit: { agreement: !!c.directDebit?.agreement, debtorNotification: !!c.directDebit?.debtorNotification },
+    })
     app.patch('/customers/:country/:code', async (req) => {
       const { country, code } = req.params as { country: string; code: string }
       const c = emulator.directory.get({ code, country })
       if (!c) throw new ConnectError(404, 'NOT_FOUND', `no customer ${country}/${code}`)
-      const b = (req.body ?? {}) as { payments?: unknown }
-      if (b.payments !== undefined) {
-        if (b.payments !== 'DIRECT' && b.payments !== 'PENDING') throw bad('payments must be DIRECT or PENDING')
-        c.payments = b.payments
+      const b = (req.body ?? {}) as { payments?: unknown; directDebit?: Record<string, unknown> }
+      if (b.payments !== undefined && b.payments !== 'DIRECT' && b.payments !== 'PENDING') throw bad('payments must be DIRECT or PENDING')
+      const dd = b.directDebit
+      if (dd !== undefined && (typeof dd !== 'object' || dd === null || Object.entries(dd).some(([k, v]) => (k !== 'agreement' && k !== 'debtorNotification') || typeof v !== 'boolean'))) {
+        throw bad('directDebit takes the booleans agreement and debtorNotification')
       }
-      return { code: c.code, country: c.country, payments: c.payments ?? 'DIRECT' }
+      if (b.payments !== undefined) c.payments = b.payments as 'DIRECT' | 'PENDING'
+      if (dd !== undefined) c.directDebit = { ...c.directDebit, ...(dd as { agreement?: boolean; debtorNotification?: boolean }) }
+      return customerSettings(c)
     })
 
     // Payments waiting in the internet bank (SCA) or in the bank's manual review.

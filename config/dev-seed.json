@@ -3,14 +3,17 @@
   "customers": [
     {
       "code": "12340001", "country": "EE", "name": "Demo Customer 1",
+      "directDebit": { "agreement": true, "debtorNotification": true },
       "accounts": [{ "iban": "EE337700771001260958", "balances": { "EUR": "10000.00", "USD": "500.00", "GBP": "500.00" }, "viban": true }]
     },
     {
       "code": "12340002", "country": "EE", "name": "Demo Customer 2",
+      "directDebit": { "agreement": true, "debtorNotification": true },
       "accounts": [{ "iban": "EE267700771001260987", "balances": { "EUR": "100.00" } }]
     },
     {
       "code": "10000001", "country": "EE", "name": "Demo Service Provider",
+      "directDebit": { "agreement": true, "debtorNotification": true },
       "accounts": [{ "iban": "EE707700771001260001", "balances": { "EUR": "1000.00" }, "viban": true }],
       "connected": [{ "code": "12340001", "country": "EE" }, { "code": "12340002", "country": "EE" }]
     }

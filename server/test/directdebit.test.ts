@@ -365,7 +365,7 @@ describe('TARGET2 calendar and the collection window', () => {
 describe('the published sample DIRECT_DEBIT_PAIN.008.xml', { skip: sample('DIRECT_DEBIT_SEPA', 'DIRECT_DEBIT_PAIN.008.xml') ? false : 'reference material not available' }, () => {
   const raw = () => sample('DIRECT_DEBIT_SEPA', 'DIRECT_DEBIT_PAIN.008.xml')!
   const CREDITOR = { code: '22200001', country: 'EE', name: 'DirectdebitCreditoractive', iban: 'EE447700771002491205' }
-  beforeEach(async () => { await ctx.emulator.addCustomer({ code: CREDITOR.code, country: 'EE', name: CREDITOR.name, accounts: [CREDITOR.iban] }) })
+  beforeEach(async () => { await ctx.emulator.addCustomer({ code: CREDITOR.code, country: 'EE', name: CREDITOR.name, accounts: [CREDITOR.iban], directDebit: { agreement: true } }) })
 
   test('as published it is a pain.008.001.02 and refused (docs/decisions.md 302)', async () => {
     await collect(raw(), CREDITOR.code)

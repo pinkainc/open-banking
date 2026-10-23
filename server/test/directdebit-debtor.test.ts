@@ -351,3 +351,52 @@ describe('a VIBAN as the debtor account', () => {
     assert.deepEqual(await ddDrain(ctx), [], 'no notification to the VIBAN owner')
   })
 })
+
+describe('direct debit set-up per customer (decision 527)', () => {
+  const patch = (code: string, directDebit: object) => call(ctx, { method: 'PATCH', url: `/_sim/customers/EE/${code}`, body: { directDebit } })
+
+  test('without the debtor notification: no pain.008 notification, still settled with a camt.054 and refusable', async () => {
+    const r = await patch(C2.code, { debtorNotification: false })
+    assert.deepEqual(json(r).directDebit, { agreement: true, debtorNotification: false })
+    const res = await call(ctx, { method: 'POST', url: '/direct-debit/collection', body: pain008([{ pmtInfId: 'PMT-N1', txs: [{ endToEndId: 'E2E-N1', amount: '10.00' }] }]) })
+    assert.equal(res.statusCode, 202)
+    assert.equal(ddStatus((await ddDrain(ctx))[0]).grp, 'ACCP')
+    assert.deepEqual(await ddDrain(ctx, C2.code), [], 'no DIRECT_DEBIT_INCOMING_COLLECTION_NOTIFICATION')
+    // From another bank too.
+    await call(ctx, { method: 'POST', url: '/_sim/direct-debit/incoming', body: { debtorIban: C2.iban, amount: '1.00', endToEndId: 'EXT-N', pmtInfId: 'EXTPMT-N', dueDate: '2026-03-12' } })
+    assert.deepEqual(await ddDrain(ctx, C2.code), [])
+    // The debtor can still refuse what it learnt of elsewhere; the cancel notification refers to the pain.008 MsgId.
+    const { status, rest } = await answered(pain007([{ pmtInfId: 'EXTPMT-N', endToEndId: 'EXT-N', amount: '1.00' }]))
+    assert.equal(status.blocks[0].txs[0].sts, 'ACCP')
+    assert.deepEqual(rest.map((m) => m.type), ['DIRECT_DEBIT_INCOMING_CANCEL_NOTIFICATION'])
+    await settle()
+    const msgs = await ddDrain(ctx, C2.code)
+    assert.deepEqual(msgs.map((m) => [m.type, ddEntry(m).ind]), [['CREDIT_DEBIT_NOTIFICATION', 'DBIT']])
+    assert.equal(await balance(ctx, C2.iban), '90.00')
+  })
+
+  test('without the agreement the creditor is refused: group RJCT "No rights to creditor’s account …", nothing reaches the debtor', async () => {
+    await patch(C1.code, { agreement: false })
+    const res = await call(ctx, { method: 'POST', url: '/direct-debit/collection', body: pain008([{ txs: [{ amount: '10.00' }] }]) })
+    assert.equal(res.statusCode, 202)
+    const st = ddStatus((await ddDrain(ctx))[0])
+    assert.deepEqual([st.grp, st.grpInfo], ['RJCT', `No rights to creditor’s account ${C1.iban}.`])
+    assert.deepEqual(await ddDrain(ctx, C2.code), [])
+    // Switched on again, the same file goes through (a refused file does not burn its MsgId).
+    await patch(C1.code, { agreement: true })
+    await collection()
+  })
+
+  test('off when absent: a customer created without it; bad set-ups are refused', async () => {
+    const add = await call(ctx, { method: 'POST', url: '/_sim/customers', body: { code: '55550003', country: 'EE', name: 'Plain', accounts: [{ iban: 'EE047700771001260929', balances: { EUR: '50.00' } }] } })
+    assert.equal(add.statusCode, 201, add.body)
+    const listed = json(await call(ctx, { url: '/_sim/customers' })).customers.find((c: any) => c.code === '55550003')
+    assert.deepEqual(listed.directDebit, { agreement: false, debtorNotification: false })
+    await call(ctx, { method: 'POST', url: '/_sim/direct-debit/incoming', body: { debtorIban: 'EE047700771001260929', amount: '1.00' } })
+    assert.deepEqual(await ddDrain(ctx, '55550003'), [])
+    assert.equal((await patch(C2.code, { debtorNotification: 'yes' })).statusCode, 400)
+    assert.equal((await patch(C2.code, { mandates: true })).statusCode, 400)
+    const bad = await call(ctx, { method: 'POST', url: '/_sim/customers', body: { code: '55550004', country: 'EE', name: 'Bad', directDebit: { agreement: 1 } } })
+    assert.equal(bad.statusCode, 400)
+  })
+})
