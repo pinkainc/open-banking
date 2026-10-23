@@ -15,41 +15,45 @@ Legend: `[x]` done · `[ ]` open · `[~]` in progress · `(?)` needs a sandbox r
 
 - [x] mTLS identity, service-provider scoping, heartbeat (GET, `/mq`, POST), inbox (next / list / count / get / delete / bulk delete), `Filter-Response-Type`, 5-day expiry
 - [x] Spec fixes from the docs mirror: messages-API 404/400 as JSON, DELETE of a never-existing id 404, bulk delete 200/207/400, empty list 204, `X-Bank-Code`, 413 above 5 MB, `X-Idempotency-Key` 409, heartbeat `AuthorizedUser` = certificate holder (decisions 8, 9, 11, 25–28)
-- [ ] `X-Idempotency-Key` (decision 28) is documented only for the UK host; the EE host detects duplicates by pain.001 `MsgId` alone (mirror `ssot/ee-vs-uk.md`). Scope it per host → S3
-- [ ] Per-contract service grants: 403 "User has not been granted the requested service" (services list per customer in the seed) → S3
-- [ ] Certificate validity checks with their documented 403 texts (not yet valid, expired, "User authentication certificate is different than expected") → S3
-- [ ] gzip/deflate of inbox messages ≥10 MB (`Accept-Encoding`), 500 without it → S3
-- [ ] Bounded memory: inbox tombstones and remembered MsgIds / idempotency keys grow without limit → S3
+- [x] Host flavour EE / UK; `X-Idempotency-Key` only on the UK host (decision 500, S3)
+- [x] Per-contract service grants, 403 "User has not been granted the requested service" for the four documented service names (decision 501, S3)
+- [ ] Service names for VIBAN, DD, FX, VoP, contracts, webhooks are undocumented, so those routes are not gated (sandbox q43) → S8
+- [x] Certificate validity checks with their documented 403 texts (decision 502, S3); SK/OCSP texts not produced
+- [x] gzip/deflate of messages ≥10 MB on the UK host, 500 without `Accept-Encoding` (decision 503, S3)
+- [x] Bounded memory: tombstones, MsgIds, idempotency keys (decision 504, S3)
 - [ ] (?) Repeat DELETE, bulk statuses, heartbeat/mq type, idempotency and 413 on the EE host (`ssot/sandbox-questions.md`) → S8
 
 ## L1 — payments core
 
 - [x] `POST /payment` pain.001.001.09 / .03, XSD validation, pain.002 group and transaction errors, camt.054 for every debit and credit, scheme selection on simulated rails
-- [ ] `payment.oneoff` → S3
-- [ ] Pending payments (SCA in the internet bank → PDNG, approve via `/_sim`), manual review (PDNG NARR) → S3
-- [ ] ACWC "Payment processed as European payment" when an automatic instant payment falls back to SEPA after being attempted → S3
-- [ ] Code page 1257 folding of free text echoed into pain.002 / camt.054 → S3
-- [ ] Duplicate-payment detection (InstrId), daily/monthly limits enforced (10k / 100k / 15k instant) → S3
+- [x] `payment.oneoff`: removed by LHV on 06.01.2026, stays 404 (decision 520, S3)
+- [x] Pending payments (SCA → PDNG, `/_sim/payments/pending`), manual review (decisions 521, 522, S3)
+- [x] ACWC instant → SEPA fallback, `/_sim/rails/instant-failure` (decision 523, S3)
+- [x] Code page 1257 folding in pain.002 / camt.054 / rails (decision 526, S3)
+- [ ] Folding for direct debit and VIBAN texts
+- [x] Duplicate payments (InstrId + accounts + amount), limits enforced (decisions 524, 525, S3)
+- [ ] camt.052 PAYMENT_LIMITS counts only booked debits; enforcement also counts accepted, unbooked ones
 - [ ] PSP use-case samples (`PAYMENT_PSP_USECASES/case1..8`) once agency accounts exist; `PAYMENT_SWIFT_*` with their own expectations → S6
 
 ## L2 — account information
 
 - [x] camt.060 → camt.053.001.08 / .02 and camt.052.001.08 / .06, paging, INTM, `errStatement_*`, automatic end-of-day statement (decisions 100–116)
-- [ ] Real XSD validation of camt.053.001.02 and camt.052.001.06 with the public ISO 20022 schemas → S3
-- [ ] Bank postal address (`PstlAdr`) in statements → S3
+- [x] camt.053.001.02 / camt.052.001.06 validated with the ISO 20022 schemas (decision 550, S3)
+- [x] Bank `PstlAdr` in camt.053 (decision 553, S3)
+- [ ] Bank `PstlAdr` in camt.054; UK flavour does not switch the bank BIC to `LHVBGB2L`
 - [ ] (?) Are statement business errors inbox messages (decision 100, sandbox question 11)? How do INTM balances look? → S8
 
 ## L3 — virtual IBANs
 
 - [x] open / bulk / modify / info / close, 13 error codes, status notifications, payments to and from VIBANs (decisions 200–212)
-- [ ] VIBAN shown in camt.053 / camt.052 of the master account (samples camt.060 and camt.053A in `PAYMENT_VIBAN_SEPA`) → S3
+- [x] VIBAN in the master account's camt.053, not in camt.052 (decisions 551, 552, S3)
 - [ ] (?) VIBAN business errors: HTTP 4xx or inbox message (decision 200)? → S8
 
 ## L4 — SEPA direct debit
 
 - [x] `dd.sepa.collection` pain.008.001.08 → pain.002, `dd.sepa.incoming_notification`, `dd.sepa.incoming_collection_refusal` (pain.007), refunds in camt.054, TARGET2 calendar, `/_sim/direct-debit` (decisions 300–318)
 - [x] Statements (camt.053) carry each booking's own BkTxCd, so direct debits show PMNT/IDDT/ESDD and PMNT/RDDT/ESDD (done in S2)
-- [ ] DD agreement per customer, debtor notification enabled by the account manager (decision 310) → S3
+- [x] DD agreement and debtor notification per customer (decision 527, S3)
 - [ ] (?) Creditor-side pain.007 endpoint (decision 309, sandbox q27); refusal texts, cancel notification, BkTxCd, refusal between cut-off and settlement (q30–34) → S8
 
 ## L5 — value-added services
@@ -75,3 +79,21 @@ Legend: `[x]` done · `[ ]` open · `[~]` in progress · `(?)` needs a sandbox r
 
 - [ ] Persistence (Postgres) for inbox and ledger; open-ledger as the backing `Ledger`; real rails bridges behind `Rails` → S7
 - [ ] Conformance harness: record exchanges against connect.test.lhv.eu once a sandbox certificate exists, divergences file → S8
+
+## Za pregled ujutro
+
+Odluke iz noćnog rada S3 (2026-10-24), sve označene „(noćni rad, potvrditi)” u `docs/decisions.md`:
+
+- [ ] 500 host flavour (EE default, `CONNECT_FLAVOUR`)
+- [ ] 501 service grants: seed `services` (bez polja = sve usluge), provodi se samo za HEARTBEAT, ACCOUNT_STATEMENT, ACCOUNT_BALANCE, PAYMENTS_WITHOUT_SIGNATURE
+- [ ] 502 certifikati: seed `certificates` (SHA-256), mijenja odluku 2 (TLS greške samo zbog datuma dolaze do aplikacije)
+- [ ] 503 kompresija samo na UK hostu; `/messages/test/next?mockLargeMessage=true` već postoji (dio `messages.test.next` iz S4)
+- [ ] 504 granice memorije (5 d / 24 h / 100k / 200k MsgId bez vremenskog limita)
+- [ ] 521–522 pending i ručni pregled (seed `payments: DIRECT|PENDING`)
+- [ ] 523 ACWC fallback
+- [ ] 524 limiti se sad **provode** (mijenja odluku 109 „samo se javljaju”)
+- [ ] 525 duplikat = isti InstrId + računi + valuta + iznos (PAYMENT_MULTI ponavlja InstrId)
+- [ ] 526 cp1257 doslovno po dokumentaciji, uključujući `;` → `č`
+- [ ] 527 DD: klijent bez `directDebit` polja više ne može slati naplate ni primati obavijest (zamjenjuje 310)
+- [ ] 551 VIBAN kao vlastita strana u camt.053 mastera; 553 adresa banke po zemlji BIC-a
+
