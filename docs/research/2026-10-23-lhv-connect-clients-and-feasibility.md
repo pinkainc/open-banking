@@ -95,6 +95,10 @@ Connect-compatible facade → core ledger (`open-ledger`) → bridges to schemes
 - "LHV" and "Connect" are theirs: the project is described as *compatible with the LHV
   Connect API*, never named after it.
 
+## Related
+
+- [Orchestration of L0–L3](../2026-10-23-orkestracija-subagenata.md)
+
 ## Sources
 
 - https://www.mambu.com/partner/lhv

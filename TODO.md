@@ -1,5 +1,7 @@
 # TODO
 
+How L0–L3 were built and what to watch for: [docs/2026-10-23-orkestracija-subagenata.md](docs/2026-10-23-orkestracija-subagenata.md).
+
 ## Done: L0 + L1 (2026-10-23)
 
 Server, 99 node:test cases (all green in `npm run check`), README, `npm run coverage`.
