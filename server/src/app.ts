@@ -16,6 +16,7 @@ import { directDebitSimRoutes, registerDirectDebit } from './directdebit/routes.
 import { fxSimRoutes, registerFx } from './fx/routes.js'
 import { contractsSimRoutes, registerContracts } from './contracts/routes.js'
 import { jsonTextScope } from './jsonbody.js'
+import { BoundedSet, DEFAULT_BOUNDS, type Bounds } from './bounded.js'
 import { COMPRESSION_THRESHOLD, compress, negotiate } from './compression.js'
 import { mockLargeStatement } from './statements/mock-large.js'
 import { eeWebhookSimRoutes, registerEeWebhooks } from './webhooks/ee-routes.js'
@@ -37,14 +38,14 @@ export interface AppOptions {
   bankCode?: string
   /** Message bodies of at least this many bytes are compressed (UK flavour; decision 503). */
   compressionThreshold?: number
+  /** Limits of the remembered X-Idempotency-Key values (decision 504). */
+  idempotencyKeys?: Partial<Bounds>
 }
 
 export type Flavour = 'EE' | 'UK'
 
 /** Request bodies above this are refused with 413 (the reference's nginx limit). */
 export const BODY_LIMIT = 5 * 1024 * 1024
-/** How long an X-Idempotency-Key is remembered (the documented guarantee). */
-const IDEMPOTENCY_MS = 24 * 60 * 60 * 1000
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 export function buildApp(opts: AppOptions): FastifyInstance {
@@ -118,7 +119,8 @@ export function buildApp(opts: AppOptions): FastifyInstance {
 
   // X-Idempotency-Key (UK host only; the EE host knows duplicates by business keys such
   // as the pain.001 MsgId): a key seen on a successful POST within 24 hours is answered 409.
-  const idempotency = new Map<string, number>()
+  // Remembered for 24 h, the documented guarantee (DEFAULT_BOUNDS.idempotencyKeys).
+  const idempotency = new BoundedSet<string>(emulator.clock, { ...DEFAULT_BOUNDS.idempotencyKeys, ...opts.idempotencyKeys })
   const idemKey = (req: FastifyRequest) => {
     const v = req.headers['x-idempotency-key']
     const key = Array.isArray(v) ? v[0] : v
@@ -129,8 +131,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     const k = idemKey(req)
     if (!k) return
     if (!UUID.test(k.slice(k.indexOf('|') + 1))) throw new ConnectError(400, 'BAD_REQUEST', 'X-Idempotency-Key must be a UUID')
-    const until = idempotency.get(k)
-    if (until !== undefined && until > emulator.clock.now().getTime()) {
+    if (idempotency.has(k)) {
       throw new ConnectError(409, 'CONFLICT', 'Request with this X-Idempotency-Key has already been received')
     }
   })
@@ -138,7 +139,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     if (reply.statusCode >= 300) return
     let k: string | undefined
     try { k = idemKey(req) } catch { return }
-    if (k) idempotency.set(k, emulator.clock.now().getTime() + IDEMPOTENCY_MS)
+    if (k) idempotency.add(k)
   })
 
   // --- Communication test -------------------------------------------------------

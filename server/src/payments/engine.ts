@@ -11,6 +11,7 @@
 //                             rejected → pain.002 RJCT and the reservation released
 //
 // Processing is synchronous: every message exists by the time POST /payment returns.
+import { BoundedSet, DEFAULT_BOUNDS, type Bounds } from '../bounded.js'
 import type { Clock } from '../clock.js'
 import { keyOf, type Customer, type Directory } from '../directory.js'
 import { ibanChecksumOk, ibanCountry, isSepaCountry, normalizeIban } from '../iban.js'
@@ -28,6 +29,8 @@ import type { VirtualAccount, VirtualAccounts } from '../viban/registry.js'
 export interface Bank { bic: string; name: string }
 
 export interface EngineOptions {
+  /** How many accepted MsgIds are remembered (decision 504). */
+  msgIds?: Bounds
   /** Reject creditor IBANs whose check digits are wrong (default true). */
   strictIban?: boolean
   /** pain.001.001.03 is refused from this day on (the bank's announced end of support). */
@@ -75,11 +78,11 @@ const sameName = (a: string | undefined, b: string | undefined) =>
 
 
 export class PaymentEngine {
-  #seenMsgIds = new Set<string>()
+  #seenMsgIds: BoundedSet<string>
   constructor(
     private directory: Directory, private ledger: Ledger, private rails: Rails, private inbox: Inbox,
     private clock: Clock, private bank: Bank, private opts: EngineOptions = {},
-  ) {}
+  ) { this.#seenMsgIds = new BoundedSet(clock, opts.msgIds ?? DEFAULT_BOUNDS.msgIds) }
 
   /** Handles one POST /payment body. Throws XmlSyntaxError when the body is not XML at all. */
   async submit(xml: string, customer: Customer, requestId: string): Promise<void> {

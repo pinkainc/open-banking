@@ -14,6 +14,7 @@
 //
 // Collections wait for their settlement date; tick() settles the due ones (main.ts calls
 // it every minute, tests and /_sim/direct-debit/settle call it directly).
+import { BoundedSet, DEFAULT_BOUNDS, type Bounds } from '../bounded.js'
 import type { Clock } from '../clock.js'
 import { DAY_MS } from '../clock.js'
 import { keyOf, type Customer, type Directory } from '../directory.js'
@@ -92,6 +93,8 @@ export const REASONS: Record<string, string> = {
 }
 
 export interface DirectDebitDeps {
+  /** How many pain.008 / pain.007 MsgIds are remembered (decision 504). */
+  msgIds?: Bounds
   directory: Directory
   ledger: Ledger
   rails: Rails
@@ -128,9 +131,12 @@ export class DirectDebitError extends Error {
 
 export class DirectDebitService {
   readonly collections: Collection[] = []
-  #seenMsgIds = new Set<string>()
-  #seenRefusals = new Set<string>()
-  constructor(private d: DirectDebitDeps) {}
+  #seenMsgIds: BoundedSet<string>
+  #seenRefusals: BoundedSet<string>
+  constructor(private d: DirectDebitDeps) {
+    this.#seenMsgIds = new BoundedSet(d.clock, d.msgIds ?? DEFAULT_BOUNDS.msgIds)
+    this.#seenRefusals = new BoundedSet(d.clock, d.msgIds ?? DEFAULT_BOUNDS.msgIds)
+  }
 
   // --- creditor: POST /direct-debit/collection ------------------------------------
 

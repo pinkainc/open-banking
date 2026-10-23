@@ -1,6 +1,7 @@
 // Account information: statements (camt.060 → camt.053) and balances (camt.060 →
 // camt.052), answered through the inbox like every Connect request, plus the automatic
 // end-of-day statement the bank sends unasked to customers who have it in their contract.
+import { BoundedSet, DEFAULT_BOUNDS, type Bounds } from '../bounded.js'
 import type { Clock } from '../clock.js'
 import { keyOf, type Customer, type CustomerKey, type Directory } from '../directory.js'
 import { errorsXml } from '../errors.js'
@@ -52,6 +53,8 @@ const ccyOrder = (a: string, b: string) => (a === b ? 0 : a === 'EUR' ? -1 : b =
 const signed = (e: JournalEntry) => (e.direction === 'CRDT' ? e.amount : -e.amount)
 
 export interface ReportsDeps {
+  /** How many camt.060 MsgIds are remembered (decision 504). */
+  msgIds?: Bounds
   directory: Directory
   ledger: Ledger
   journal: Journal
@@ -65,11 +68,12 @@ export class AccountReports {
   pageSize: number
   maxTransactions: number
   #settings = new Map<string, ReportSettings>()
-  #seen = new Map<string, Set<string>>()
+  #seen: BoundedSet<string>
   #eodDone = new Set<string>()
   #eodFrom: string
 
   constructor(private d: ReportsDeps, opts: ReportsOptions = {}) {
+    this.#seen = new BoundedSet(d.clock, d.msgIds ?? DEFAULT_BOUNDS.msgIds)
     this.pageSize = opts.pageSize ?? PAGE_SIZE
     this.maxTransactions = opts.maxTransactions ?? MAX_TRANSACTIONS
     // Automatic statements start with the day the server starts on: no backfill.
@@ -97,13 +101,11 @@ export class AccountReports {
     try {
       const req = await this.#parse(kind, xml)
       const seenKey = `${keyOf(customer)}|${kind}`
-      if (this.#seen.get(seenKey)?.has(req.msgId!)) throw new StatementError(E.duplicate)
+      if (this.#seen.has(`${seenKey}|${req.msgId}`)) throw new StatementError(E.duplicate)
       const owner = this.d.directory.ownerOf(req.iban!)
       if (!owner || keyOf(owner) !== keyOf(customer)) throw new StatementError(E.noAccess)
       const bodies = kind === 'statement' ? this.#statementRequest(req, owner) : [await this.#balanceRequest(req, owner)]
-      let seen = this.#seen.get(seenKey)
-      if (!seen) this.#seen.set(seenKey, (seen = new Set()))
-      seen.add(req.msgId!)
+      this.#seen.add(`${seenKey}|${req.msgId}`)
       for (const b of bodies) add(b)
     } catch (e) {
       const err = e instanceof StatementError ? e : new StatementError(E.technical)

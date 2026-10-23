@@ -18,18 +18,25 @@ const tls = {
 }
 const seed: Seed = JSON.parse(readFileSync(path(env.SEED, 'config/dev-seed.json'), 'utf8'))
 const xsdDir = path(env.XSD_DIR, 'reference/xsd')
+const max = (v: string | undefined) => {
+  if (v === undefined) return undefined
+  if (!/^[1-9]\d*$/.test(v)) throw new Error(`a MAX_* setting must be a positive integer, not ${v}`)
+  return { max: Number(v) }
+}
 const emulator = await Emulator.fromSeed(seed, {
   xsdDir: existsSync(xsdDir) ? xsdDir : undefined,
   strictIban: env.STRICT_IBAN !== '0',
   pain00103Until: env.PAIN_001_001_03_UNTIL,
   vibanErrors: env.VIBAN_ERRORS === 'sync' ? 'sync' : 'inbox',
+  // Limits of remembered tombstones and MsgIds (decision 504); TTLs are the documented windows.
+  memory: { tombstones: max(env.MAX_TOMBSTONES), msgIds: max(env.MAX_MSGIDS) },
 })
 if (!existsSync(xsdDir)) console.error('note: no XSDs in reference/xsd (scripts/fetch-reference.sh); pain.001 gets structural checks only')
 
 // CONNECT_FLAVOUR=UK plays connect.lhv.com (X-Idempotency-Key, compression); default EE.
 const flavour = (env.CONNECT_FLAVOUR ?? 'EE').toUpperCase()
 if (flavour !== 'EE' && flavour !== 'UK') throw new Error(`CONNECT_FLAVOUR must be EE or UK, not ${flavour}`)
-const app = buildApp({ emulator, https: tls, sim: env.SIM !== '0', flavour })
+const app = buildApp({ emulator, https: tls, sim: env.SIM !== '0', flavour, idempotencyKeys: max(env.MAX_IDEMPOTENCY_KEYS) })
 if (env.LOG) app.addHook('onResponse', async (req, reply) => console.error(`${req.method} ${req.url} ${reply.statusCode}`))
 setInterval(() => emulator.inbox.purge(), 60 * 60 * 1000).unref()
 // Automatic end-of-day statements: checked every minute, sent once per finished day.

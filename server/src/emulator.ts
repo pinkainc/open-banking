@@ -1,6 +1,7 @@
 // The parts of the bank wired together: directory, ledger, rails, inbox, the payment
 // engine, SEPA Direct Debit, FX, service provider contracts and the EE webhooks. Ledger
 // and rails are interfaces; the defaults are in memory and the simulator.
+import { DEFAULT_BOUNDS, type Bounds } from './bounded.js'
 import { systemClock, type Clock } from './clock.js'
 import { Directory, type CustomerInput } from './directory.js'
 import { Inbox } from './inbox.js'
@@ -38,6 +39,8 @@ export interface EmulatorOptions {
   vibanErrors?: ErrorDelivery
   /** How EE webhook payloads are sent (default HTTP POST); tests record them instead. */
   webhookDeliver?: Deliver
+  /** Limits of what is remembered (decision 504); each part overrides DEFAULT_BOUNDS. */
+  memory?: { tombstones?: Partial<Bounds>; msgIds?: Partial<Bounds> }
 }
 
 export const DEFAULT_BANK: Bank = { bic: 'LHVBEE22', name: 'open-banking emulator' }
@@ -64,7 +67,9 @@ export class Emulator {
     this.clock = opts.clock ?? systemClock
     this.ledger = opts.ledger ?? new MemoryLedger()
     this.rails = opts.rails ?? new SimulatorRails()
-    this.inbox = new Inbox(this.clock)
+    const tombstones = { ...DEFAULT_BOUNDS.tombstones, ...opts.memory?.tombstones }
+    const msgIds = { ...DEFAULT_BOUNDS.msgIds, ...opts.memory?.msgIds }
+    this.inbox = new Inbox(this.clock, undefined, tombstones)
     this.webhooksEe = new EeWebhooks(this.inbox, this.clock, { deliver: opts.webhookDeliver })
     this.bank = { ...DEFAULT_BANK, ...opts.bank }
     const xsd = opts.xsdDir ? new XsdValidator(opts.xsdDir) : undefined
@@ -72,12 +77,12 @@ export class Emulator {
       schemas: opts.xsdDir ? new VibanSchemas(opts.xsdDir) : undefined, errors: opts.vibanErrors,
     })
     this.engine = new PaymentEngine(this.directory, this.ledger, this.rails, this.inbox, this.clock, this.bank, {
-      strictIban: opts.strictIban, pain00103Until: opts.pain00103Until ?? '2026-11-15', xsd, virtual: this.viban.registry,
+      strictIban: opts.strictIban, pain00103Until: opts.pain00103Until ?? '2026-11-15', xsd, virtual: this.viban.registry, msgIds,
       onBooking: (_c, b) => { this.journal.record(b) },
     })
     this.directDebit = new DirectDebitService({
       directory: this.directory, ledger: this.ledger, rails: this.rails, inbox: this.inbox, clock: this.clock, bank: this.bank,
-      xsd, virtual: this.viban.registry, strictIban: opts.strictIban, onBooking: (_c, b) => { this.journal.record(b) },
+      xsd, virtual: this.viban.registry, strictIban: opts.strictIban, onBooking: (_c, b) => { this.journal.record(b) }, msgIds,
     })
     this.fx = new FxService({
       directory: this.directory, ledger: this.ledger, inbox: this.inbox, clock: this.clock, bank: this.bank,
@@ -85,7 +90,7 @@ export class Emulator {
     })
     this.contracts = new Contracts(this.directory, this.clock)
     this.reports = new AccountReports({
-      directory: this.directory, ledger: this.ledger, journal: this.journal, inbox: this.inbox, clock: this.clock, bank: this.bank, xsd,
+      directory: this.directory, ledger: this.ledger, journal: this.journal, inbox: this.inbox, clock: this.clock, bank: this.bank, xsd, msgIds,
     }, opts.reports)
   }
 

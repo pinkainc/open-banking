@@ -1,6 +1,7 @@
 // The message box: every response and notification waits here until the client
 // confirms it with DELETE. Reads return the oldest unconfirmed message first; unread
 // messages older than the retention period (five days) are gone.
+import { BoundedMap, DEFAULT_BOUNDS, type Bounds } from './bounded.js'
 import { DAY_MS, type Clock } from './clock.js'
 import { keyOf, type CustomerKey } from './directory.js'
 import { responseId } from './ids.js'
@@ -22,11 +23,19 @@ export interface Scope { customers: Set<string>; type?: string }
 
 export class Inbox {
   #messages = new Map<string, Message>()
-  /** Ids that existed and are gone (confirmed or expired), with their owner: a repeat DELETE is 200. */
-  #gone = new Map<string, string>()
+  /**
+   * Ids that existed and are gone (confirmed or expired), with their owner: a repeat
+   * DELETE is 200 while remembered (decision 504), 404 after.
+   */
+  #gone: BoundedMap<string, string>
   #seq = 0
   #listeners: ((m: Message) => void)[] = []
-  constructor(private clock: Clock, private retentionMs = 5 * DAY_MS) {}
+  constructor(private clock: Clock, private retentionMs = 5 * DAY_MS, tombstones: Bounds = DEFAULT_BOUNDS.tombstones) {
+    this.#gone = new BoundedMap(clock, tombstones)
+  }
+
+  /** Remembered tombstones (tests, diagnostics). */
+  get tombstones() { return this.#gone.size }
 
   /** Called with every new message, after it is stored (EE webhook delivery). */
   onAdd(listener: (m: Message) => void) { this.#listeners.push(listener) }
@@ -44,10 +53,11 @@ export class Inbox {
 
   #expired(m: Message) { return this.clock.now().getTime() - m.createdAt.getTime() > this.retentionMs }
 
-  /** Drops expired messages. Reads skip them anyway; this frees the memory. */
+  /** Drops expired messages and tombstones. Reads skip them anyway; this frees the memory. */
   purge(): number {
     let n = 0
     for (const m of this.#messages.values()) if (this.#expired(m)) { this.#remove(m); n++ }
+    this.#gone.purge()
     return n
   }
 
