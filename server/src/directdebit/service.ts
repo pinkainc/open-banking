@@ -146,7 +146,7 @@ export class DirectDebitService {
     if (version !== PAIN008 || !doc?.Document?.CstmrDrctDbtInitn) return reject(E.schema(`${version ?? 'The document'} is not ${PAIN008}.`))
     if (this.d.xsd?.has(PAIN008)) {
       const errors = await this.d.xsd.validate(xml, PAIN008)
-      if (errors.length) return reject(E.schema(errors[0]))
+      if (errors.length) return reject(E.schema(schemaError(errors[0])))
     }
     const file = readPain008(doc)
     const missing = structuralProblem(file)
@@ -278,8 +278,8 @@ export class DirectDebitService {
     }
     c.status = 'SETTLED'
     c.settledAt = this.d.clock.now()
-    if (c.debtorCustomer) this.#notify(c.debtorCustomer, this.#booking(c, 'DBIT', c.id))
-    if (c.creditorCustomer) this.#notify(c.creditorCustomer, this.#booking(c, 'CRDT', servicerRef()))
+    if (c.debtorCustomer) this.#notify(c.debtorCustomer, this.#booking(c, 'debtor', 'DBIT', c.id))
+    if (c.creditorCustomer) this.#notify(c.creditorCustomer, this.#booking(c, 'creditor', 'CRDT', servicerRef()))
     return { ...base, status: 'ACSC' }
   }
 
@@ -300,8 +300,8 @@ export class DirectDebitService {
     // P 09: "TxId…" then "CD:<code>" under Rsn/Cd NARR. pain.008 has no TxId; InstrId or EndToEndId stands in.
     const returnInfo = { code: 'NARR', additional: [c.instrId ?? c.endToEndId, `CD:${code}`] }
     const family = { subFamily: 'UPDD' }
-    if (c.debtorCustomer) this.#notify(c.debtorCustomer, { ...this.#booking(c, 'CRDT', ref), bankTxCode: { family: 'RDDT', ...family }, returnInfo })
-    if (c.creditorCustomer) this.#notify(c.creditorCustomer, { ...this.#booking(c, 'DBIT', servicerRef()), bankTxCode: { family: 'IDDT', ...family }, returnInfo })
+    if (c.debtorCustomer) this.#notify(c.debtorCustomer, { ...this.#booking(c, 'debtor', 'CRDT', ref), bankTxCode: { family: 'RDDT', ...family }, returnInfo })
+    if (c.creditorCustomer) this.#notify(c.creditorCustomer, { ...this.#booking(c, 'creditor', 'DBIT', servicerRef()), bankTxCode: { family: 'IDDT', ...family }, returnInfo })
     return 'ok'
   }
 
@@ -320,7 +320,7 @@ export class DirectDebitService {
     if (version !== PAIN007 || !doc?.Document?.CstmrPmtRvsl) return reject(E.schema(`${version ?? 'The document'} is not ${PAIN007}.`))
     if (this.d.xsd?.has(PAIN007)) {
       const errors = await this.d.xsd.validate(xml, PAIN007)
-      if (errors.length) return reject(E.schema(errors[0]))
+      if (errors.length) return reject(E.schema(schemaError(errors[0])))
     }
     const r = readPain007(doc)
     if (!r.msgId || !r.nbOfTxs || r.txs.length === 0 || !r.txs[0].pmtInfId || !r.txs[0].endToEndId) {
@@ -426,9 +426,10 @@ export class DirectDebitService {
     this.d.inbox.add({ customer: c.debtorCustomer!, type: DD_TYPES.notification, body: incomingCollection(c, c.notificationMsgId, this.d.clock.now()) })
   }
 
-  #booking(c: Collection, direction: 'DBIT' | 'CRDT', ref: string): Booking {
-    const own = direction === 'DBIT' ? c.debtorCustomer ?? c.creditorCustomer! : c.creditorCustomer ?? c.debtorCustomer!
-    const ownIsDebtor = own === c.debtorCustomer
+  /** The entry on one side's account (the side, not the direction: a refund credits the debtor). */
+  #booking(c: Collection, side: 'debtor' | 'creditor', direction: 'DBIT' | 'CRDT', ref: string): Booking {
+    const ownIsDebtor = side === 'debtor'
+    const own = (ownIsDebtor ? c.debtorCustomer : c.creditorCustomer)!
     const account = ownIsDebtor ? c.debtor.iban : c.creditor.iban
     const other = ownIsDebtor ? c.creditor : c.debtor
     return {
@@ -450,5 +451,8 @@ export class DirectDebitService {
     this.d.inbox.add({ customer, type: 'CREDIT_DEBIT_NOTIFICATION', body: camt054(b, customer.camt054, this.d.bank) })
   }
 }
+
+/** An XSD error without the namespace in every element name. */
+const schemaError = (e: string) => e.replace(/\{urn:iso:std:iso:20022:tech:xsd:[^}]+\}/g, '')
 
 const fromMinorString = (n: bigint) => `${n / 100n}.${String(n % 100n).padStart(2, '0')}`

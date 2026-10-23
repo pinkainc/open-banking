@@ -218,3 +218,134 @@ export async function schemaValid(body: string): Promise<boolean> {
   if (errors.length) throw new Error(`${ns} is not schema-valid: ${errors.join('; ')}\n${body.slice(0, 4000)}`)
   return true
 }
+
+// --- SEPA Direct Debit (L4) ----------------------------------------------------------
+
+/** A valid SEPA Creditor Identifier (the one of the published sample). */
+export const CREDITOR_ID = 'EE49ZZZEE00012345678'
+/** A valid French IBAN at another bank (the published sample's debtor). */
+export const FR_IBAN = 'FR7618206000103056966400117'
+
+export interface DdTxSpec {
+  amount?: string; currency?: string; endToEndId?: string; instrId?: string
+  debtorIban?: string; debtorName?: string | null; debtorBic?: string | null
+  mandateId?: string | null; signedOn?: string; ustrd?: string; reference?: string
+}
+export interface DdBlockSpec {
+  pmtInfId?: string; creditorIban?: string; creditorName?: string | null; dueDate?: string
+  scheme?: string; localInstrument?: string; seqTp?: string; creditorId?: string; schemeName?: string
+  nbOfTxs?: string; ctrlSum?: string; txs: DdTxSpec[]
+}
+
+let dd = 0
+/**
+ * A pain.008.001.08 (or .02 for the refused old version) from C1 by default: one block,
+ * SEPADD / CORE / OOFF, due 2026-03-12 (two days after the test clock's start), debtor C2.
+ */
+export function pain008(blocks: DdBlockSpec[], o: { msgId?: string; nbOfTxs?: string; ctrlSum?: string; version?: '08' | '02' } = {}) {
+  const id = ++dd
+  const sum = (txs: DdTxSpec[]) => (txs.reduce((s, t) => s + Math.round(Number(t.amount ?? '10.00') * 100), 0) / 100).toFixed(2)
+  const all = blocks.flatMap((b) => b.txs)
+  const tag = (name: string, v?: string | null) => (v == null ? '' : `<${name}>${v}</${name}>`)
+  const agent = (bic?: string | null) => `<FinInstnId>${bic ? `<BICFI>${bic}</BICFI>` : '<Othr><Id>NOTPROVIDED</Id></Othr>'}</FinInstnId>`
+  const tx = (t: DdTxSpec, i: number, b: number) => `
+      <DrctDbtTxInf>
+        <PmtId>${tag('InstrId', t.instrId ?? `DDI-${id}-${b}-${i}`)}<EndToEndId>${t.endToEndId ?? `DDE-${id}-${b}-${i}`}</EndToEndId></PmtId>
+        <InstdAmt Ccy="${t.currency ?? 'EUR'}">${t.amount ?? '10.00'}</InstdAmt>
+        <DrctDbtTx><MndtRltdInf><MndtId>${t.mandateId === null ? ' ' : t.mandateId ?? `MANDATE-${id}-${i}`}</MndtId><DtOfSgntr>${t.signedOn ?? '2026-01-05'}</DtOfSgntr></MndtRltdInf></DrctDbtTx>
+        <DbtrAgt>${agent(t.debtorBic === undefined ? 'LHVBEE22XXX' : t.debtorBic)}</DbtrAgt>
+        <Dbtr><Nm>${t.debtorName === null ? ' ' : t.debtorName ?? 'Demo Customer 2'}</Nm></Dbtr>
+        <DbtrAcct><Id><IBAN>${t.debtorIban ?? C2.iban}</IBAN></Id></DbtrAcct>
+        ${t.ustrd || t.reference ? `<RmtInf>${tag('Ustrd', t.ustrd)}${t.reference ? `<Strd><CdtrRefInf><Tp><CdOrPrtry><Cd>SCOR</Cd></CdOrPrtry></Tp><Ref>${t.reference}</Ref></CdtrRefInf></Strd>` : ''}</RmtInf>` : ''}
+      </DrctDbtTxInf>`
+  const block = (b: DdBlockSpec, bi: number) => `
+    <PmtInf>
+      <PmtInfId>${b.pmtInfId ?? `DDPMT-${id}-${bi}`}</PmtInfId>
+      <PmtMtd>DD</PmtMtd>
+      <NbOfTxs>${b.nbOfTxs ?? b.txs.length}</NbOfTxs>
+      <CtrlSum>${b.ctrlSum ?? sum(b.txs)}</CtrlSum>
+      <PmtTpInf><SvcLvl><Prtry>${b.scheme ?? 'SEPADD'}</Prtry></SvcLvl><LclInstrm><Cd>${b.localInstrument ?? 'CORE'}</Cd></LclInstrm><SeqTp>${b.seqTp ?? 'OOFF'}</SeqTp></PmtTpInf>
+      <ReqdColltnDt>${b.dueDate ?? '2026-03-12'}</ReqdColltnDt>
+      <Cdtr><Nm>${b.creditorName === null ? ' ' : b.creditorName ?? 'Demo Customer 1'}</Nm><PstlAdr><Ctry>EE</Ctry><AdrLine>Tartu mnt 2</AdrLine></PstlAdr></Cdtr>
+      <CdtrAcct><Id><IBAN>${b.creditorIban ?? C1.iban}</IBAN></Id></CdtrAcct>
+      <CdtrAgt><FinInstnId><BICFI>LHVBEE22XXX</BICFI></FinInstnId></CdtrAgt>
+      <ChrgBr>SLEV</ChrgBr>
+      <CdtrSchmeId><Id><PrvtId><Othr><Id>${b.creditorId ?? CREDITOR_ID}</Id><SchmeNm><Prtry>${b.schemeName ?? 'SEPA'}</Prtry></SchmeNm></Othr></PrvtId></Id></CdtrSchmeId>
+      ${b.txs.map((t, i) => tx(t, i, bi)).join('')}
+    </PmtInf>`
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.008.001.${o.version ?? '08'}">
+  <CstmrDrctDbtInitn>
+    <GrpHdr>
+      <MsgId>${o.msgId ?? `DDMSG-${id}-${Date.now()}`}</MsgId>
+      <CreDtTm>2026-03-10T10:00:00</CreDtTm>
+      <NbOfTxs>${o.nbOfTxs ?? all.length}</NbOfTxs>
+      <CtrlSum>${o.ctrlSum ?? sum(all)}</CtrlSum>
+      <InitgPty><Nm>Demo Customer 1</Nm></InitgPty>
+    </GrpHdr>${blocks.map(block).join('')}
+  </CstmrDrctDbtInitn>
+</Document>`
+}
+
+let rv = 0
+/** A pain.007.001.09 refusal of one collection (or several, to test the one-only rule). */
+export function pain007(txs: { pmtInfId: string; endToEndId?: string; reason?: string | null }[], o: { msgId?: string; nbOfTxs?: string; ctrlSum?: string } = {}) {
+  const msgId = o.msgId ?? `RVSL-${++rv}-${Date.now()}`
+  const blocks = txs.map((t) => `
+    <OrgnlPmtInfAndRvsl>
+      <OrgnlPmtInfId>${t.pmtInfId}</OrgnlPmtInfId>
+      <TxInf>${t.endToEndId ? `<OrgnlEndToEndId>${t.endToEndId}</OrgnlEndToEndId>` : ''}${t.reason === null ? '' : `<RvslRsnInf><Rsn><Cd>${t.reason ?? 'MS02'}</Cd></Rsn></RvslRsnInf>`}</TxInf>
+    </OrgnlPmtInfAndRvsl>`).join('')
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.007.001.09">
+  <CstmrPmtRvsl>
+    <GrpHdr><MsgId>${msgId}</MsgId><CreDtTm>2026-03-10T10:00:00</CreDtTm><NbOfTxs>${o.nbOfTxs ?? txs.length}</NbOfTxs>${o.ctrlSum ? `<CtrlSum>${o.ctrlSum}</CtrlSum>` : ''}</GrpHdr>
+    <OrgnlGrpInf><OrgnlMsgId>NOTPROVIDED</OrgnlMsgId><OrgnlMsgNmId>pain.008.001.08</OrgnlMsgNmId></OrgnlGrpInf>${blocks}
+  </CstmrPmtRvsl>
+</Document>`
+}
+
+/** Drains a caller's inbox, asserting every pain.002 / pain.008 / camt.054 against its XSD. */
+export async function ddDrain(ctx: Ctx, as = C1.code, headers: Record<string, string> = {}) {
+  const msgs = await drain(ctx, as, headers)
+  for (const m of msgs) {
+    const checked = await schemaValid(m.body)
+    if (HAVE_REFERENCE && /pain\.00[28]|camt\.054/.test(m.body) && !checked) throw new Error(`no XSD for ${m.type}`)
+  }
+  return msgs
+}
+
+const list = <T>(v: T | T[] | undefined): T[] => (v === undefined ? [] : Array.isArray(v) ? v : [v])
+const s = (v: unknown) => (v === undefined ? undefined : String(v))
+const info = (r: any) => (r?.AddtlInf === undefined ? undefined : list<unknown>(r.AddtlInf).map(String).join(''))
+
+/** The statuses of a pain.002.001.10 (group, blocks, transactions with reason code and text). */
+export function ddStatus(m: { doc: any }) {
+  const r = m.doc.Document.CstmrPmtStsRpt
+  const g = r.OrgnlGrpInfAndSts
+  return {
+    msgId: s(r.GrpHdr.MsgId), orgnlMsgId: s(g.OrgnlMsgId), orgnlMsgNmId: s(g.OrgnlMsgNmId), grp: s(g.GrpSts),
+    grpCode: s(g.StsRsnInf?.Rsn?.Cd), grpInfo: info(g.StsRsnInf),
+    blocks: list<any>(r.OrgnlPmtInfAndSts).map((b) => ({
+      pmtInfId: s(b.OrgnlPmtInfId), sts: s(b.PmtInfSts),
+      txs: list<any>(b.TxInfAndSts).map((t) => ({
+        endToEndId: s(t.OrgnlEndToEndId), sts: s(t.TxSts), code: s(t.StsRsnInf?.Rsn?.Cd), info: info(t.StsRsnInf),
+        ref: s(t.AcctSvcrRef), mandateId: s(t.OrgnlTxRef?.MndtRltdInf?.MndtId),
+      })),
+    })),
+  }
+}
+
+/** The one entry of a camt.054 (either version). */
+export function ddEntry(m: { doc: any }) {
+  const n = m.doc.Document.BkToCstmrDbtCdtNtfctn.Ntfctn
+  const e = list<any>(n.Ntry)[0]
+  const tx = list<any>(e.NtryDtls.TxDtls)[0]
+  return {
+    account: s(n.Acct.Id.IBAN), ind: s(e.CdtDbtInd), amount: s(e.Amt?.['#text'] ?? e.Amt),
+    family: s(e.BkTxCd.Domn.Fmly.Cd), subFamily: s(e.BkTxCd.Domn.Fmly.SubFmlyCd), prtry: s(e.BkTxCd.Prtry?.Cd),
+    endToEndId: s(tx.Refs.EndToEndId), pmtInfId: s(tx.Refs.PmtInfId), mandateId: s(tx.Refs.MndtId),
+    returnCode: s(tx.RtrInf?.Rsn?.Cd), returnInfo: list<unknown>(tx.RtrInf?.AddtlInf).map(String),
+    cdtr: s(tx.RltdPties?.Cdtr?.Nm ?? tx.RltdPties?.Cdtr?.Pty?.Nm), dbtr: s(tx.RltdPties?.Dbtr?.Nm ?? tx.RltdPties?.Dbtr?.Pty?.Nm),
+  }
+}

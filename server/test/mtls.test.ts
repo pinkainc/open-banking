@@ -38,10 +38,10 @@ describe('mutual TLS', { skip: openssl ? false : 'openssl not available' }, () =
     for (const d of [dir, foreign]) if (d) rmSync(d, { recursive: true, force: true })
   })
 
-  const get = (path: string, client?: { dir: string; name: string }, headers: Record<string, string> = {}) =>
+  const get = (path: string, client?: { dir: string; name: string }, headers: Record<string, string> = {}, body?: string) =>
     new Promise<{ status: number; headers: Record<string, any>; body: string }>((resolve, reject) => {
       const req = request({
-        host: '127.0.0.1', port, path, method: 'GET', headers, ca: read(dir, 'ca.crt'), servername: 'localhost',
+        host: '127.0.0.1', port, path, method: body === undefined ? 'GET' : 'POST', headers: body === undefined ? headers : { 'content-type': 'application/xml', ...headers }, ca: read(dir, 'ca.crt'), servername: 'localhost',
         ...(client ? { cert: read(client.dir, `${client.name}.crt`), key: read(client.dir, `${client.name}.key`) } : {}),
       }, (res) => {
         let body = ''
@@ -49,7 +49,7 @@ describe('mutual TLS', { skip: openssl ? false : 'openssl not available' }, () =
         res.on('end', () => resolve({ status: res.statusCode!, headers: res.headers, body }))
       })
       req.on('error', reject)
-      req.end()
+      req.end(body)
     })
 
   test('a customer certificate gets through', async () => {
@@ -86,6 +86,15 @@ describe('mutual TLS', { skip: openssl ? false : 'openssl not available' }, () =
     const r = await get('/heartbeat', { dir, name: 'weird' })
     assert.equal(r.status, 403)
     assert.equal(parseXml(r.body).Errors.Error.Description, 'Certificate has invalid SERIALNUMBER field')
+  })
+
+  test('direct debit endpoints: a customer certificate gets through, none is refused in the handshake', async () => {
+    for (const path of ['/direct-debit/collection', '/direct-debit/incoming-collection']) {
+      const r = await get(path, { dir, name: 'client1' }, {}, '<Document')
+      assert.equal(r.status, 400, 'past TLS and identity: the body is checked')
+      await assert.rejects(get(path, undefined, {}, '<Document/>'))
+      assert.equal((await get(path, { dir, name: 'stranger' }, {}, '<Document/>')).status, 403)
+    }
   })
 
   test('service provider headers over TLS', async () => {

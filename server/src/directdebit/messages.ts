@@ -83,7 +83,8 @@ export function aggregate(s: DdTxStatus[]): DdGroupStatus {
   return 'ACCP'
 }
 
-const agent = (bic?: string) => el('FinInstnId', opt('BICFI', bic))
+// Without a BIC the EPC convention: Othr/Id NOTPROVIDED (docs/decisions.md 313).
+const agent = (bic?: string) => el('FinInstnId', bic ? el('BICFI', bic) : el('Othr', el('Id', 'NOTPROVIDED')))
 const iban = (v: string) => el('Id', el('IBAN', v))
 const creditorScheme = (id?: string) => id
   ? el('CdtrSchmeId', el('Id', el('PrvtId', el('Othr', el('Id', id), el('SchmeNm', el('Prtry', 'SEPA'))))))
@@ -95,9 +96,12 @@ const remittance = (c: Collection) => c.ustrd || c.reference
 const paymentType = (c: Collection) =>
   el('PmtTpInf', el('SvcLvl', el('Prtry', c.scheme)), el('LclInstrm', el('Cd', c.localInstrument)), opt('SeqTp', c.seqTp))
 
+/** A text longer than Max105Text goes into consecutive AddtlInf (docs/decisions.md 315). */
+const chunks = (text?: string) => (text ? (text.match(/[\s\S]{1,105}/g) ?? []) : [])
+
 export function ddStatusReport(r: DdReport, bankBic: string, now: Date): string {
   const reason = (code?: string, text?: string) => code || text
-    ? el('StsRsnInf', el('Rsn', el('Cd', code ?? 'NARR')), opt('AddtlInf', text?.slice(0, 105)))
+    ? el('StsRsnInf', el('Rsn', el('Cd', code ?? 'NARR')), chunks(text).map((t) => el('AddtlInf', t)))
     : null
   const party = (name?: string) => (name ? el('Pty', el('Nm', name.slice(0, 140))) : null)
   const txRef = (c: Collection) => el('OrgnlTxRef',
