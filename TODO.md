@@ -1,29 +1,33 @@
 # TODO
 
-## Unfinished in the L0 + L1 run (stopped by the context guard)
+## Done: L0 + L1 (2026-10-23)
 
-The server code for L0 and L1 is written and smoke-tested by hand over mTLS (heartbeat,
-403 for an unknown certificate, handshake refusal without one, an internal payment
-→ pain.002 + camt.054 in the inbox). Not yet done:
+Server, 99 node:test cases (all green in `npm run check`), README, `npm run coverage`.
+Spec mismatches against the docs mirror fixed: messages-API 404/400 as JSON, DELETE of
+a never-existing id 404, bulk delete 200/207/400, empty list 204, `X-Bank-Code`, 413
+above 5 MB, `X-Idempotency-Key` 409, heartbeat `AuthorizedUser` = certificate holder
+(docs/decisions.md 8, 9, 11, 25-28).
 
-1. Tests (node:test), using `server/test/helpers.ts` (written; its pain.001 writer
-   produces files that pass both published XSDs):
-   - `mtls.test.ts`: real HTTPS with certs from `CERTS_DIR=$tmp scripts/dev-ca.sh`
-     (no cert, foreign CA, unknown code → 403, non-numeric serialNumber → 403).
-   - `auth.test.ts`: service-provider header rules (docs/decisions.md 1-5).
-   - `inbox.test.ts`: order, next until DELETE, idempotent DELETE, count, list
-     (default 10, max 100, JSON shape), GET by id, bulk delete (≤100), Filter-Response-Type,
-     5-day expiry with ManualClock, heartbeat/mq.
-   - `payments.test.ts`: internal (ACSC + DBIT + CRDT in the creditor's inbox, balances),
-     external (ACSP then ACSC + DBIT), rails reject (RJCT, funds released), no funds,
-     duplicate MsgId / PmtInfId, wrong NbOfTxs / CtrlSum, foreign or unknown debtor
-     account, corrupted file, non-XML → 400, pain.001.001.03 → pain.002.001.03, sunset,
-     invalid Prtry, PART, camt.054.001.08, XSD-validate every pain.002.001.10 and camt.054
-     produced, run the published samples (reference/samples, STRICT_IBAN off).
-   - `sim.test.ts`: fund, incoming credit → camt.054 CRDT, create customer.
-2. `npm run check` green, commit L0 and L1.
-3. README.md in the open-ledger style (status table by level, run with the dev CA,
-   curl examples).
+## Open in L0 / L1
+
+- Per-contract service grants: 403 "User has not been granted the requested service"
+  (needs a services list per customer in the seed).
+- Certificate validity checks with their documented 403 texts (not yet valid, expired,
+  "User authentication certificate is different than expected" when the certificate is
+  not the one on the contract). Today any certificate from the trusted CA whose code
+  is known is accepted.
+- gzip/deflate of inbox messages ≥10 MB (`Accept-Encoding`), 500 without it.
+- ACWC "Payment processed as European payment" when an automatic instant payment falls
+  back to SEPA after being attempted (today the fallback is decided up front, no ACWC).
+- Code page 1257 folding of free text echoed into pain.002 / camt.054.
+- Bounded memory: inbox tombstones (ids kept so a repeat DELETE is 200) and remembered
+  MsgIds / idempotency keys grow without limit.
+- Run the PSP use-case samples (`PAYMENT_PSP_USECASES/case1..8`) once agency accounts
+  and ultimate-debtor fields exist (L6), and `PAYMENT_SWIFT_*` / `PAYMENT_VIBAN_SEPA` with
+  their own expectations.
+- Sandbox recordings: work through the mirror's `ssot/sandbox-questions.md` (repeat
+  DELETE, bulk statuses, heartbeat/mq type, idempotency and 413 on the EE host) and
+  revise the decisions they settle.
 
 ## Next levels
 
