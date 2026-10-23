@@ -221,6 +221,10 @@ describe('POST /account-statement', () => {
       // Not a calendar date: the schema says so, or (without it) the structural check with Field.
       assert.equal((await err(camt060({ frDt: '2026-02-30' })))!.code, 'errStatement_RequestInvalid')
     })
+    test('more than one RptgReq: RequestInvalid with Field RptgReq', async () => {
+      const xml = camt060().replace(/(<RptgReq>[\s\S]*<\/RptgReq>)/, '$1$1')
+      assert.deepEqual(await err(xml), { code: 'errStatement_RequestInvalid', description: 'Request message fails xsd validation.', field: 'RptgReq' })
+    })
     test('a ReqdMsgNmId that does not match the request version: RequestInvalid with Field', async () => {
       const f = (await err({ reqd: 'camt.052.001.08' }))!
       assert.deepEqual([f.code, f.field], ['errStatement_RequestInvalid', 'ReqdMsgNmId'])

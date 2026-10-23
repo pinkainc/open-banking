@@ -163,6 +163,10 @@ describe('POST /account-balance (camt.052.001.08)', () => {
         { code: 'errStatement_RequestInvalid', description: 'Request message fails xsd validation.', field: 'ReqdMsgNmId' })
       assert.equal(reportError(await balance({ version: '03', reqd: 'camt.052.001.08' }))!.field, 'ReqdMsgNmId')
     })
+    test('an unexpected failure: errStatement_TechnicalError', async () => {
+      ctx.emulator.ledger.balances = async () => { throw new Error('ledger down') }
+      assert.deepEqual(reportError(await balance()), { code: 'errStatement_TechnicalError', description: 'Technical error', field: undefined })
+    })
     test('not XML: RequestInvalid', async () => {
       const r = await report(ctx, '<Document>', { kind: 'balance' })
       assert.equal(r.msgs[0].type, 'ACCOUNT_BALANCE')
