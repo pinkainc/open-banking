@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 import { ManualClock } from '../src/clock.js'
 import { PgJournal } from '../src/pg/journal.js'
-import { C1, C2, call, pain001, pgDb, postgresStore, report, setup } from './helpers.js'
+import { C1, C2, call, camt060, pain001, pgDb, postgresStore, report, reportError, setup } from './helpers.js'
 import { many, text } from '../src/xml.js'
 
 const url = process.env.DATABASE_URL
@@ -57,4 +57,19 @@ if (url) describe('PgJournal (Postgres)', () => {
     assert.equal(await j1.debits([C1.iban], 'EUR', at.getTime(), at.getTime() + 999), 0n)
     assert.equal(await j2.debits([C1.iban], 'EUR', 0, Infinity), 0n)
   })
+})
+
+if (url) test('report settings and camt.060 MsgIds outlive a restart; the seed does not overwrite changed limits', async () => {
+  const opts = await postgresStore()
+  const a = await setup(opts)
+  const put = await call(a, { method: 'PUT', url: `/_sim/reports/EE/${C1.code}`, body: { automaticStatement: '08', limits: { daily: '5.00' } } })
+  assert.equal(put.statusCode, 200, put.body)
+  const body = camt060({ kind: 'statement', msgId: 'MSG-RESTART' })
+  assert.equal(reportError((await report(a, body)).msgs[0]), undefined)
+
+  const b = await setup(opts)
+  const view = await call(b, { method: 'GET', url: `/_sim/reports/EE/${C1.code}` })
+  assert.equal(view.json().automaticStatement, '08')
+  assert.equal(view.json().limits.daily, '5.00')
+  assert.equal(reportError((await report(b, body)).msgs[0])?.code, 'errStatement_DuplicateRequest')
 })

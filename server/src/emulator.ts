@@ -18,6 +18,7 @@ import { SimulatorRails, type Rails } from './rails.js'
 import { normalizeIban } from './iban.js'
 import { servicerRef } from './ids.js'
 import { MemoryJournal, type JournalStore } from './statements/journal.js'
+import { memoryKeyed, type KeyedFactory } from './keyed.js'
 import { AccountReports, type ReportsOptions } from './statements/reports.js'
 import { checkBankAddress, defaultBankAddress } from './statements/bank-address.js'
 import { VibanSchemas } from './viban/messages.js'
@@ -67,6 +68,11 @@ export interface EmulatorOptions {
   railsPending?: () => RailsPending
   /** The statements journal, every booking (decision 960); default in memory, PgJournal (pg/journal.ts) in Postgres. */
   journal?: () => JournalStore
+  /**
+   * Remembered business state, one store per kind (decision 961): report settings, MsgId and
+   * InstrId sets, parked payments, in-flight limit amounts; default in memory, pgKeyed (pg/keyed.ts) in Postgres.
+   */
+  keyed?: (clock: Clock) => KeyedFactory
   memory?: { tombstones?: Partial<Bounds>; msgIds?: Partial<Bounds>; processed?: Partial<Bounds>; requests?: Partial<Bounds>; incoming?: Partial<Bounds>; webhookEvents?: Partial<Bounds>; bacs?: Partial<typeof BACS_BOUNDS>; agency?: Partial<Bounds> }
 }
 
@@ -108,6 +114,7 @@ export class Emulator {
     this.ledger = typeof opts.ledger === 'function' ? opts.ledger(this.clock) : opts.ledger ?? new MemoryLedger()
     this.rails = opts.rails ?? new SimulatorRails()
     this.journal = opts.journal?.() ?? new MemoryJournal()
+    const keyed = opts.keyed?.(this.clock) ?? memoryKeyed(this.clock)
     const tombstones = { ...DEFAULT_BOUNDS.tombstones, ...opts.memory?.tombstones }
     const msgIds = { ...DEFAULT_BOUNDS.msgIds, ...opts.memory?.msgIds }
     const processed = { ...DEFAULT_BOUNDS.processed, ...opts.memory?.processed }
@@ -154,7 +161,7 @@ export class Emulator {
     this.agency = new Agency({ directory: this.directory, inbox: this.inbox, clock: this.clock, bank: this.bank }, opts.memory?.agency, opts.agency)
     this.acquiring = new Acquiring({ directory: this.directory, inbox: this.inbox, clock: this.clock }, undefined, opts.acquiring)
     this.reports = new AccountReports({
-      directory: this.directory, ledger: this.ledger, journal: this.journal, inbox: this.inbox, clock: this.clock, bank: this.bank, xsd, msgIds,
+      directory: this.directory, ledger: this.ledger, journal: this.journal, inbox: this.inbox, clock: this.clock, bank: this.bank, xsd, msgIds, keyed,
     }, opts.reports)
   }
 
@@ -184,7 +191,8 @@ export class Emulator {
       const setup = c.agency !== undefined ? checkSetup(c.agency, customer.accounts) : undefined
       await this.agency.accounts.setSetup(customer, setup, { ifAbsent: o.fundOnce })
     }
-    if (c.limits) this.reports.configure(customer, { limits: { ...c.limits } })
+    // A persistent store keeps limits /_sim/reports changed over the seed's after a restart (decision 962).
+    if (c.limits) await this.reports.configure(customer, { limits: { ...c.limits } }, { ifAbsent: o.fundOnce })
     for (const a of c.accounts ?? []) {
       if (typeof a === 'string') continue
       if (a.viban) this.viban.registry.agreement(a.iban)

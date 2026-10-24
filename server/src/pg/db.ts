@@ -164,6 +164,22 @@ create table if not exists journal_entries (
 create index if not exists journal_entries_account on journal_entries (ns, account, booked_at, seq);
 `
 
+// Remembered business state (decision 961): one table for every KeyedStore kind. `ord`
+// is the insertion order, `until` the expiry (ms; null: none).
+const KEYED_SCHEMA = `
+create sequence if not exists keyed_seq;
+create table if not exists keyed_entries (
+  ns    text   not null,
+  kind  text   not null,
+  key   text   not null,
+  value jsonb  not null,
+  ord   bigint not null,
+  until bigint,
+  primary key (ns, kind, key)
+);
+create index if not exists keyed_entries_ord on keyed_entries (ns, kind, ord);
+`
+
 const SCHEMA_LOCK = 4410
 
 /** Statements one by one: `create index if not exists` locks its table even when the index exists. */
@@ -191,7 +207,7 @@ export class PgDb {
     const c = await pool.connect()
     try {
       await c.query('select pg_advisory_lock($1)', [SCHEMA_LOCK])
-      for (const s of [INBOX_SCHEMA, LEDGER_SCHEMA, AGENCY_SCHEMA, ACQUIRING_SCHEMA, RAILS_SCHEMA, JOURNAL_SCHEMA].flatMap(statements)) await c.query(s)
+      for (const s of [INBOX_SCHEMA, LEDGER_SCHEMA, AGENCY_SCHEMA, ACQUIRING_SCHEMA, RAILS_SCHEMA, JOURNAL_SCHEMA, KEYED_SCHEMA].flatMap(statements)) await c.query(s)
     } finally {
       await c.query('select pg_advisory_unlock($1)', [SCHEMA_LOCK])
       c.release()

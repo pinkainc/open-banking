@@ -133,8 +133,8 @@ export function simRoutes(emulator: Emulator) {
       if (!c) throw new ConnectError(404, 'NOT_FOUND', `no customer ${country}/${code}`)
       return c
     }
-    const reportView = (c: { code: string; country: string }) => {
-      const s = emulator.reports.settings(c)
+    const reportView = async (c: { code: string; country: string }) => {
+      const s = await emulator.reports.settings(c)
       return { code: c.code, country: c.country, automaticStatement: s.automaticStatement ?? null, limits: { ...DEFAULT_LIMITS, ...s.limits } }
     }
     app.get('/reports/:country/:code', async (req) => reportView(reportCustomer(req)))
@@ -155,9 +155,9 @@ export function simRoutes(emulator: Emulator) {
           amount(v)
           limits[k] = v as string
         }
-        s.limits = { ...emulator.reports.settings(c).limits, ...limits }
+        s.limits = { ...(await emulator.reports.settings(c)).limits, ...limits }
       }
-      emulator.reports.configure(c, s)
+      await emulator.reports.configure(c, s)
       return reportView(c)
     })
     // Sends the automatic statements of a finished day now (default: every day finished

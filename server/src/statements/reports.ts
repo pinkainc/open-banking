@@ -1,7 +1,8 @@
 // Account information: statements (camt.060 → camt.053) and balances (camt.060 →
 // camt.052), answered through the inbox like every Connect request, plus the automatic
 // end-of-day statement the bank sends unasked to customers who have it in their contract.
-import { BoundedSet, DEFAULT_BOUNDS, type Bounds } from '../bounded.js'
+import { DEFAULT_BOUNDS, type Bounds } from '../bounded.js'
+import { memoryKeyed, UNBOUNDED, type KeyedFactory, type KeyedStore } from '../keyed.js'
 import type { Clock } from '../clock.js'
 import { keyOf, type Customer, type CustomerKey, type Directory } from '../directory.js'
 import { errorsXml } from '../errors.js'
@@ -62,28 +63,35 @@ export interface ReportsDeps {
   clock: Clock
   bank: Bank
   xsd?: XsdValidator
+  /** Where settings and camt.060 MsgIds are kept (decision 962); default in memory. */
+  keyed?: KeyedFactory
 }
 
 export class AccountReports {
   pageSize: number
   maxTransactions: number
-  #settings = new Map<string, ReportSettings>()
-  #seen: BoundedSet<string>
+  #settings: KeyedStore<ReportSettings>
+  #seen: KeyedStore<true>
   #eodDone = new Set<string>()
   #eodFrom: string
 
   constructor(private d: ReportsDeps, opts: ReportsOptions = {}) {
-    this.#seen = new BoundedSet(d.clock, d.msgIds ?? DEFAULT_BOUNDS.msgIds)
+    const keyed = d.keyed ?? memoryKeyed(d.clock)
+    this.#settings = keyed('report-settings', UNBOUNDED)
+    this.#seen = keyed('report-msgids', d.msgIds ?? DEFAULT_BOUNDS.msgIds)
     this.pageSize = opts.pageSize ?? PAGE_SIZE
     this.maxTransactions = opts.maxTransactions ?? MAX_TRANSACTIONS
     // Automatic statements start with the day the server starts on: no backfill.
     this.#eodFrom = dateTallinn(d.clock.now())
   }
 
-  configure(c: CustomerKey, s: ReportSettings) {
-    this.#settings.set(keyOf({ code: c.code, country: c.country.toUpperCase() }), { ...this.settings(c), ...s })
+  /** Merges into the customer's settings; ifAbsent: only when it has none yet (the seed on a persistent store). */
+  async configure(c: CustomerKey, s: ReportSettings, o: { ifAbsent?: boolean } = {}) {
+    const key = keyOf({ code: c.code, country: c.country.toUpperCase() })
+    if (o.ifAbsent) await this.#settings.add(key, { ...s })
+    else await this.#settings.set(key, { ...(await this.settings(c)), ...s })
   }
-  settings(c: CustomerKey): ReportSettings { return this.#settings.get(keyOf({ code: c.code, country: c.country.toUpperCase() })) ?? {} }
+  async settings(c: CustomerKey): Promise<ReportSettings> { return (await this.#settings.get(keyOf({ code: c.code, country: c.country.toUpperCase() }))) ?? {} }
 
   /** POST /account-statement: the answer (pages or an error) goes to the customer's inbox. */
   statement(xml: string, customer: Customer, requestId: string) {
@@ -101,11 +109,11 @@ export class AccountReports {
     try {
       const req = await this.#parse(kind, xml)
       const seenKey = `${keyOf(customer)}|${kind}`
-      if (this.#seen.has(`${seenKey}|${req.msgId}`)) throw new StatementError(E.duplicate)
+      if (await this.#seen.has(`${seenKey}|${req.msgId}`)) throw new StatementError(E.duplicate)
       const owner = this.d.directory.ownerOf(req.iban!)
       if (!owner || keyOf(owner) !== keyOf(customer)) throw new StatementError(E.noAccess)
       const bodies = kind === 'statement' ? await this.#statementRequest(req, owner) : [await this.#balanceRequest(req, owner)]
-      this.#seen.add(`${seenKey}|${req.msgId}`)
+      await this.#seen.set(`${seenKey}|${req.msgId}`, true)
       for (const b of bodies) await add(b)
     } catch (e) {
       const err = e instanceof StatementError ? e : new StatementError(E.technical)
@@ -243,7 +251,7 @@ export class AccountReports {
    */
   async paymentLimits(owner: Customer, now = this.d.clock.now()) {
     const today = dateTallinn(now)
-    const l = { ...DEFAULT_LIMITS, ...this.settings(owner).limits }
+    const l = { ...DEFAULT_LIMITS, ...(await this.settings(owner)).limits }
     // Debits booked since the start of this Tallinn month / day, up to now.
     const month = await this.d.journal.debits(owner.accounts, 'EUR', instant(`${today.slice(0, 7)}-01`), now.getTime())
     const day = await this.d.journal.debits(owner.accounts, 'EUR', instant(today), now.getTime())
@@ -274,7 +282,7 @@ export class AccountReports {
     this.#eodDone.add(date)
     let n = 0
     for (const c of this.d.directory.all()) {
-      const version = this.settings(c).automaticStatement
+      const version = (await this.settings(c)).automaticStatement
       if (!version) continue
       for (const iban of c.accounts) {
         for (const body of await this.statementPages({ version, iban, owner: c, from: instant(date), to: instant(addDays(date, 1)) })) {

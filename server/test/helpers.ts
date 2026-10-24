@@ -25,6 +25,8 @@ import { PgAgencyStore } from '../src/pg/agency.js'
 import { PgAcquiringStore } from '../src/pg/acquiring.js'
 import { PgRailsPending } from '../src/pg/rails-pending.js'
 import { PgJournal } from '../src/pg/journal.js'
+import { pgKeyed } from '../src/pg/keyed.js'
+import { memoryKeyed } from '../src/keyed.js'
 import { OpenLedgerLedger } from '../src/ledgers/open-ledger.js'
 import { openLedgerUrl } from './open-ledger-server.js'
 import { XsdValidator } from '../src/payments/xsd.js'
@@ -87,7 +89,8 @@ export const STORE = process.env.OPEN_BANKING_STORE ?? 'memory'
 if (STORE !== 'memory' && STORE !== 'postgres' && STORE !== 'deferred') throw new Error(`OPEN_BANKING_STORE must be memory, postgres or deferred, not ${STORE}`)
 if (STORE === 'postgres' && !process.env.DATABASE_URL) throw new Error('OPEN_BANKING_STORE=postgres needs DATABASE_URL')
 /**
- * Emulator options with the inbox, the ledger, agency and acquiring in Postgres, one fresh
+ * Emulator options with every store in Postgres (inbox, ledger, agency, acquiring, rails
+ * pending, journal, keyed state), one fresh
  * namespace for all (or the one given: a restarted emulator on the same state).
  */
 export async function postgresStore(namespace: string = randomUUID()): Promise<EmulatorOptions> {
@@ -99,6 +102,7 @@ export async function postgresStore(namespace: string = randomUUID()): Promise<E
     acquiring: (clock, bounds) => new PgAcquiringStore(db, clock, { namespace, bounds }),
     railsPending: () => new PgRailsPending(db, { namespace }),
     journal: () => new PgJournal(db, { namespace }),
+    keyed: (clock) => pgKeyed(db, clock, namespace),
   }
 }
 /**
@@ -123,6 +127,7 @@ export const deferredStore = (): EmulatorOptions => ({
   acquiring: (clock, bounds) => deferred(new MemoryAcquiringStore(clock, bounds)),
   railsPending: () => deferred(new MemoryRailsPending()),
   journal: () => deferred(new MemoryJournal()),
+  keyed: (clock) => (kind, bounds) => deferred(memoryKeyed(clock)(kind, bounds)),
 })
 /** The options of the selected store (STORE), for every emulator a test builds. */
 export const storeOptions = async (): Promise<EmulatorOptions> => (STORE === 'postgres' ? postgresStore() : STORE === 'deferred' ? deferredStore() : {})
