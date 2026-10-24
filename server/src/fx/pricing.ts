@@ -15,13 +15,22 @@ export const DEFAULT_RATES: Record<string, string> = {
 /** Margin taken on the mid rate, as a fraction (0.003 = 0.3 %). */
 export const DEFAULT_MARGIN = 0.003
 
+/** The pricing settings as stored. */
+export interface PricingState { rates: Record<string, number>; margin: number; available: boolean }
+
 export class Pricing {
   #rates = new Map<string, number>()
   margin = DEFAULT_MARGIN
   /** false: every quote fails with "Pricing not available, try again later". */
   available = true
 
-  constructor() { this.setRates(DEFAULT_RATES) }
+  constructor(state?: PricingState) {
+    this.setRates(DEFAULT_RATES)
+    if (state) { this.#rates.clear(); this.setRates(state.rates); this.margin = state.margin; this.available = state.available }
+  }
+
+  /** What the emulator stores (decision 980): JSON-safe. */
+  state(): PricingState { return { rates: this.rates(), margin: this.margin, available: this.available } }
 
   setRates(rates: Record<string, string | number>) {
     for (const [ccy, v] of Object.entries(rates)) {

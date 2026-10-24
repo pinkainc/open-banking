@@ -9,6 +9,7 @@ import { accepted } from '../requests.js'
 import { fromMinor } from '../ledger.js'
 import { jsonTextScope } from '../jsonbody.js'
 import { FX_TYPES, endOfDay, type Offer } from './service.js'
+import type { Pricing } from './pricing.js'
 
 export function registerFx(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Promise<Caller>) {
   jsonTextScope(app, (scope) => {
@@ -47,30 +48,30 @@ function offerView(o: Offer) {
 
 export function fxSimRoutes(emulator: Emulator) {
   const bad = (msg: string) => new ConnectError(400, 'BAD_REQUEST', msg)
-  const pricing = emulator.fx.pricing
-  const state = () => ({ rates: pricing.rates(), margin: pricing.margin, available: pricing.available })
+  const state = (p: Pricing) => ({ rates: p.rates(), margin: p.margin, available: p.available })
   return async (app: FastifyInstance) => {
-    app.get('/offers', async () => ({ offers: [...emulator.fx.offers.values()].map(offerView) }))
+    app.get('/offers', async () => ({ offers: (await emulator.fx.offers()).map(offerView) }))
 
-    app.get('/pricing', async () => state())
+    app.get('/pricing', async () => state(await emulator.fx.pricing()))
 
     // { rates?: {USD: "1.08", ...} (units per 1 EUR), margin?: "0.003", available?: false }
     app.put('/pricing', async (req) => {
       const b = (req.body ?? {}) as { rates?: unknown; margin?: unknown; available?: unknown }
-      if (b.rates !== undefined) {
-        if (!b.rates || typeof b.rates !== 'object') throw bad('rates must be an object of currency → units per 1 EUR')
-        try { pricing.setRates(b.rates as Record<string, string>) } catch (e) { throw bad((e as Error).message) }
-      }
-      if (b.margin !== undefined) {
-        const m = Number(b.margin)
-        if (!Number.isFinite(m) || m < 0 || m >= 1) throw bad('margin must be a fraction in [0, 1)')
-        pricing.margin = m
-      }
-      if (b.available !== undefined) {
-        if (typeof b.available !== 'boolean') throw bad('available must be a boolean')
-        pricing.available = b.available
-      }
-      return state()
+      return state(await emulator.fx.setPricing((pricing) => {
+        if (b.rates !== undefined) {
+          if (!b.rates || typeof b.rates !== 'object') throw bad('rates must be an object of currency → units per 1 EUR')
+          try { pricing.setRates(b.rates as Record<string, string>) } catch (e) { throw bad((e as Error).message) }
+        }
+        if (b.margin !== undefined) {
+          const m = Number(b.margin)
+          if (!Number.isFinite(m) || m < 0 || m >= 1) throw bad('margin must be a fraction in [0, 1)')
+          pricing.margin = m
+        }
+        if (b.available !== undefined) {
+          if (typeof b.available !== 'boolean') throw bad('available must be a boolean')
+          pricing.available = b.available
+        }
+      }))
     })
 
     // Settles the due SPOT deals now (main.ts does this every minute).

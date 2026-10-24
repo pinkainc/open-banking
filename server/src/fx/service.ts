@@ -14,9 +14,14 @@
 // a CRDT in the bought currency, FORX / OTHR / OTHR, PmtInfId = the deal's pmtInfId, each
 // with a camt.054 and a statement entry. tick() settles due SPOT deals (main.ts calls it
 // every minute, tests and /_sim/fx/settle call it directly).
+//
+// Offers, their deals and the pricing settings are kept in the emulator's keyed store
+// (decision 980), so an offer made before a restart can still be confirmed within its
+// validity, once, and a SPOT deal is settled once (a claim per offer, decision 981).
 import { randomUUID } from 'node:crypto'
 import type { Clock } from '../clock.js'
-import { keyOf, type Customer, type DirectoryStore } from '../directory.js'
+import { keyOf, type Customer, type CustomerKey, type DirectoryStore } from '../directory.js'
+import { memoryKeyed, UNBOUNDED, type KeyedFactory, type KeyedStore } from '../keyed.js'
 import { normalizeIban } from '../iban.js'
 import { servicerRef } from '../ids.js'
 import type { InboxStore } from '../inbox.js'
@@ -27,7 +32,7 @@ import { addDays, instant } from '../statements/camt060.js'
 import { dateTallinn, isoTallinn } from '../time.js'
 import { isTarget2Day } from '../directdebit/target2.js'
 import { asObject, JsonBodyError, parseJsonBody } from '../jsonbody.js'
-import { convert, Pricing } from './pricing.js'
+import { convert, Pricing, type PricingState } from './pricing.js'
 
 export const FX_TYPES = { offer: 'FX_TRADE_OFFER', confirmation: 'FX_TRADE_OFFER_CONFIRMATION' } as const
 /** The bank's FX position: both legs of every deal are booked against it. */
@@ -97,9 +102,10 @@ export interface Deal {
   errors?: string[]
 }
 
+/** The deal references are numbers, as the P 12 sample sends; each is taken once in the store. */
 let pmtInfSeq = 10_357_000
-/** The deal reference on the account entries: a number, as the P 12 sample sends. */
-const nextPmtInfId = () => ++pmtInfSeq
+/** How long a claim on an offer holds when its holder never lets go (a crash), by the clock. */
+export const CLAIM_MS = 5 * 60 * 1000
 
 export interface FxDeps {
   directory: DirectoryStore
@@ -108,6 +114,8 @@ export interface FxDeps {
   clock: Clock
   bank: Bank
   onBooking?: (c: Customer, b: Booking) => void | Promise<void>
+  /** Where offers and pricing are kept (decision 980); memory when not given. */
+  keyed?: KeyedFactory
 }
 
 /** "2021-12-15T23:59:59+02:00": the end of a Tallinn date, without milliseconds. */
@@ -134,10 +142,92 @@ function readAmount(v: unknown, field: string): { minor?: bigint; error?: string
 const num = (n: bigint) => Number(fromMinor(n))
 
 export class FxService {
-  readonly pricing = new Pricing()
-  readonly offers = new Map<string, Offer>()
+  /** Every offer by customer key and requestReference, in the order they came (decision 980). */
+  #offers: KeyedStore<StoredOffer>
+  /** The /_sim pricing settings, one entry; the defaults while it is absent. */
+  #pricing: KeyedStore<PricingState>
+  /** Who is confirming or settling an offer right now (decision 981). */
+  #claims: KeyedStore<true>
+  /** The pmtInfIds given out, so a restarted emulator does not give one twice. */
+  #pmtInfIds: KeyedStore<true>
+  /** The service's operations in this process, one after the other (decision 981). */
+  #queue: Promise<unknown> = Promise.resolve()
 
-  constructor(private d: FxDeps) {}
+  constructor(private d: FxDeps) {
+    const keyed = d.keyed ?? memoryKeyed(d.clock)
+    this.#offers = keyed('fx-offers', UNBOUNDED)
+    this.#pricing = keyed('fx-pricing', UNBOUNDED)
+    this.#claims = keyed('fx-claims', { ttlMs: CLAIM_MS, max: 100_000 })
+    this.#pmtInfIds = keyed('fx-pmtinfids', UNBOUNDED)
+  }
+
+  #serial<T>(f: () => Promise<T>): Promise<T> {
+    const run = this.#queue.then(f, f)
+    this.#queue = run.catch(() => undefined)
+    return run
+  }
+
+  /** The current pricing (a copy: change it with setPricing). */
+  async pricing(): Promise<Pricing> { return new Pricing(await this.#pricing.get('pricing')) }
+
+  /** Changes the pricing with f (which may throw: nothing is stored then) and stores it. */
+  setPricing(f: (p: Pricing) => void): Promise<Pricing> {
+    return this.#serial(async () => {
+      const p = await this.pricing()
+      f(p)
+      await this.#pricing.set('pricing', p.state())
+      return p
+    })
+  }
+
+  /** Every offer, oldest first; one whose customer is gone from the directory is left out. */
+  async offers(): Promise<Offer[]> {
+    const out: Offer[] = []
+    for (const [, s] of await this.#offers.entries()) {
+      const o = await this.#decode(s)
+      if (o) out.push(o)
+    }
+    return out
+  }
+
+  async #decode(s: StoredOffer, customer?: Customer): Promise<Offer | undefined> {
+    const { customer: k, amountFrom, amountTo, orderedAt, validUntil, deal, ...rest } = s
+    const c = customer ?? (await this.d.directory.get(k))
+    if (!c) return undefined
+    const o: Offer = { ...rest, customer: c, orderedAt: new Date(orderedAt) }
+    if (amountFrom !== undefined) o.amountFrom = BigInt(amountFrom)
+    if (amountTo !== undefined) o.amountTo = BigInt(amountTo)
+    if (validUntil !== undefined) o.validUntil = new Date(validUntil)
+    if (deal) {
+      const { confirmedAt, settledAt, ...d } = deal
+      o.deal = { ...d, confirmedAt: new Date(confirmedAt), ...(settledAt !== undefined ? { settledAt: new Date(settledAt) } : {}) }
+    }
+    return o
+  }
+
+  /**
+   * Runs f on the stored offer while holding its claim (keyed `add`, one holder across
+   * emulators on a namespace); undefined when another holds it or the offer is gone.
+   */
+  async #claimed<T>(key: string, f: (o: Offer) => Promise<T>, customer?: Customer): Promise<T | undefined> {
+    if (!(await this.#claims.add(key, true))) return undefined
+    try {
+      const s = await this.#offers.get(key)
+      const o = s && (await this.#decode(s, customer))
+      return o ? await f(o) : undefined
+    } finally {
+      await this.#claims.take(key)
+    }
+  }
+
+  async #save(o: Offer) { await this.#offers.replace(this.#key(o.customer, o.requestReference), encodeOffer(o)) }
+
+  /** The next free pmtInfId: the counter, past every one the store has given out. */
+  async #nextPmtInfId() {
+    let id: number
+    do id = ++pmtInfSeq; while (!(await this.#pmtInfIds.add(String(id), true)))
+    return id
+  }
 
   #key = (c: Customer, ref: string) => `${keyOf(c)}|${ref}`
 
@@ -146,8 +236,8 @@ export class FxService {
   }
 
   /** POST /fx/trade-offer: always answered in the inbox. */
-  async offer(raw: unknown, customer: Customer, requestId: string) {
-    await this.#send(customer, FX_TYPES.offer, requestId, await this.#offer(raw, customer))
+  offer(raw: unknown, customer: Customer, requestId: string): Promise<void> {
+    return this.#serial(async () => { await this.#send(customer, FX_TYPES.offer, requestId, await this.#offer(raw, customer)) })
   }
 
   async #offer(raw: unknown, customer: Customer): Promise<object> {
@@ -174,10 +264,13 @@ export class FxService {
     const from = readAmount(b.amountFrom, 'amountFrom')
     const to = readAmount(b.amountTo, 'amountTo')
     if (from.technical || to.technical) return { errorCode: [(from.technical ?? to.technical)!] }
-    if (this.offers.has(this.#key(customer, requestReference))) return { errorCode: [FX_E.duplicate(requestReference)] }
+    const key = this.#key(customer, requestReference)
+    const duplicate = { errorCode: [FX_E.duplicate(requestReference)] }
+    if (await this.#offers.has(key)) return duplicate
     const account = typeof ibanRaw === 'string' ? normalizeIban(ibanRaw) : ''
     if (!account || !customer.accounts.includes(account)) return { errorCode: [FX_E.account] }
-    if (!this.pricing.available) return { errorCode: [FX_E.pricing] }
+    const pricing = await this.pricing()
+    if (!pricing.available) return { errorCode: [FX_E.pricing] }
 
     const now = this.d.clock.now()
     const tradeDate = dateTallinn(now)
@@ -188,21 +281,22 @@ export class FxService {
       comment: typeof b.comment === 'string' ? b.comment : undefined,
       accountServicerReference: randomUUID(), orderedAt: now, tradeDate, status: 'CANCELLED',
     }
-    this.offers.set(this.#key(customer, requestReference), offer)
+    // Stored once, as answered; `add` lets one of two emulators have the reference (decision 980).
+    const done = async () => (await this.#offers.add(key, encodeOffer(offer))) ? this.offerView(offer) : duplicate
 
     // Business errors: the offer is created CANCELLED with the error.
-    const cancel = (error: string) => { offer.errors = [error]; return this.offerView(offer) }
+    const cancel = (error: string) => { offer.errors = [error]; return done() }
     if (!currencyFrom) return cancel(FX_E.missing('currencyFrom'))
     if (!currencyTo) return cancel(FX_E.missing('currencyTo'))
-    if (this.pricing.supports(currencyFrom) && this.pricing.supports(currencyTo)) offer.baseCurrency = this.pricing.base(currencyFrom, currencyTo)
+    if (pricing.supports(currencyFrom) && pricing.supports(currencyTo)) offer.baseCurrency = pricing.base(currencyFrom, currencyTo)
     if (from.minor === undefined && to.minor === undefined) return cancel(from.error ?? to.error ?? FX_E.noAmount)
     if (from.error || to.error) return cancel((from.error ?? to.error)!)
     if (from.minor !== undefined && to.minor !== undefined) return cancel(FX_E.bothAmounts)
-    if (!this.pricing.supports(currencyFrom)) return cancel(FX_E.currency(currencyFrom))
-    if (!this.pricing.supports(currencyTo)) return cancel(FX_E.currency(currencyTo))
+    if (!pricing.supports(currencyFrom)) return cancel(FX_E.currency(currencyFrom))
+    if (!pricing.supports(currencyTo)) return cancel(FX_E.currency(currencyTo))
     if (currencyFrom === currencyTo) return cancel(FX_E.sameCurrency)
 
-    const { base, quote } = this.pricing.quote(currencyFrom, currencyTo)
+    const { base, quote } = pricing.quote(currencyFrom, currencyTo)
     offer.quote = quote
     offer.amountFrom = from.minor ?? convert(to.minor!, currencyTo, base, quote)
     offer.amountTo = to.minor ?? convert(from.minor!, currencyFrom, base, quote)
@@ -212,7 +306,7 @@ export class FxService {
     if ((await this.d.ledger.available(account, currencyFrom)) < offer.amountFrom) return cancel(this.#noFunds(offer))
     offer.status = 'CONFIRMATION_PENDING'
     offer.validUntil = new Date(now.getTime() + VALIDITY_MS)
-    return this.offerView(offer)
+    return done()
   }
 
   #noFunds(o: Offer) {
@@ -268,8 +362,8 @@ export class FxService {
   }
 
   /** POST /fx/trade-offer-confirmation: always answered in the inbox. */
-  async confirm(raw: unknown, customer: Customer, requestId: string) {
-    await this.#send(customer, FX_TYPES.confirmation, requestId, await this.#confirm(raw, customer, requestId))
+  confirm(raw: unknown, customer: Customer, requestId: string): Promise<void> {
+    return this.#serial(async () => { await this.#send(customer, FX_TYPES.confirmation, requestId, await this.#confirm(raw, customer, requestId)) })
   }
 
   async #confirm(raw: unknown, customer: Customer, requestId: string): Promise<object> {
@@ -288,16 +382,22 @@ export class FxService {
     const confirm = b.confirm === true || b.confirm === 'true' ? true : b.confirm === false || b.confirm === 'false' ? false : undefined
     if (confirm === undefined) return { errorCode: [FX_E.boolean(b.confirm)] }
     const ref = String(refRaw)
-    const o = this.offers.get(this.#key(customer, ref))
-    if (!o) return { errorCode: [FX_E.unknownOffer(ref)] }
-    if (o.status !== 'CONFIRMATION_PENDING' || o.deal) return { errorCode: [FX_E.notPending(ref)] }
+    const key = this.#key(customer, ref)
+    if (!(await this.#offers.has(key))) return { errorCode: [FX_E.unknownOffer(ref)] }
+    const notPending = { errorCode: [FX_E.notPending(ref)] }
+    // Answered once: the offer is read again under its claim; one held by another is being answered.
+    return (await this.#claimed(key, (o) => this.#answer(o, confirm, requestId), customer)) ?? notPending
+  }
+
+  async #answer(o: Offer, confirm: boolean, requestId: string): Promise<object> {
+    if (o.status !== 'CONFIRMATION_PENDING' || o.deal) return { errorCode: [FX_E.notPending(o.requestReference)] }
     const now = this.d.clock.now()
     if (now.getTime() > o.validUntil!.getTime()) return { errorCode: [FX_E.expired] }
 
     const deal: Deal = { status: 'CANCELLED', confirmRequestId: requestId, confirmedAt: now }
     o.deal = deal
     // false rejects the offer for good: "It cannot be confirmed anymore even with validity time left."
-    if (!confirm) return this.dealView(o)
+    if (!confirm) { await this.#save(o); return this.dealView(o) }
 
     const reservation = `fx:${o.accountServicerReference}`
     try {
@@ -305,11 +405,13 @@ export class FxService {
     } catch (e) {
       if (!(e instanceof InsufficientFunds)) throw e
       deal.errors = [this.#noFunds(o)]
+      await this.#save(o)
       return this.dealView(o)
     }
     deal.reservation = reservation
-    deal.pmtInfId = nextPmtInfId()
+    deal.pmtInfId = await this.#nextPmtInfId()
     deal.status = 'SETTLEMENT_PENDING'
+    await this.#save(o)
     // TODAY: "settlement is executed in seconds after the confirmation request" — here at once,
     // so the one confirmation message is already COMPLETED (decision 401).
     if (o.tenor === 'TODAY') await this.#settle(o)
@@ -325,6 +427,7 @@ export class FxService {
     await this.d.ledger.transfer({ ref: creditRef, from: FX_POSITION, to: o.account, amount: o.amountTo!, currency: o.currencyTo })
     d.status = 'COMPLETED'
     d.settledAt = now
+    await this.#save(o)
     const c = o.customer
     const leg = (direction: 'DBIT' | 'CRDT', amount: bigint, currency: string, ref: string): Booking => ({
       account: o.account, owner: { name: c.name, code: c.code }, direction, amount, currency, servicerRef: ref,
@@ -343,15 +446,43 @@ export class FxService {
    * Settles the SPOT deals whose settlement date has begun in Tallinn and sends each a
    * second FX_TRADE_OFFER_CONFIRMATION, COMPLETED (decision 402). Returns how many.
    */
-  async tick(): Promise<number> {
+  tick(): Promise<number> { return this.#serial(() => this.#tick()) }
+
+  async #tick(): Promise<number> {
     const now = this.d.clock.now().getTime()
+    const due = (o: { deal?: { status: TradeStatus }; settlementDate?: string }) =>
+      o.deal?.status === 'SETTLEMENT_PENDING' && now >= instant(o.settlementDate!, '00:00:00')
     let n = 0
-    for (const o of this.offers.values()) {
-      if (o.deal?.status !== 'SETTLEMENT_PENDING' || now < instant(o.settlementDate!, '00:00:00')) continue
-      await this.#settle(o)
-      await this.#send(o.customer, FX_TYPES.confirmation, o.deal.confirmRequestId, this.dealView(o))
-      n++
+    for (const [key, s] of await this.#offers.entries()) {
+      if (!due(s)) continue
+      const settled = await this.#claimed(key, async (o) => {
+        if (!due(o)) return false
+        await this.#settle(o)
+        await this.#send(o.customer, FX_TYPES.confirmation, o.deal!.confirmRequestId, this.dealView(o))
+        return true
+      })
+      if (settled) n++
     }
     return n
   }
+}
+
+/** An offer as the keyed store keeps it (decision 980): JSON, the customer by key. */
+type StoredOffer = Omit<Offer, 'customer' | 'amountFrom' | 'amountTo' | 'orderedAt' | 'validUntil' | 'deal'> & {
+  customer: CustomerKey
+  amountFrom?: string
+  amountTo?: string
+  orderedAt: number
+  validUntil?: number
+  deal?: Omit<Deal, 'confirmedAt' | 'settledAt'> & { confirmedAt: number; settledAt?: number }
+}
+
+/** JSON-safe (undefined fields dropped), so memory hands back what Postgres would. */
+const encodeOffer = (o: Offer): StoredOffer => {
+  const { customer, amountFrom, amountTo, orderedAt, validUntil, deal, ...rest } = o
+  return JSON.parse(JSON.stringify({
+    ...rest, customer: { code: customer.code, country: customer.country },
+    amountFrom: amountFrom?.toString(), amountTo: amountTo?.toString(), orderedAt: orderedAt.getTime(), validUntil: validUntil?.getTime(),
+    deal: deal && { ...deal, confirmedAt: deal.confirmedAt.getTime(), settledAt: deal.settledAt?.getTime() },
+  }))
 }

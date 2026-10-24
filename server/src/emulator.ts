@@ -152,7 +152,7 @@ export class Emulator {
     })
     this.fx = new FxService({
       directory: this.directory, ledger: this.ledger, inbox: this.inbox, clock: this.clock, bank: this.bank,
-      onBooking: async (_c, b) => { await this.journal.record(b) },
+      onBooking: async (_c, b) => { await this.journal.record(b) }, keyed,
     })
     this.contracts = new Contracts(this.directory, this.clock)
     this.payee = new PayeeService({ directory: this.directory, viban: this.viban.registry, inbox: this.inbox, clock: this.clock, agency: () => this.agency?.accounts })
