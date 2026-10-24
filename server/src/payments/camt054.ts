@@ -3,7 +3,7 @@
 import { notificationMsgId } from '../ids.js'
 import { dateLondon, dateTallinn, isoLondon, isoTallinn, localTallinn } from '../time.js'
 import { isUkAccount } from '../routing.js'
-import { UK_ADDRESS, postalAddress } from '../statements/bank-address.js'
+import { UK_ADDRESS, postalAddress, type BankAddress } from '../statements/bank-address.js'
 import type { UltimateParty } from './pain001.js'
 import { fromMinor } from '../ledger.js'
 import { document, el, opt, toXml } from '../xml.js'
@@ -57,7 +57,7 @@ function ultimate(tag: 'UltmtDbtr' | 'UltmtCdtr', u: UltimateParty | undefined, 
   return el(tag, v8 ? el('Pty', inner) : inner)
 }
 
-export function camt054(b: Booking, version: '02' | '08', bankIn: { bic: string; name: string }): string {
+export function camt054(b: Booking, version: '02' | '08', bankIn: { bic: string; name: string; address?: BankAddress | null }): string {
   const v8 = version === '08'
   // A GB account is LHV UK's: its servicer, UK time, NtryRef, RvslInd and ValDt/DtTm as the G samples.
   const uk = !v8 && isUkAccount(b.account)
@@ -103,7 +103,8 @@ export function camt054(b: Booking, version: '02' | '08', bankIn: { bic: string;
         el('Id', el('IBAN', b.account)),
         el('Ccy', b.currency),
         el('Ownr', el('Nm', b.owner.name.slice(0, 140)), el('Id', el('OrgId', el('Othr', el('Id', b.owner.code))))),
-        el('Svcr', uk ? el('FinInstnId', el('BIC', bank.bic), el('Nm', bank.name), postalAddress(UK_ADDRESS, false)) : ownAgent),
+        // The servicer with the bank's postal address (decision 950): the UK one for a GB account, else the seed's.
+        el('Svcr', el('FinInstnId', el(bicTag, uk ? bank.bic : bank.bic.slice(0, 8)), el('Nm', bank.name), postalAddress(uk ? UK_ADDRESS : bankIn.address, v8))),
       ),
       el('Ntry',
         uk ? el('NtryRef', '1') : null,
@@ -122,7 +123,8 @@ export function camt054(b: Booking, version: '02' | '08', bankIn: { bic: string;
             el('AcctSvcrRef', b.servicerRef),
             opt('PmtInfId', b.pmtInfId),
             opt('InstrId', b.instrId),
-            opt('EndToEndId', b.endToEndId),
+            // NOTPROVIDED is no reference: not echoed (decision 951).
+            opt('EndToEndId', b.endToEndId === 'NOTPROVIDED' ? undefined : b.endToEndId),
             opt('MndtId', b.mandateId)),
           el('AmtDtls', el('InstdAmt', el('Amt', { Ccy: b.currency }, amt)), el('TxAmt', el('Amt', { Ccy: b.currency }, amt))),
           relatedParties,

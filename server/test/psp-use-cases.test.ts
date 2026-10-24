@@ -9,7 +9,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, test } from 'node:test'
 import { parseXml } from '../src/xml.js'
-import { MIRROR_DIR, call, drain, schemaValid, seed, setup, type Ctx } from './helpers.js'
+import { MIRROR_DIR, call, drain, sample, schemaValid, seed, setup, type Ctx } from './helpers.js'
 
 const DIR = join(MIRROR_DIR, 'docs/gitbook/connect/services/payments/payment-examples/payment-service-provider-use-cases')
 const PAGES: Record<number, string> = {
@@ -37,7 +37,7 @@ function normalise(v: any, key = ''): any {
   if (v && typeof v === 'object') {
     const o: any = {}
     for (const [k, x] of Object.entries(v)) {
-      if (k === '?xml' || k.startsWith('@xmlns') || k === '@xsi:schemaLocation') continue
+      if (k === '?xml' || k.startsWith('@xmlns') || k === '@xsi:schemaLocation' || k === '@schemaLocation') continue
       o[k] = normalise(x, k)
     }
     return o
@@ -57,10 +57,10 @@ function differences(sample: any, produced: any, path = ''): string[] {
   return keys.flatMap((k) => differences(sample[k], produced[k], path ? `${path}/${k}` : k))
 }
 const doc = (xml: string) => normalise(parseXml(xml).Document)
-/** Ntfctn/Id is the MsgId and the currency. */
+/** Ntfctn/Id is the MsgId and the currency (the EE samples: a sequence number and the currency). */
 const ntfctnId = (d: any) => {
   const n = d?.BkToCstmrDbtCdtNtfctn?.Ntfctn
-  if (n?.Id) n.Id = String(n.Id).replace(/^[0-9a-f]{32}/, '*')
+  if (n?.Id) n.Id = String(n.Id).replace(/^([0-9a-f]{32}|[0-9]+)(?=[A-Z]{3}$)/, '*')
   return d
 }
 
@@ -211,4 +211,88 @@ describe('PSP use cases (G payment examples)', { skip: NO_PAGES }, () => {
     })
     assert.deepEqual(sepa, AGENCY_CAMT.slice(0, 2))
   })
+})
+
+
+// --- The partner site's PAYMENT_PSP_USECASES samples (step F, decisions 950–955) ----------
+// The same eight use cases as published on partners.lhv.ee: EE accounts, pain.001 → pain.002
+// ACSP → ACSC → camt.054.001.02, replayed on the EE host and diffed as above. The samples come
+// from LHV's test environment (BIC LHVBEE20, "AS LHV Pank") and are of two runs (2023-10-05,
+// 2023-10-10); cases 3–8 share one camt.054 and one pair of pain.002, so what is specific to a
+// use case (ultimate parties, VIBAN, agency) is not in them (decision 953).
+const PARTNER = 'PAYMENT_PSP_USECASES'
+const NO_PARTNER = sample(PARTNER, 'case1_pain.001.xml') ? false : 'no PAYMENT_PSP_USECASES samples (docs mirror or scripts/fetch-reference.sh)'
+/** The four files of a partner case under the tab names of the G pages. */
+function partnerTabs(n: number): Record<string, string> {
+  const f = (file: string) => sample(PARTNER, `case${n}_${file}`)!
+  return {
+    'Payment Request': f('pain.001.xml'), 'Payment Response 1': f('pain.002_ACSP.xml'),
+    'Payment Response 2': f('pain.002_ACSC.xml'), 'Transaction Notification': f('CAMT.054.001.02.xml'),
+  }
+}
+/** The account owner of the samples (camt.054 Ownr: "Connect Demo Customer 1", 12340001). */
+const DEMO = { code: '12340001', country: 'EE', name: 'Connect Demo Customer 1' }
+/** The EE host as LHV's test environment: its BIC and name; the sample IBANs fail the checksum (decision 952). */
+async function testEnvironment(iban: string): Promise<Ctx> {
+  const s = seed()
+  s.bank = { bic: 'LHVBEE20', name: 'AS LHV Pank' }
+  s.customers.push({ ...DEMO, accounts: [{ iban, balances: { EUR: '10.00' } }] } as any)
+  return setup({ strictIban: false }, s)
+}
+
+const N = 'BkToCstmrDbtCdtNtfctn/Ntfctn/Ntry/NtryDtls/TxDtls'
+/** pain.002 GrpHdr/InitgPty: the samples echo the request's, the emulator names the bank (decision 954). */
+const initgPty = (psp: 1 | 2) => [`~CstmrPmtStsRpt/GrpHdr/InitgPty/Id/OrgId/AnyBIC: "PSP${psp}CCCCXXX" != "LHVBEE20"`]
+// What the partner camt.054 samples have and the emulator does not write (decision 954).
+const CDTR_ADR = `-${N}/RltdPties/Cdtr/PstlAdr` // an empty <PstlAdr/>
+const CDTR_ID = `-${N}/RltdPties/Cdtr/Id` // the creditor's LEI as Othr with SchmeNm LEI
+const CDTR_AGT = `-${N}/RltdAgts/CdtrAgt` // the creditor bank by BIC and name, from the IBAN
+// The emulator writes ValDt; no published EE camt.054.001.02 sample has it (decision 954).
+const VALDT = '+BkToCstmrDbtCdtNtfctn/Ntfctn/Ntry/ValDt'
+// The ultimate parties of the request the emulator echoes (decision 841) and the shared camt.054 of cases 3–8 lacks (decision 953).
+const ULTMT_DBTR = `+${N}/RltdPties/UltmtDbtr`
+const ULTMT_CDTR = `+${N}/RltdPties/UltmtCdtr`
+/** The recorded divergences of each case: pain.002 ACSP and ACSC alike, then the camt.054 in document order. */
+const PARTNER_DIVERGENCES: Record<number, { pain002: string[]; camt: string[] }> = {
+  // The responses are of the 2023-10-10 run (the request repaired to it), whose request had NOTPROVIDED, the creditor's LEI and no UltmtCdtr.
+  1: { pain002: initgPty(1), camt: [`+${N}/Refs/EndToEndId`, CDTR_ADR, CDTR_ID, ULTMT_CDTR, CDTR_AGT, VALDT] },
+  // The camt.054 is of a request with another Ultimate Debtor ("of PSP2", identified by its LEI).
+  2: { pain002: initgPty(1), camt: [
+    `~${N}/RltdPties/UltmtDbtr/Nm: "Business Customer of PSP2" != "Business Customer of PSP1"`,
+    `-${N}/RltdPties/UltmtDbtr/Id`, `+${N}/RltdPties/UltmtDbtr/PstlAdr`, CDTR_ADR, CDTR_AGT, VALDT,
+  ] },
+  3: { pain002: initgPty(2), camt: [CDTR_ADR, CDTR_ID, ULTMT_DBTR, CDTR_AGT, VALDT] },
+  4: { pain002: initgPty(1), camt: [CDTR_ADR, CDTR_ID, CDTR_AGT, VALDT] },
+  5: { pain002: initgPty(2), camt: [CDTR_ADR, CDTR_ID, ULTMT_DBTR, ULTMT_CDTR, CDTR_AGT, VALDT] },
+  6: { pain002: initgPty(2), camt: [CDTR_ADR, CDTR_ID, ULTMT_DBTR, ULTMT_CDTR, CDTR_AGT, VALDT] },
+  7: { pain002: initgPty(1), camt: [CDTR_ADR, CDTR_ID, ULTMT_CDTR, CDTR_AGT, VALDT] },
+  // The camt.054 names another creditor account than the request.
+  8: { pain002: initgPty(1), camt: [
+    CDTR_ADR, CDTR_ID, `~${N}/RltdPties/CdtrAcct/Id/IBAN: "PL97109013910000000109909666" != "PL97109013910000000112345678"`,
+    ULTMT_DBTR, ULTMT_CDTR, CDTR_AGT, VALDT,
+  ] },
+}
+
+describe('PSP use cases (partner site PAYMENT_PSP_USECASES samples)', { skip: NO_PARTNER }, () => {
+  for (const n of [1, 2, 3, 4, 5, 6, 7, 8]) {
+    test(`case ${n}: replayed on the EE host, the published pain.002 ACSP, ACSC and camt.054`, async () => {
+      const t = partnerTabs(n)
+      let request = t['Payment Request']
+      if (n === 1) {
+        // Repair (decision 953): case 1's request is of the 2023-10-05 run, its three responses of the 2023-10-10 run.
+        assert.match(request, /MSGIDTEST2023-10-05T11:14:06/)
+        assert.match(t['Payment Response 1'], /MSGIDTEST2023-10-10T11:42:16/)
+        request = request.replaceAll('2023-10-05T11:14:06', '2023-10-10T11:42:16').replace('<Dt>2023-10-05</Dt>', '<Dt>2023-10-10</Dt>')
+      }
+      const iban = /<DbtrAcct>\s*<Id>\s*<IBAN>([A-Z0-9]+)</.exec(request)![1]
+      const creditor = /<CdtrAcct>\s*<Id>\s*<IBAN>([A-Z0-9]+)</.exec(request)![1]
+      const ctx = await testEnvironment(iban)
+      // The published payments went by SEPA: the creditor bank is not instant-reachable (cases 1, 2 ask for no scheme).
+      assert.equal((await call(ctx, { method: 'POST', url: '/_sim/rails/no-instant', body: { account: creditor } })).statusCode, 200)
+      const d = await outgoing({ ctx, as: DEMO.code, tabs: t, request })
+      const want = PARTNER_DIVERGENCES[n]
+      same(d, { acsp: want.pain002, acsc: want.pain002, camt: want.camt })
+      assert.equal((ctx.emulator.rails as any).sent[0].scheme, 'SEPA')
+    })
+  }
 })
