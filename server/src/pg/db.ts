@@ -75,6 +75,19 @@ create or replace function ledger_postings_append_only() returns trigger languag
 begin raise exception 'ledger_postings is append-only'; end $$;
 create or replace trigger ledger_postings_append_only before update or delete on ledger_postings
   for each row execute function ledger_postings_append_only();
+-- Booking keys (decision 995): one row per booked transfer or commit, in its transaction;
+-- kept as long as the postings (decision 996).
+create table if not exists ledger_bookings (
+  ns       text   not null,
+  key      text   not null,
+  ref      text   not null,
+  source   text   not null,
+  target   text   not null,
+  currency text   not null,
+  amount   bigint not null,
+  at       bigint not null,
+  primary key (ns, key)
+);
 `
 
 // Agency accounts and set-ups (decision 943). The key `id` is what agencyKey() makes of an

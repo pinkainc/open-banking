@@ -20,7 +20,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type pg from 'pg'
 import type { Clock } from '../clock.js'
-import { InsufficientFunds, isSystemAccount, type Ledger, type Posting } from '../ledger.js'
+import { InsufficientFunds, isSystemAccount, sameTerms, type Booked, type BookingTerms, type Ledger, type Posting, type Transfer } from '../ledger.js'
 import type { PgDb } from './db.js'
 import type { OutboxItem } from '../outbox.js'
 import { insertOutbox, PgOutbox } from './outbox.js'
@@ -77,12 +77,22 @@ export class PgLedger implements Ledger {
     })
   }
 
-  async commit(ref: string, to: string, outbox: OutboxItem[] = []) {
-    await this.#tx(undefined, async (c) => {
+  async commit(ref: string, to: string, outbox: OutboxItem[] = []): Promise<Booked> {
+    return this.#tx(undefined, async (c) => {
       const { rows } = await c.query('delete from ledger_holds where ns = $1 and ref = $2 returning account, currency, amount', [this.namespace, ref])
-      if (!rows.length) throw new Error(`no reservation ${ref}`)
-      await this.#move(c, ref, rows[0].account, to, BigInt(rows[0].amount), rows[0].currency)
+      if (!rows.length) {
+        // The hold went with a commit (a repeat, decision 995) or never was. A commit running
+        // now holds the hold's row lock until it ends, so this sees its key row once it has.
+        const b = await this.#booking(c, ref)
+        if (b) return sameTerms(ref, b, { to })
+        throw new Error(`no reservation ${ref}`)
+      }
+      const t = { ref, from: rows[0].account, to, amount: BigInt(rows[0].amount), currency: rows[0].currency }
+      // A re-reserved ref committed again: the key row gets the newest terms.
+      await this.#key(c, ref, t, true)
+      await this.#move(c, ref, t.from, to, t.amount, t.currency)
       await insertOutbox(c, this.namespace, outbox)
+      return { ref, repeat: false }
     })
   }
 
@@ -91,13 +101,18 @@ export class PgLedger implements Ledger {
   }
 
   /** reserve + commit in one transaction: a failure leaves nothing. */
-  async transfer(t: { ref: string; from: string; to: string; amount: bigint; currency: string }, outbox: OutboxItem[] = []) {
+  async transfer(t: Transfer, outbox: OutboxItem[] = []): Promise<Booked> {
     if (t.amount <= 0n) throw new Error('amount must be positive')
-    await this.#debiting(t.from, async (c) => {
+    const key = t.key ?? t.ref
+    return this.#debiting(t.from, async (c) => {
+      // The key row first: a concurrent transfer of the key (a system account takes no
+      // lock) waits on its unique index until this one ends, then finds it (decision 995).
+      if (!(await this.#key(c, key, t, false))) return sameTerms(key, (await this.#booking(c, key))!, t)
       await this.#checkFree(c, t.ref)
       await this.#checkFunds(c, t.from, t.currency, t.amount)
       await this.#move(c, t.ref, t.from, t.to, t.amount, t.currency)
       await insertOutbox(c, this.namespace, outbox)
+      return { ref: t.ref, repeat: false }
     })
   }
 
@@ -117,6 +132,21 @@ export class PgLedger implements Ledger {
       [this.namespace, account, currency],
     )
     return BigInt(rows[0].available)
+  }
+
+  /** Stores a booking key; false when it is there (`replace`: overwritten instead). */
+  async #key(c: pg.PoolClient, key: string, t: BookingTerms, replace: boolean): Promise<boolean> {
+    const at = this.#clock ? this.#clock.now().getTime() : Date.now()
+    const { rowCount } = await c.query(
+      `insert into ledger_bookings (ns, key, ref, source, target, currency, amount, at) values ($1, $2, $3, $4, $5, $6, $7, $8)
+       on conflict (ns, key) do ${replace ? 'update set ref = excluded.ref, source = excluded.source, target = excluded.target, currency = excluded.currency, amount = excluded.amount, at = excluded.at' : 'nothing'}`,
+      [this.namespace, key, t.ref, t.from, t.to, t.currency, t.amount.toString(), at])
+    return rowCount === 1
+  }
+
+  async #booking(c: pg.PoolClient, key: string): Promise<BookingTerms | undefined> {
+    const { rows } = await c.query('select ref, source, target, currency, amount from ledger_bookings where ns = $1 and key = $2', [this.namespace, key])
+    return rows[0] && { ref: rows[0].ref, from: rows[0].source, to: rows[0].target, currency: rows[0].currency, amount: BigInt(rows[0].amount) }
   }
 
   async #checkFree(c: pg.PoolClient, ref: string) {

@@ -514,8 +514,10 @@ export class BacsService {
   async #debit(c: BacsCollection): Promise<boolean> {
     const m = c.mandate
     const notices = [this.d.outbox.notice(m.customer, this.#booking(c, 'DBIT', c.id))]
+    // Keyed by the collection's id (decision 995): a rerun after a crash before the save books nothing twice.
+    let repeat: boolean
     try {
-      await this.d.ledger.transfer({ ref: c.id, from: m.debtor.iban, to: this.d.rails.settlementAccount(BACS_SCHEME), amount: c.amount, currency: 'GBP' }, notices)
+      repeat = (await this.d.ledger.transfer({ ref: c.id, from: m.debtor.iban, to: this.d.rails.settlementAccount(BACS_SCHEME), amount: c.amount, currency: 'GBP' }, notices)).repeat
     } catch (e) {
       if (e instanceof InsufficientFunds) return false
       throw e
@@ -523,7 +525,7 @@ export class BacsService {
     c.debit = 'BOOKED'
     c.debitedAt = this.d.clock.now()
     await this.#saveCollection(c)
-    await this.d.outbox.deliver(notices)
+    if (!repeat) await this.d.outbox.deliver(notices)
     return true
   }
 
@@ -532,10 +534,10 @@ export class BacsService {
     // A return (UPDD) or a reversal (PRDD) of the direct debit, with the reason as RtrInf.
     const b = this.#booking(c, 'CRDT', f.ref)
     const notices = [this.d.outbox.notice(c.mandate.customer, { ...b, bankTxCode: { family: 'RDDT', subFamily: f.kind === 'RETURN' ? 'UPDD' : 'PRDD' }, returnInfo: { code: f.code, additional: [f.text] } })]
-    await this.d.ledger.transfer({ ref: f.ref, from: this.d.rails.settlementAccount(BACS_SCHEME), to: c.mandate.debtor.iban, amount: c.amount, currency: 'GBP' }, notices)
+    const booked = await this.d.ledger.transfer({ ref: f.ref, from: this.d.rails.settlementAccount(BACS_SCHEME), to: c.mandate.debtor.iban, amount: c.amount, currency: 'GBP' }, notices)
     f.bookedAt = this.d.clock.now()
     await this.#saveCollection(c)
-    await this.d.outbox.deliver(notices)
+    if (!booked.repeat) await this.d.outbox.deliver(notices)
   }
 
   #booking(c: BacsCollection, direction: 'DBIT' | 'CRDT', ref: string): Booking {

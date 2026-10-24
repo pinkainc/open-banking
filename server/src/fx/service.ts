@@ -436,12 +436,14 @@ export class FxService {
     // Each leg's camt.054 goes with its booking (decision 990), delivered once the deal is saved COMPLETED.
     const debit = [this.d.outbox.notice(c, leg('DBIT', o.amountFrom!, o.currencyFrom, servicerRef()))]
     const credit = [this.d.outbox.notice(c, leg('CRDT', o.amountTo!, o.currencyTo, creditRef))]
-    await this.d.ledger.commit(d.reservation!, FX_POSITION, debit)
-    await this.d.ledger.transfer({ ref: creditRef, from: FX_POSITION, to: o.account, amount: o.amountTo!, currency: o.currencyTo }, credit)
+    // Keyed by the reservation (decision 995): a crash after either leg and before the save
+    // settles the deal again on the next tick, which books each leg once.
+    const legs = [await this.d.ledger.commit(d.reservation!, FX_POSITION, debit),
+      await this.d.ledger.transfer({ ref: creditRef, key: `${d.reservation!}:credit`, from: FX_POSITION, to: o.account, amount: o.amountTo!, currency: o.currencyTo }, credit)]
     d.status = 'COMPLETED'
     d.settledAt = now
     await this.#save(o)
-    await this.d.outbox.deliver([...debit, ...credit])
+    await this.d.outbox.deliver([...(legs[0].repeat ? [] : debit), ...(legs[1].repeat ? [] : credit)])
   }
 
   /**

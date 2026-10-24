@@ -94,7 +94,8 @@ export class Outbox {
     const now = this.clock.now().getTime()
     let n = 0
     for (const i of await this.ledger.outbox.pending()) {
-      if (now - i.at < (o.minAgeMs ?? 0) || !this.#handlers.has(i.kind)) continue
+      // minAgeMs 0 (at start) takes all, also an item another process's clock dates later (decision 998).
+      if ((o.minAgeMs && now - i.at < o.minAgeMs) || !this.#handlers.has(i.kind)) continue
       if (i.intent !== undefined && !(await this.ledger.booked?.(i.intent))) {
         if (now - i.at >= INTENT_GRACE_MS) await this.ledger.outbox.remove([i.key])
         continue

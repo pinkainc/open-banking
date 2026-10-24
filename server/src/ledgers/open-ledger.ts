@@ -15,8 +15,10 @@
 //   to the account's hold wallet `h.<account>`; commit moves it from there to the
 //   destination, release back. Both are the one settle intent `s.<ref>.<n>`, so a
 //   reservation is settled at most once: the second one meets a duplicate handle. A
-//   failed (rejected) reserve or transfer, a transfer, and a settled reservation free the
-//   ref, and the next one uses `o.<ref>.<n+1>`. balance = wallet + hold wallet; available =
+//   failed (rejected) reserve or transfer and a settled reservation free the ref, and the
+//   next one uses `o.<ref>.<n+1>`; a completed transfer is the booking of its key, and a
+//   transfer of that key again is a repeat (decision 997: a transfer's handles are
+//   `o.<key>.<n>`, the key its ref unless given). balance = wallet + hold wallet; available =
 //   the wallet.
 // - Intents are processed asynchronously: every call waits for completed or rejected and
 //   fails after `timeoutMs`.
@@ -24,7 +26,7 @@
 //   (RangeError beyond); currencies of an account come in symbol order, as open-ledger lists
 //   balances (decision 925).
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomUUID, sign } from 'node:crypto'
-import { InsufficientFunds, isSystemAccount, type Ledger, type Posting } from '../ledger.js'
+import { InsufficientFunds, isSystemAccount, sameTerms, type Booked, type Ledger, type Posting, type Transfer } from '../ledger.js'
 import { MemoryOutbox, type OutboxItem, type OutboxStore } from '../outbox.js'
 
 export interface OpenLedgerOptions {
@@ -119,22 +121,31 @@ export class OpenLedgerLedger implements Ledger {
     await this.#open(r.ref, 'reserve', r.account, hold(r.account), r.amount, r.currency, { account: r.account })
   }
 
-  async commit(ref: string, to: string, outbox: OutboxItem[] = []) {
-    await this.#withIntent(ref, outbox, async (mark) => {
-      if (!(await this.#settle(ref, 'commit', to, mark))) throw new Error(`no reservation ${ref}`)
+  async commit(ref: string, to: string, outbox: OutboxItem[] = []): Promise<Booked> {
+    return this.#withIntent(ref, outbox, async (mark) => {
+      const s = await this.#settle(ref, 'commit', to, mark)
+      if (s === true) return { ref, repeat: false }
+      // No open reservation: a repeat when the last settle of the ref was a commit (decision 997).
+      if (s?.meta.status === 'completed' && s.data.custom?.kind === 'commit') {
+        const c = s.data.custom
+        return sameTerms(ref, { ref, from: c.from, to: c.to, amount: BigInt(s.data.claims[0].amount), currency: String(s.data.claims[0].symbol.handle).toUpperCase() }, { to })
+      }
+      throw new Error(`no reservation ${ref}`)
     })
   }
 
   async release(ref: string) { await this.#settle(ref, 'release') }
 
-  async transfer(t: { ref: string; from: string; to: string; amount: bigint; currency: string }, outbox: OutboxItem[] = []) {
-    await this.#withIntent(t.ref, outbox, (mark) =>
-      this.#open(t.ref, 'transfer', t.from, wallet(t.to), t.amount, t.currency, { from: t.from, to: t.to, ...mark }, t.to))
+  async transfer(t: Transfer, outbox: OutboxItem[] = []): Promise<Booked> {
+    const key = t.key ?? t.ref
+    return this.#withIntent(key, outbox, (mark) =>
+      this.#open(t.ref, 'transfer', t.from, wallet(t.to), t.amount, t.currency, { from: t.from, to: t.to, ...(key !== t.ref ? { key } : {}), ...mark }, t.to, key))
   }
 
   /**
    * Whether the booking of an intent item happened: a completed transfer or commit of its
-   * ref whose custom data names the intent's batch.
+   * key (the handle base: a transfer's key, default its ref; a commit's ref) whose custom
+   * data names the intent's batch.
    */
   async booked(intent: string): Promise<boolean> {
     const at = intent.indexOf(':')
@@ -154,17 +165,21 @@ export class OpenLedgerLedger implements Ledger {
    * booking's intent carries in its custom data; a refused booking takes them back. Any
    * other failure (a timeout) leaves them for recover(), which asks booked().
    */
-  async #withIntent(ref: string, items: OutboxItem[], book: (mark: { outbox?: string }) => Promise<void>) {
+  async #withIntent(key: string, items: OutboxItem[], book: (mark: { outbox?: string }) => Promise<Booked>): Promise<Booked> {
     if (!items.length) return book({})
     const batch = randomUUID()
-    const marked = items.map((i) => ({ ...i, intent: `${batch}:${ref}` }))
+    const marked = items.map((i) => ({ ...i, intent: `${batch}:${key}` }))
     await this.outbox.put(marked)
+    let b: Booked
     try {
-      await book({ outbox: batch })
+      b = await book({ outbox: batch })
     } catch (e) {
       if (refused(e)) await this.outbox.remove(marked.map((i) => i.key))
       throw e
     }
+    // A repeat books nothing and keeps none of its items (decision 995).
+    if (b.repeat) await this.outbox.remove(marked.map((i) => i.key))
+    return b
   }
 
   /** Bookings (completed transfers and commits) as postings, oldest first: the journal open-ledger keeps. */
@@ -191,36 +206,45 @@ export class OpenLedgerLedger implements Ledger {
   // ---- reservations ------------------------------------------------------------------
 
   /**
-   * A reserve or transfer under the first free `o.<ref>.<n>`: an existing one blocks the
-   * ref unless it was rejected, was a transfer, or is a settled reservation.
+   * A reserve or transfer under the first free `o.<key>.<n>` (key: a transfer's booking key,
+   * else the ref): an existing one blocks the ref unless it was rejected or is a settled
+   * reservation; a completed transfer there is the booking of the key, so a transfer is a
+   * repeat (decision 997).
    */
-  async #open(ref: string, kind: 'reserve' | 'transfer', from: string, target: string, amount: bigint, currency: string, custom: Record<string, string>, to?: string) {
+  async #open(ref: string, kind: 'reserve' | 'transfer', from: string, target: string, amount: bigint, currency: string, custom: Record<string, string>, to?: string, key = ref): Promise<Booked> {
     if (amount <= 0n) throw new Error('amount must be positive')
     if (amount > MAX) throw new RangeError(`amount ${amount} is beyond 2^53-1, the most open-ledger books`)
     const s = sym(currency)
     await Promise.all([this.#wallet(from, s), to === undefined ? this.#hold(from) : this.#wallet(to, s)])
     const claims = [{ action: 'transfer', source: { handle: wallet(from) }, target: { handle: target }, symbol: { handle: s }, amount: Number(amount) }]
     for (let n = 0; ; n++) {
-      const handle = `o.${encodeHandle(ref)}.${n}`
+      const handle = `o.${encodeHandle(key)}.${n}`
       const made = await this.#intent(handle, claims, { ref, kind, n: String(n), ...custom })
       if (made) {
-        if (made.meta.status === 'completed') return
+        if (made.meta.status === 'completed') return { ref, repeat: false }
         const reason = rejection(made)
         if (reason.reason === 'core.limit-exceeded') throw new InsufficientFunds()
         throw new OpenLedgerError(422, reason.reason ?? made.meta.status, reason.detail ?? `intent ${handle} ${made.meta.status}`)
       }
       const old = await this.#read(handle)
-      if (!old || old.meta.status === 'rejected' || old.data.custom?.kind === 'transfer') continue
-      if (old.meta.status === 'completed' && (await this.#read(`s.${encodeHandle(ref)}.${n}`))?.meta.status === 'completed') continue
+      if (!old || old.meta.status === 'rejected') continue
+      const c = old.data.custom
+      if (c?.kind === 'transfer') {
+        if (kind === 'reserve' || old.meta.status !== 'completed') continue
+        const o = old.data.claims[0]
+        return sameTerms(key, { ref: c.ref, from: c.from, to: c.to, amount: BigInt(o.amount), currency: String(o.symbol.handle).toUpperCase() }, { from: custom.from, to: custom.to, amount, currency })
+      }
+      if (old.meta.status === 'completed' && (await this.#read(`s.${encodeHandle(key)}.${n}`))?.meta.status === 'completed') continue
       throw new Error(`reservation ${ref} exists`)
     }
   }
 
-  /** Commit (to `to`) or release the open reservation of ref; false when there is none. */
-  async #settle(ref: string, kind: 'commit' | 'release', to?: string, mark: { outbox?: string } = {}): Promise<boolean> {
+  /** Commit (to `to`) or release the open reservation of ref: true, or when there is none the last settle intent of the ref (undefined: none). */
+  async #settle(ref: string, kind: 'commit' | 'release', to?: string, mark: { outbox?: string } = {}): Promise<true | Intent | undefined> {
+    let last: Intent | undefined
     for (let n = 0; ; n++) {
       const open = await this.#read(`o.${encodeHandle(ref)}.${n}`)
-      if (!open) return false
+      if (!open) return last
       if (open.meta.status !== 'completed' || open.data.custom?.kind !== 'reserve') continue
       const c = open.data.claims[0]
       const account = open.data.custom.account as string
@@ -229,7 +253,7 @@ export class OpenLedgerLedger implements Ledger {
       const claims = [{ action: 'transfer', source: { handle: hold(account) }, target: { handle: target }, symbol: c.symbol, amount: c.amount }]
       const handle = `s.${encodeHandle(ref)}.${n}`
       const made = await this.#intent(handle, claims, { ref, kind, n: String(n), from: account, to: kind === 'commit' ? to! : account, ...mark })
-      if (!made) continue // settled before
+      if (!made) { last = await this.#read(handle); continue } // settled before
       if (made.meta.status !== 'completed') {
         const r = rejection(made)
         throw new OpenLedgerError(422, r.reason ?? made.meta.status, r.detail ?? `intent ${handle} ${made.meta.status}`)

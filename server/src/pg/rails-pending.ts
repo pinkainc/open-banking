@@ -17,6 +17,11 @@ export class PgRailsPending implements RailsPending {
       [this.namespace, r.ref, r.scheme, JSON.stringify(r)])
   }
 
+  async get(ref: string) {
+    const r = await this.db.pool.query('select record from rails_pending where ns = $1 and ref = $2', [this.namespace, ref])
+    return r.rows[0]?.record as PendingRecord | undefined
+  }
+
   async take(ref: string, scheme?: Scheme) {
     const r = await this.db.pool.query(
       `delete from rails_pending where ns = $1 and ref = $2 ${scheme !== undefined ? 'and scheme = $3' : ''} returning record`,

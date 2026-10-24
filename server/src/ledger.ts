@@ -7,22 +7,50 @@ import { MemoryOutbox, type OutboxItem, type OutboxStore } from './outbox.js'
 
 export class InsufficientFunds extends Error {}
 
+/**
+ * What a booking call did (decision 995). A booking has a key, a transfer's `key` (default
+ * its ref) or a commit's ref: a call whose key was booked before books nothing, keeps none
+ * of its items and answers `repeat` with the ref the key was booked under; the caller
+ * then delivers nothing (the first call's items are in the outbox or delivered). A repeat
+ * with other terms (accounts, amount, currency) is an Error, not a silent no-op.
+ */
+export interface Booked { ref: string; repeat: boolean }
+
+/** The terms a booking key was booked with. */
+export interface BookingTerms { ref: string; from: string; to: string; amount: bigint; currency: string }
+
+/** Throws when a repeat of a key comes with other terms than its booking (decision 995). */
+export function sameTerms(key: string, booked: BookingTerms, now: Partial<BookingTerms>): Booked {
+  const differs = (['from', 'to', 'amount', 'currency'] as const).filter((k) => now[k] !== undefined && now[k] !== booked[k])
+  if (differs.length) throw new Error(`booking ${key} was booked with another ${differs.join(', ')}`)
+  return { ref: booked.ref, repeat: true }
+}
+
+/** Booking keys MemoryLedger remembers (decision 996): only repeats within the process, it keeps nothing across a restart. */
+export const MEMORY_BOOKING_KEYS_MAX = 100_000
+
 export interface Ledger {
   /** Balance minus reservations. */
   available(account: string, currency: string): Promise<bigint>
   balances(account: string): Promise<Record<string, { balance: bigint; available: bigint }>>
   /** Sets funds aside for a payment; throws InsufficientFunds. */
   reserve(r: { ref: string; account: string; amount: bigint; currency: string }): Promise<void>
-  /** Books a reservation to its destination; `outbox` the items that report it, kept with the booking (decision 990). */
-  commit(ref: string, to: string, outbox?: OutboxItem[]): Promise<void>
+  /**
+   * Books a reservation to its destination; `outbox` the items that report it, kept with
+   * the booking (decision 990). Its key is the ref: without a hold, a ref booked by an
+   * earlier commit is a repeat (decision 995), else "no reservation".
+   */
+  commit(ref: string, to: string, outbox?: OutboxItem[]): Promise<Booked>
   release(ref: string): Promise<void>
-  /** reserve + commit in one step; `outbox` as for commit. */
-  transfer(t: { ref: string; from: string; to: string; amount: bigint; currency: string }, outbox?: OutboxItem[]): Promise<void>
+  /** reserve + commit in one step; `outbox` as for commit; `key` (default ref) books once (decision 995). */
+  transfer(t: Transfer, outbox?: OutboxItem[]): Promise<Booked>
   /** The items of bookings not delivered yet. */
   readonly outbox: OutboxStore
   /** Whether the booking an intent item names happened (only a ledger that writes intents, decision 992). */
   booked?(intent: string): Promise<boolean>
 }
+
+export interface Transfer { ref: string; from: string; to: string; amount: bigint; currency: string; /** The booking key, default ref (decision 995). */ key?: string }
 
 /** Accounts whose name starts with '@' are the bank's own (settlement, funding) and may go negative. */
 export const isSystemAccount = (a: string) => a.startsWith('@')
@@ -37,6 +65,8 @@ export class MemoryLedger implements Ledger {
   #holds = new Map<string, { account: string; amount: bigint; currency: string }>()
   readonly postings: Posting[] = []
   readonly outbox = new MemoryOutbox()
+  /** Booking keys, oldest first (decision 996). */
+  #keys = new Map<string, BookingTerms>()
 
   #k = (a: string, c: string) => `${a}|${c}`
   #bal(a: string, c: string) { return this.#balances.get(this.#k(a, c)) ?? 0n }
@@ -68,24 +98,38 @@ export class MemoryLedger implements Ledger {
     this.#holds.set(r.ref, { account: r.account, amount: r.amount, currency: r.currency })
   }
 
-  async commit(ref: string, to: string, outbox: OutboxItem[] = []) {
-    this.#commit(ref, to)
-    this.outbox.putNow(outbox) // with the booking, no await between
-  }
-  #commit(ref: string, to: string) {
+  async commit(ref: string, to: string, outbox: OutboxItem[] = []): Promise<Booked> {
     const h = this.#holds.get(ref)
-    if (!h) throw new Error(`no reservation ${ref}`)
+    if (!h) {
+      const b = this.#keys.get(ref)
+      if (b) return sameTerms(ref, b, { to })
+      throw new Error(`no reservation ${ref}`)
+    }
+    this.#commit(ref, to, ref)
+    this.outbox.putNow(outbox) // with the booking, no await between
+    return { ref, repeat: false }
+  }
+  #commit(ref: string, to: string, key: string) {
+    const h = this.#holds.get(ref)!
     this.#holds.delete(ref)
     this.#move(ref, h.account, to, h.amount, h.currency)
+    this.#keys.delete(key) // a re-reserved ref booked again: the newest terms, last in order
+    this.#keys.set(key, { ref, from: h.account, to, amount: h.amount, currency: h.currency })
+    if (this.#keys.size > MEMORY_BOOKING_KEYS_MAX) this.#keys.delete(this.#keys.keys().next().value!)
   }
 
   async release(ref: string) { this.#holds.delete(ref) }
 
-  async transfer(t: { ref: string; from: string; to: string; amount: bigint; currency: string }, outbox: OutboxItem[] = []) {
+  async transfer(t: Transfer, outbox: OutboxItem[] = []): Promise<Booked> {
+    const key = t.key ?? t.ref
+    if (t.amount <= 0n) throw new Error('amount must be positive')
+    const b = this.#keys.get(key)
+    if (b) return sameTerms(key, b, t)
     // reserve + commit with no await between, so nothing sees or takes the hold in between.
     this.#reserve({ ref: t.ref, account: t.from, amount: t.amount, currency: t.currency })
-    this.#commit(t.ref, t.to)
+    this.#commit(t.ref, t.to, key)
     this.outbox.putNow(outbox)
+    return { ref: t.ref, repeat: false }
   }
 
   #move(ref: string, from: string, to: string, amount: bigint, currency: string) {

@@ -340,9 +340,12 @@ export class DirectDebitService {
       ...(c.debtorCustomer ? [this.d.outbox.notice(c.debtorCustomer, this.#booking(c, 'debtor', 'DBIT', c.id))] : []),
       ...(c.creditorCustomer ? [this.d.outbox.notice(c.creditorCustomer, this.#booking(c, 'creditor', 'CRDT', servicerRef()))] : []),
     ]
+    // Keyed by the collection's id (decision 995): a crash after the booking and before the
+    // save below settles it again on the next run, which books nothing twice.
+    let repeat = false
     if (c.debtorCustomer) {
       try {
-        await this.d.ledger.transfer({ ref: c.id, from: c.debtor.iban, to: c.creditorCustomer ? c.creditor.iban : settlement, amount: c.amount, currency: c.currency }, notices)
+        repeat = (await this.d.ledger.transfer({ ref: c.id, from: c.debtor.iban, to: c.creditorCustomer ? c.creditor.iban : settlement, amount: c.amount, currency: c.currency }, notices)).repeat
       } catch (e) {
         if (e instanceof InsufficientFunds) return fail('AM04')
         throw e
@@ -353,12 +356,12 @@ export class DirectDebitService {
         debtor: c.debtor, endToEndId: c.endToEndId, mandateId: c.mandateId, settlementDate: c.settlementDate,
       })
       if (outcome.status === 'rejected') return fail(outcome.code)
-      await this.d.ledger.transfer({ ref: c.id, from: settlement, to: c.creditor.iban, amount: c.amount, currency: c.currency }, notices)
+      repeat = (await this.d.ledger.transfer({ ref: c.id, from: settlement, to: c.creditor.iban, amount: c.amount, currency: c.currency }, notices)).repeat
     }
     c.status = 'SETTLED'
     c.settledAt = this.d.clock.now()
     await this.#save(c)
-    await this.d.outbox.deliver(notices)
+    if (!repeat) await this.d.outbox.deliver(notices)
     return { ...base, status: 'ACSC' }
   }
 
@@ -375,8 +378,9 @@ export class DirectDebitService {
       ...(c.debtorCustomer ? [this.d.outbox.notice(c.debtorCustomer, { ...this.#booking(c, 'debtor', 'CRDT', ref), bankTxCode: { family: 'RDDT', ...family }, returnInfo })] : []),
       ...(c.creditorCustomer ? [this.d.outbox.notice(c.creditorCustomer, { ...this.#booking(c, 'creditor', 'DBIT', servicerRef()), bankTxCode: { family: 'IDDT', ...family }, returnInfo })] : []),
     ]
+    let repeat: boolean
     try {
-      await this.d.ledger.transfer({ ref, from, to, amount: c.amount, currency: c.currency }, notices)
+      repeat = (await this.d.ledger.transfer({ ref, key: `${c.id}:refund`, from, to, amount: c.amount, currency: c.currency }, notices)).repeat
     } catch (e) {
       if (e instanceof InsufficientFunds) return 'funds'
       throw e
@@ -384,7 +388,7 @@ export class DirectDebitService {
     c.status = 'REFUNDED'
     c.reason = code
     await this.#save(c)
-    await this.d.outbox.deliver(notices)
+    if (!repeat) await this.d.outbox.deliver(notices)
     return 'ok'
   }
 

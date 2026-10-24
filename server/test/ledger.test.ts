@@ -44,7 +44,45 @@ for (const [store, make] of LEDGERS) describe(`ledger (${store})`, () => {
     assert.equal(await l.available('A', 'EUR'), 700n)
     await l.release('r2') // releasing twice is harmless
     await assert.rejects(l.commit('r2', 'B'), /no reservation r2/)
-    await assert.rejects(l.commit('r1', 'B'), /no reservation r1/, 'a reservation is booked once')
+    // A reservation is booked once: a commit again is a repeat (decision 995), to elsewhere an error.
+    assert.deepEqual(await l.commit('r1', 'B'), { ref: 'r1', repeat: true })
+    await assert.rejects(l.commit('r1', 'C'), /booking r1 was booked with another to/)
+    assert.deepEqual(await l.balances('B'), { EUR: { balance: 300n, available: 300n } })
+  })
+
+  test('a booking key books once: a repeat books nothing, keeps no items and answers the first ref (decision 995)', async () => {
+    const l = await make()
+    const item = (k: string) => ({ key: `${k}-${Math.random()}`, kind: 'notice', payload: { n: k }, at: 1 })
+    assert.deepEqual(await l.transfer({ ref: 'f', from: '@funding', to: 'A', amount: 100n, currency: 'EUR' }), { ref: 'f', repeat: false })
+    assert.deepEqual(await l.transfer({ ref: 'f', from: '@funding', to: 'A', amount: 100n, currency: 'EUR' }), { ref: 'f', repeat: true }, 'the key defaults to the ref')
+    const [first, again] = [item('first'), item('again')]
+    assert.deepEqual(await l.transfer({ ref: 'k1', key: 'deal:credit', from: 'A', to: 'B', amount: 30n, currency: 'EUR' }, [first]), { ref: 'k1', repeat: false })
+    assert.deepEqual(await l.transfer({ ref: 'k2', key: 'deal:credit', from: 'A', to: 'B', amount: 30n, currency: 'EUR' }, [again]), { ref: 'k1', repeat: true }, 'another ref, the same key')
+    await assert.rejects(l.transfer({ ref: 'k3', key: 'deal:credit', from: 'A', to: 'B', amount: 31n, currency: 'EUR' }), /booking deal:credit was booked with another amount/)
+    assert.deepEqual((await l.outbox.pending()).map((i) => i.payload), [{ n: 'first' }], 'the repeat keeps none of its items')
+    await l.outbox.remove([first.key])
+    // A commit without a hold whose ref was committed: a repeat, its items not kept.
+    await l.reserve({ ref: 'c1', account: 'A', amount: 20n, currency: 'EUR' })
+    await l.commit('c1', 'B')
+    assert.deepEqual(await l.commit('c1', 'B', [item('c')]), { ref: 'c1', repeat: true })
+    assert.deepEqual(await l.outbox.pending(), [])
+    // A ref reserved again after its commit is booked again.
+    await l.reserve({ ref: 'c1', account: 'A', amount: 5n, currency: 'EUR' })
+    assert.deepEqual(await l.commit('c1', 'B'), { ref: 'c1', repeat: false })
+    assert.deepEqual(await l.balances('A'), { EUR: { balance: 45n, available: 45n } })
+    assert.deepEqual(await l.balances('B'), { EUR: { balance: 55n, available: 55n } })
+    assert.equal((await postings(l)).length, 2 * 4, 'f, k1, c1 twice')
+  })
+
+  test('a refused booking leaves its key free; one key booked at once by many books once', async () => {
+    const l = await make()
+    await assert.rejects(l.transfer({ ref: 'x', key: 'dd:1', from: 'A', to: 'B', amount: 50n, currency: 'EUR' }), InsufficientFunds)
+    await l.transfer({ ref: 'f', from: '@funding', to: 'A', amount: 50n, currency: 'EUR' })
+    assert.deepEqual(await l.transfer({ ref: 'x', key: 'dd:1', from: 'A', to: 'B', amount: 50n, currency: 'EUR' }), { ref: 'x', repeat: false })
+    const out = await Promise.all(Array.from({ length: 6 }, (_, i) => l.transfer({ ref: `s${i}`, key: 'settle:1', from: '@settlement', to: 'B', amount: 7n, currency: 'EUR' })))
+    assert.equal(out.filter((b) => !b.repeat).length, 1)
+    assert.ok(out.every((b) => b.ref === out.find((x) => !x.repeat)!.ref), 'each answers the ref it was booked under')
+    assert.equal(await l.available('B', 'EUR'), 57n)
   })
 
   test('more than available is InsufficientFunds and changes nothing', async () => {

@@ -408,7 +408,8 @@ export class PaymentEngine {
     if (p.creditorOwner && !review) {
       const booked = await this.#internalBooked(file, p)
       try {
-        await this.ledger.transfer({ ref: p.ref, from: p.debtorAccount, to: p.creditorAccount!, amount: p.amount, currency: p.currency }, booked.notices)
+        // A repeat of the ref (decision 995) delivers nothing again.
+        if ((await this.ledger.transfer({ ref: p.ref, from: p.debtorAccount, to: p.creditorAccount!, amount: p.amount, currency: p.currency }, booked.notices)).repeat) booked.notices = []
       } catch (e) {
         if (e instanceof InsufficientFunds) return rj(R.funds, scheme)
         throw e
@@ -477,10 +478,20 @@ export class PaymentEngine {
    * not waiting at the rails (unknown, or already final): a repeat changes nothing.
    */
   async settle(ref: string, outcome: RailsOutcome): Promise<boolean> {
-    const r = await this.#pending.take(ref)
-    const w = r && await this.#decode(r)
-    if (!w) return false
-    await this.#flow(w.file, [await this.#outcome(w.file, w.plan, w.accepted, outcome)], false)
+    // Booked before the record goes (decision 998): a crash in between leaves the payment
+    // waiting, and the outcome again (a bridge retrying) commits nothing twice (the ref is
+    // the commit's key) and reports it. Of two outcomes at once, the one that takes the
+    // record reports; the other delivers what it booked, if anything.
+    const r = await this.#pending.get(ref)
+    if (!r) return false
+    const w = await this.#decode(r)
+    if (!w) { await this.#pending.take(ref, r.scheme); return false }
+    const step = await this.#outcome(w.file, w.plan, w.accepted, outcome)
+    if (!(await this.#pending.take(ref, r.scheme))) {
+      await this.opts.outbox.deliver(step.notices ?? [])
+      return false
+    }
+    await this.#flow(w.file, [step], false)
     return true
   }
 
@@ -514,8 +525,8 @@ export class PaymentEngine {
     const scheme = p.scheme!
     if (outcome.status === 'settled') {
       const notices = [this.#notice(file.customer, await this.#debitBooking(file.customer, p, scheme))]
-      await this.ledger.commit(p.ref, this.rails.settlementAccount(scheme), notices)
-      return { status: { ...accepted, status: 'ACSC', reason: undefined, scheme }, notices }
+      const b = await this.ledger.commit(p.ref, this.rails.settlementAccount(scheme), notices)
+      return { status: { ...accepted, status: 'ACSC', reason: undefined, scheme }, notices: b.repeat ? [] : notices }
     }
     // SEPA Instant attempted and failed: an automatic choice goes on as SEPA (ACWC first).
     if (outcome.status === 'unavailable' && scheme === 'INST' && p.automatic) {
@@ -625,7 +636,7 @@ export class PaymentEngine {
         steps.push({ status: { ...p.status, status: 'RJCT', reason: reason ?? R.regulatory } })
       } else if (p.plan.creditorOwner) {
         const booked = await this.#internalBooked(p.file, p.plan)
-        await this.ledger.commit(ref, p.plan.creditorAccount!, booked.notices)
+        if ((await this.ledger.commit(ref, p.plan.creditorAccount!, booked.notices)).repeat) booked.notices = []
         await this.#incomingOf(p.file, p.plan, 'Booked')
         steps.push(booked)
       } else {
@@ -754,15 +765,17 @@ export class PaymentEngine {
     if (!(await this.opts.virtual?.resolve(iban)) && !await this.directory.ownerOf(iban) && !(await this.#agency(iban)).length) {
       return { status: 'returned', code: 'AC01', reason: R.accountNumber }
     }
+    // Keyed by the scheme's ref: a crash after the booking and before #credits remembers it
+    // books nothing twice when the credit comes again (decision 995).
     const r = await this.incoming({
-      iban, amount: c.amount, currency: c.currency, scheme: c.scheme, debtor: c.debtor, remittance: c.remittance,
+      key: `credit:${c.ref}`, iban, amount: c.amount, currency: c.currency, scheme: c.scheme, debtor: c.debtor, remittance: c.remittance,
       reference: c.reference, endToEndId: c.endToEndId, creditorName: c.creditorName,
     })
     return r.returned ? { status: 'returned', code: r.returned.code, reason: r.returned.reason } : { status: 'booked', servicerRef: r.servicerRef! }
   }
 
   /** An incoming credit from outside (the simulator's SEPA / SEPA Instant credit). */
-  async incoming(p: { iban: string; amount: bigint; currency: string; scheme: string; debtor: { name?: string; iban?: string; bic?: string; /** A non-IBAN account (Bacs: sort code + account number). */ account?: string }; remittance?: string; reference?: string; endToEndId?: string; /** Reuse a reference (a held payment, decision 712). */ ref?: string; /** The creditor's name as the payment gives it. */ creditorName?: string
+  async incoming(p: { iban: string; amount: bigint; currency: string; scheme: string; debtor: { name?: string; iban?: string; bic?: string; /** A non-IBAN account (Bacs: sort code + account number). */ account?: string }; remittance?: string; reference?: string; endToEndId?: string; /** Reuse a reference (a held payment, decision 712). */ ref?: string; /** The booking key, default the ref (decision 995). */ key?: string; /** The creditor's name as the payment gives it. */ creditorName?: string
     /** The sender's references, shown in Refs as the G use case 7 sample (decision 847). */ pmtInfId?: string; instrId?: string }) {
     const iban = normalizeIban(p.iban)
     const v = (await this.opts.virtual?.resolve(iban))
@@ -789,9 +802,9 @@ export class PaymentEngine {
       counterparty: { name: codePage(p.debtor.name), iban: p.debtor.iban ? normalizeIban(p.debtor.iban) : undefined, account: p.debtor.account, bic: p.debtor.bic },
       remittance: codePage(p.remittance), reference: codePage(p.reference),
     })]
-    await this.ledger.transfer({ ref, from: this.rails.settlementAccount(p.scheme), to: account, amount: p.amount, currency: p.currency }, notices)
-    await this.opts.outbox.deliver(notices)
-    return { servicerRef: ref }
+    const b = await this.ledger.transfer({ ref, key: p.key, from: this.rails.settlementAccount(p.scheme), to: account, amount: p.amount, currency: p.currency }, notices)
+    if (!b.repeat) await this.opts.outbox.deliver(notices)
+    return { servicerRef: b.ref }
   }
 }
 
