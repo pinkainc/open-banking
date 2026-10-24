@@ -30,6 +30,7 @@ import { registerRequestsV2 } from './requests-v2.js'
 import { accountsSimRoutes, registerAccounts } from './accounts/routes.js'
 import { bacsSimRoutes, registerBacs } from './bacs/routes.js'
 import { agencySimRoutes, registerAgency } from './agency/routes.js'
+import { acquiringSimRoutes, registerAcquiring } from './acquiring/routes.js'
 
 export interface AppOptions {
   emulator: Emulator
@@ -329,6 +330,9 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   // --- Indirect scheme access: agency account sync (v1 XML both hosts, v2 JSON UK) ----------
   registerAgency(app, emulator, caller, flavour, bankCode)
 
+  // --- Merchant payment report (LHV EE) --------------------------------------------
+  registerAcquiring(app, emulator, caller)
+
   if (opts.sim !== false) {
     app.register(simRoutes(emulator), { prefix: '/_sim' })
     app.register(vibanSimRoutes(emulator), { prefix: '/_sim/viban' })
@@ -341,6 +345,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     app.register(accountsSimRoutes(emulator), { prefix: '/_sim/accounts' })
     if (flavour === 'UK') app.register(bacsSimRoutes(emulator), { prefix: '/_sim/bacs' })
     app.register(agencySimRoutes(emulator, flavour), { prefix: '/_sim/agency' })
+    app.register(acquiringSimRoutes(emulator), { prefix: '/_sim/acq' })
   }
   return app
 }

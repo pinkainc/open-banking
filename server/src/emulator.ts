@@ -26,6 +26,7 @@ import { PayeeService } from './payee/service.js'
 import { AccountsService, DEFAULT_INCOMING } from './accounts/service.js'
 import { BACS_BOUNDS, BacsService } from './bacs/service.js'
 import { Agency } from './agency/service.js'
+import { Acquiring } from './acquiring/service.js'
 
 export interface Seed {
   bank?: Partial<Bank>
@@ -82,6 +83,8 @@ export class Emulator {
   readonly bacs: BacsService
   /** Indirect scheme access: agency accounts, their synchronisation, the CoP/VoP responder, RTFs. */
   readonly agency: Agency
+  /** Card acquiring: merchant set-ups, card transactions and the merchant payment report (P 13). */
+  readonly acquiring: Acquiring
 
   constructor(opts: EmulatorOptions & { bank?: Partial<Bank> } = {}) {
     this.clock = opts.clock ?? systemClock
@@ -128,6 +131,7 @@ export class Emulator {
       credit: (p) => this.engine.incoming(p),
     }, opts.memory?.bacs)
     this.agency = new Agency({ directory: this.directory, inbox: this.inbox, clock: this.clock, bank: this.bank }, opts.memory?.agency)
+    this.acquiring = new Acquiring({ directory: this.directory, inbox: this.inbox, clock: this.clock })
     this.reports = new AccountReports({
       directory: this.directory, ledger: this.ledger, journal: this.journal, inbox: this.inbox, clock: this.clock, bank: this.bank, xsd, msgIds,
     }, opts.reports)
