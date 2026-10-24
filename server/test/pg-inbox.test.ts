@@ -1,6 +1,7 @@
 // The Postgres inbox beyond the shared semantics (inbox.test.ts, messages-v2.test.ts and
 // bounded.test.ts run those against both stores): binary bodies round-trip, namespaces
-// keep emulators apart, two instances on one namespace are one queue, the bounds and
+// keep emulators apart, two instances on one namespace are one queue (two emulators
+// draining it at once lose nothing, decision 993), the bounds and
 // purge hold in the table, and an emulator built on it answers end to end. Registered
 // only when DATABASE_URL is set (npm run check sets it).
 import assert from 'node:assert/strict'
@@ -10,7 +11,7 @@ import { DAY_MS, ManualClock } from '../src/clock.js'
 import { keyOf } from '../src/directory.js'
 import type { Message } from '../src/inbox.js'
 import { PgInbox } from '../src/pg/inbox.js'
-import { C1, C2, INBOXES, call, drain, pain001, pgInboxDb, setup } from './helpers.js'
+import { C1, C2, INBOXES, call, drain, pain001, pgInboxDb, postgresStore, setup, type Ctx } from './helpers.js'
 
 const scope = (...cs: { code: string; country: string }[]) => ({ customers: new Set(cs.map(keyOf)) })
 
@@ -109,6 +110,52 @@ if (process.env.DATABASE_URL) describe('PgInbox (Postgres)', () => {
     await inbox.purge()
     assert.equal(await inbox.tombstones(), 0)
     assert.equal(await inbox.delete(scope(C1), unread.id), 'unknown')
+  })
+
+  test('two emulators draining one namespace at once: every message read, each confirmed once, none lost (decision 993)', async () => {
+    const opts = await postgresStore()
+    const [a, b] = [await setup(opts, undefined, { flavour: 'UK' }), await setup(opts, undefined, { flavour: 'UK' })]
+    // LHV's next has no lease: two readers before a DELETE get the same oldest message,
+    // and the second DELETE is a 200 from the processed message (decision 504).
+    const first = await call(a, { url: '/heartbeat/mq' })
+    const both = await Promise.all([a, b].map((ctx) => call(ctx, { url: '/messages/next' })))
+    assert.deepEqual(both.map((r) => r.headers['message-request-id']), [first.headers['message-request-id'], first.headers['message-request-id']])
+    const id1 = both[0].headers['message-response-id'] as string
+    assert.deepEqual((await Promise.all([a, b].map((ctx) => call(ctx, { method: 'DELETE', url: `/messages/${id1}` })))).map((r) => r.statusCode), [200, 200])
+
+    const made = new Set<string>()
+    const seen = new Set<string>()
+    let producing = true
+    const pause = () => new Promise((r) => setTimeout(r, 1))
+    const produce = async (ctx: Ctx) => {
+      for (let i = 0; i < 40; i++) made.add((await call(ctx, { url: '/heartbeat/mq' })).headers['message-request-id'] as string)
+    }
+    const v1 = async (ctx: Ctx) => {
+      for (;;) {
+        const r = await call(ctx, { url: '/messages/next' })
+        if (r.statusCode === 204) { if (!producing) return; await pause(); continue }
+        seen.add(r.headers['message-request-id'] as string)
+        assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${r.headers['message-response-id']}` })).statusCode, 200)
+      }
+    }
+    const v2 = async (ctx: Ctx) => {
+      for (;;) {
+        const r = await call(ctx, { url: '/v2/messages?pageSize=5' })
+        if (r.statusCode === 204) { if (!producing) return; await pause(); continue }
+        const page = (JSON.parse(r.body).messages as any[])
+        for (const m of page) seen.add(m.messageRequestId)
+        const done = await call(ctx, { method: 'PATCH', url: '/v2/messages/processed', body: { messages: page.map((m) => ({ messageResponseId: m.messageResponseId, messageProcessed: true })) } })
+        assert.equal(done.statusCode, 204, done.body)
+      }
+    }
+    const readers = [v1(a), v1(b), v2(a), v2(b)]
+    await Promise.all([produce(a), produce(b), produce(a)])
+    producing = false
+    await Promise.all(readers)
+    assert.equal(made.size, 120)
+    assert.deepEqual([...made].filter((id) => !seen.has(id)), [], 'every message read by some reader')
+    assert.equal((await call(b, { url: '/messages/count' })).json().count, 0)
+    assert.equal(await a.emulator.inbox.processedKept(), 121, 'each confirmed once, kept as processed')
   })
 
   test('an emulator on PgInbox answers a payment end to end (pain.002, camt.054s, v1 and v2 views)', async () => {
