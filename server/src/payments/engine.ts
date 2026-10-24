@@ -16,7 +16,10 @@
 //     manual review name    → funds reserved, ACSP, then PDNG "In manual review" until
 //                             /_sim decides
 //
-// Processing is synchronous: every message exists by the time POST /payment returns.
+// With rails that answer at once (the simulator) processing is synchronous: every message
+// exists by the time POST /payment returns. Rails that answer `accepted` (a real scheme,
+// decision 930) leave the payment ACSP with its funds reserved; the outcome arrives later
+// through settle() and is reported then, the same reports and notifications as at once.
 import { BoundedMap, BoundedSet, DEFAULT_BOUNDS, type Bounds } from '../bounded.js'
 import type { Clock } from '../clock.js'
 import { codePage, fold } from '../cp1257.js'
@@ -25,7 +28,7 @@ import { ibanChecksumOk, ibanCountry, isSepaCountry, normalizeIban } from '../ib
 import { servicerRef } from '../ids.js'
 import type { InboxStore } from '../inbox.js'
 import { InsufficientFunds, toMinor, type Ledger } from '../ledger.js'
-import type { Rails, Scheme } from '../rails.js'
+import type { CreditResult, IncomingCredit, Rails, RailsOutcome, Scheme } from '../rails.js'
 import { parseXml, XmlSyntaxError } from '../xml.js'
 import { isUkAccount } from '../routing.js'
 import { camt054, type Booking } from './camt054.js'
@@ -163,12 +166,17 @@ export class PaymentEngine {
   /** EUR debits accepted but not yet in the journal, counted against the limits. */
   #inflight = new Map<string, { customer: string; amount: bigint }>()
   #parked = new Map<string, { kind: ParkedKind; file: FileRef; plan: Plan; status: TxStatus }>()
+  /** External payments sent to the rails whose outcome has not arrived (decision 930; in memory, decision 934). */
+  #atRails = new Map<string, { file: FileRef; plan: Plan; accepted: TxStatus }>()
+  /** Credits from the rails by their ref: the result a repeat answers (decision 932). */
+  #credits: BoundedMap<string, Promise<CreditResult>>
   constructor(
     private directory: Directory, private ledger: Ledger, private rails: Rails, private inbox: InboxStore,
     private clock: Clock, private bank: Bank, private opts: EngineOptions = {},
   ) {
     this.#seenMsgIds = new BoundedSet(clock, opts.msgIds ?? DEFAULT_BOUNDS.msgIds)
     this.#instrIds = new BoundedMap(clock, opts.msgIds ?? DEFAULT_BOUNDS.msgIds)
+    this.#credits = new BoundedMap(clock, opts.msgIds ?? DEFAULT_BOUNDS.msgIds)
   }
 
   /** Handles one POST /payment body. Throws XmlSyntaxError when the body is not XML at all. */
@@ -231,7 +239,7 @@ export class PaymentEngine {
     const steps: Step[] = []
     for (const block of f.blocks) {
       for (const tx of block.txs) {
-        const c = this.#check(block, tx, customer)
+        const c = await this.#check(block, tx, customer)
         if ('status' in c) steps.push({ status: c.status })
         else if (pending) steps.push({ status: this.#park('SCA', file, c.plan) })
         else steps.push(await this.#execute(file, c.plan))
@@ -270,7 +278,7 @@ export class PaymentEngine {
   }
 
   /** The checks that need no money: a rejection, or what to execute. */
-  #check(rawBlock: Block, rawTx: Tx, customer: Customer): { status: TxStatus } | { plan: Plan } {
+  async #check(rawBlock: Block, rawTx: Tx, customer: Customer): Promise<{ status: TxStatus } | { plan: Plan }> {
     // Free text as the core keeps it, for the receiver bank's country (decision 526): what
     // the reports echo, the notifications book and the rails receive.
     const country = this.#receiverCountry(rawTx)
@@ -334,7 +342,7 @@ export class PaymentEngine {
     const instantLimit = this.opts.limits?.(customer).instant
     // An INST_RESTRICTED agency debtor sends no SEPA Instant (decision 834).
     const instantOk = (instantLimit === undefined || amount <= instantLimit) && debtorA?.status !== 'INST_RESTRICTED'
-    const chosen = this.#scheme(requested, tx.currency!, creditorIban, instantOk, creditorId)
+    const chosen = await this.#scheme(requested, tx.currency!, creditorIban, instantOk, creditorId)
     if ('reject' in chosen) return rj(chosen.reject)
     return planned({ ...base, scheme: chosen.scheme, automatic: requested !== 'INST' && requested !== 'SEPA' && requested !== 'TARGET2' })
   }
@@ -400,16 +408,48 @@ export class PaymentEngine {
     return { status: { block, tx, status: 'ACSC', servicerRef: p.ref, scheme: 'INTERNAL', creditorBic: this.bank.bic }, notices }
   }
 
-  /** The rails' answer about a reserved external payment. */
-  async #rails(file: FileRef, p: Plan, accepted: TxStatus): Promise<Step> {
+  /**
+   * Sends a reserved external payment to the rails. An immediate outcome is the step that
+   * follows; `accepted` leaves it waiting for settle() (nothing more is reported now).
+   */
+  async #rails(file: FileRef, p: Plan, accepted: TxStatus): Promise<Step | undefined> {
     const { block, tx } = p
-    const scheme = p.scheme!
-    const outcome = await this.rails.send({
-      ref: p.ref, scheme, amount: p.amount, currency: p.currency,
+    // Registered before sending: a bridge may call back before its answer arrives.
+    const waiting = { file, plan: p, accepted }
+    this.#atRails.set(p.ref, waiting)
+    const answer = await this.rails.send({
+      ref: p.ref, scheme: p.scheme!, amount: p.amount, currency: p.currency,
       debtor: { name: block.debtorName ?? file.customer.name, iban: p.debtorIban },
       creditor: { name: tx.creditorName, iban: p.creditorIban, account: tx.creditorOther, bic: tx.creditorBic },
       endToEndId: tx.endToEndId, remittance: tx.ustrd,
     })
+    // Settled through the events while the answer was on its way: already reported.
+    if (this.#atRails.get(p.ref) !== waiting) return undefined
+    if (answer.status === 'accepted') return undefined
+    this.#atRails.delete(p.ref)
+    return this.#outcome(file, p, accepted, answer)
+  }
+
+  /**
+   * The final outcome of a payment the rails answered `accepted` (RailsEvents.outcome):
+   * booked and reported as an immediate outcome would have been. False for a ref that is
+   * not waiting at the rails (unknown, or already final): a repeat changes nothing.
+   */
+  async settle(ref: string, outcome: RailsOutcome): Promise<boolean> {
+    const w = this.#atRails.get(ref)
+    if (!w) return false
+    this.#atRails.delete(ref)
+    await this.#flow(w.file, [await this.#outcome(w.file, w.plan, w.accepted, outcome)], false)
+    return true
+  }
+
+  /** Payments sent to the rails without a final outcome yet (refs). */
+  atRails(): string[] { return [...this.#atRails.keys()] }
+
+  /** The rails' outcome of a reserved external payment: booked, rejected, or on to SEPA. */
+  async #outcome(file: FileRef, p: Plan, accepted: TxStatus, outcome: RailsOutcome): Promise<Step> {
+    const { block, tx } = p
+    const scheme = p.scheme!
     if (outcome.status === 'settled') {
       await this.ledger.commit(p.ref, this.rails.settlementAccount(scheme))
       return {
@@ -513,7 +553,8 @@ export class PaymentEngine {
         this.#incomingOf(p.file, p.plan, 'Booked')
         steps.push(this.#internalBooked(p.file, p.plan))
       } else {
-        steps.push(await this.#rails(p.file, p.plan, { ...p.status, status: 'ACSP', reason: undefined }))
+        const s = await this.#rails(p.file, p.plan, { ...p.status, status: 'ACSP', reason: undefined })
+        if (s) steps.push(s)
       }
     }
     for (const [file, steps] of byFile) await this.#flow(file, steps, false)
@@ -521,7 +562,7 @@ export class PaymentEngine {
   }
 
   /** Scheme selection as documented: requested scheme if possible, else automatic. */
-  #scheme(requested: string | undefined, currency: string, creditorIban: string | undefined, withinInstantLimit: boolean, creditorId?: string): { scheme: Scheme } | { reject: string } {
+  async #scheme(requested: string | undefined, currency: string, creditorIban: string | undefined, withinInstantLimit: boolean, creditorId?: string): Promise<{ scheme: Scheme } | { reject: string }> {
     const sepa = !!creditorIban && isSepaCountry(ibanCountry(creditorIban))
     // GBP to a UK account (GB IBAN or sort code + account number) goes by Faster Payments when no scheme is asked for (decision 840).
     const ukCreditor = !!creditorId && (/^GB[0-9]{2}[A-Z]{4}[0-9]{14}$/.test(creditorId) || /^[0-9]{14}$/.test(creditorId))
@@ -529,10 +570,10 @@ export class PaymentEngine {
     if (requested === 'INST' || requested === 'SEPA' || requested === 'TARGET2') {
       if (currency !== 'EUR') return { reject: R.currency }
       if (!sepa && requested !== 'TARGET2') return { reject: R.declined }
-      if (requested === 'INST' && (!this.rails.instantReachable(creditorIban!) || !withinInstantLimit)) return { reject: R.instantForbidden }
+      if (requested === 'INST' && (!withinInstantLimit || !(await this.rails.instantReachable(creditorIban!)))) return { reject: R.instantForbidden }
       return { scheme: requested }
     }
-    if (currency === 'EUR' && sepa) return { scheme: withinInstantLimit && this.rails.instantReachable(creditorIban!) ? 'INST' : 'SEPA' }
+    if (currency === 'EUR' && sepa) return { scheme: withinInstantLimit && (await this.rails.instantReachable(creditorIban!)) ? 'INST' : 'SEPA' }
     return { scheme: 'SWIFT' }
   }
 
@@ -602,6 +643,32 @@ export class PaymentEngine {
     this.opts.onBooking?.(customer, b)
     // Notifications carry no Message-Request-Id.
     await this.inbox.add({ customer, type: 'CREDIT_DEBIT_NOTIFICATION', body: camt054(b, customer.camt054, this.bank) })
+  }
+
+  /**
+   * A credit from the rails (RailsEvents.credit): booked once per ref, a repeat answers
+   * the first result; an account not here is returned AC01 (decision 932).
+   */
+  received(c: IncomingCredit): Promise<CreditResult> {
+    const seen = this.#credits.get(c.ref)
+    if (seen) return seen
+    const r = this.#receive(c)
+    this.#credits.set(c.ref, r)
+    // A failure (not a return) may be retried with the same ref.
+    r.catch(() => { if (this.#credits.get(c.ref) === r) this.#credits.delete(c.ref) })
+    return r
+  }
+
+  async #receive(c: IncomingCredit): Promise<CreditResult> {
+    const iban = normalizeIban(c.iban)
+    if (!this.opts.virtual?.resolve(iban) && !this.directory.ownerOf(iban) && !this.#agency(iban).length) {
+      return { status: 'returned', code: 'AC01', reason: R.accountNumber }
+    }
+    const r = await this.incoming({
+      iban, amount: c.amount, currency: c.currency, scheme: c.scheme, debtor: c.debtor, remittance: c.remittance,
+      reference: c.reference, endToEndId: c.endToEndId, creditorName: c.creditorName,
+    })
+    return r.returned ? { status: 'returned', code: r.returned.code, reason: r.returned.reason } : { status: 'booked', servicerRef: r.servicerRef! }
   }
 
   /** An incoming credit from outside (the simulator's SEPA / SEPA Instant credit). */

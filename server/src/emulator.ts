@@ -122,6 +122,8 @@ export class Emulator {
       onBooking: (_c, b) => { this.journal.record(b) }, limits: (c) => this.reports.paymentLimits(c),
       onIncoming: (e) => this.accounts.onIncoming(e), agency: () => this.agency?.accounts,
     })
+    // Outcomes the rails deliver later and credits from the scheme come in here (decision 930).
+    this.rails.listen({ outcome: (ref, o) => this.engine.settle(ref, o), credit: (c) => this.engine.received(c) })
     this.directDebit = new DirectDebitService({
       directory: this.directory, ledger: this.ledger, rails: this.rails, inbox: this.inbox, clock: this.clock, bank: this.bank,
       xsd, virtual: this.viban.registry, strictIban: opts.strictIban, onBooking: (_c, b) => { this.journal.record(b) }, msgIds,

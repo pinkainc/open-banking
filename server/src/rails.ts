@@ -1,7 +1,12 @@
 // Payment schemes behind the bank. The engine hands an outgoing payment to the rails
 // and books it when the rails report settlement. The simulator settles everything at
 // once unless told to reject payments to a given account; real bridges (SEPA, SEPA
-// Instant, UK Faster Payments) will implement the same interface.
+// Instant, UK Faster Payments: HttpRails, docs/rails-bridge-protocol.md) implement the
+// same interface.
+//
+// Real schemes are asynchronous (decision 930): `send` may answer `accepted` (pending at
+// the scheme) and the final outcome arrives later through the RailsEvents the engine
+// registers with `listen`, as do credits from the scheme to accounts here.
 import { keepLast } from './bounded.js'
 
 /** FAST: UK Faster Payments (decision 840). */
@@ -23,6 +28,34 @@ export interface OutgoingPayment {
  * after being attempted); the bank may retry it on another scheme.
  */
 export type RailsOutcome = { status: 'settled' } | { status: 'rejected'; reason: string } | { status: 'unavailable' }
+/** What `send` answers: the final outcome, or `accepted` with the outcome to follow through RailsEvents.outcome. */
+export type RailsAnswer = RailsOutcome | { status: 'accepted' }
+
+/** A credit from the scheme to an account here (SEPA, SEPA Instant, Faster Payments …). */
+export interface IncomingCredit {
+  /** The scheme's (bridge's) reference: a credit is booked once per ref. */
+  ref: string
+  /** The account credited: IBAN, VIBAN, agency account (IBAN or sort code + account number). */
+  iban: string
+  amount: bigint
+  currency: string
+  scheme: Scheme
+  debtor: { name?: string; iban?: string; bic?: string; account?: string }
+  creditorName?: string
+  remittance?: string
+  reference?: string
+  endToEndId?: string
+}
+/** Booked (with our AcctSvcrRef) or returned to the sender with an ISO reason code. */
+export type CreditResult = { status: 'booked'; servicerRef: string } | { status: 'returned'; code: string; reason: string }
+
+/** Where the rails deliver what happens later; the engine registers it (Rails.listen). */
+export interface RailsEvents {
+  /** The final outcome of a payment `send` answered `accepted`. False: unknown ref or already final (ignored). */
+  outcome(ref: string, outcome: RailsOutcome): Promise<boolean>
+  /** A credit from the scheme; the same ref again answers the first result. */
+  credit(c: IncomingCredit): Promise<CreditResult>
+}
 
 /** A SEPA Direct Debit our creditor sends to a debtor at another bank (L4). */
 export interface OutgoingCollection {
@@ -40,12 +73,17 @@ export interface OutgoingCollection {
 export type CollectionOutcome = { status: 'settled' } | { status: 'rejected'; code: string }
 
 export interface Rails {
-  send(p: OutgoingPayment): Promise<RailsOutcome>
+  send(p: OutgoingPayment): Promise<RailsAnswer>
+  /** Registers the engine's sink for later outcomes and incoming credits (one sink; a second replaces it). */
+  listen(events: RailsEvents): void
   /** Is SEPA Instant available to this account? Decides automatic scheme selection. */
-  instantReachable(iban: string): boolean
+  instantReachable(iban: string): Promise<boolean>
   /** The bank's ledger account that outgoing payments of a scheme are booked against. */
   settlementAccount(scheme: Scheme | string): string
-  /** Presents a direct debit to the debtor's bank on the settlement date. */
+  /**
+   * Presents a direct debit to the debtor's bank on the settlement date and answers at
+   * presentation (decision 933: R-transactions after settlement are not modelled yet).
+   */
   collect(c: OutgoingCollection): Promise<CollectionOutcome>
 }
 
@@ -59,6 +97,38 @@ export class SimulatorRails implements Rails {
   #noInstant = new Set<string>()
   #instantFails = new Set<string>()
   #collectionRejects = new Map<string, string>()
+  #events?: RailsEvents
+  #deferred = false
+  /** Deferred mode: payments answered `accepted` whose outcome is not delivered yet (ref → outcome). */
+  readonly held = new Map<string, RailsOutcome>()
+
+  listen(events: RailsEvents) { this.#events = events }
+  /**
+   * Deferred mode (decision 931): `send` answers `accepted` and keeps the outcome until
+   * `deliver`, as a real scheme that settles later. Off by default (immediate outcomes).
+   */
+  defer(on = true) { this.#deferred = on }
+  get deferred() { return this.#deferred }
+  /**
+   * Delivers held outcomes through the engine's events: one ref (optionally with another
+   * outcome, e.g. a reject after accept) or all of them, oldest first. Returns how many were applied.
+   */
+  async deliver(ref?: string, outcome?: RailsOutcome): Promise<number> {
+    if (!this.#events) throw new Error('no RailsEvents registered')
+    const refs = ref === undefined ? [...this.held.keys()] : this.held.has(ref) ? [ref] : []
+    let n = 0
+    for (const r of refs) {
+      const o = outcome ?? this.held.get(r)!
+      this.held.delete(r)
+      if (await this.#events.outcome(r, o)) n++
+    }
+    return n
+  }
+  /** A credit from the "scheme", through the same events as a bridge's. */
+  async credit(c: IncomingCredit): Promise<CreditResult> {
+    if (!this.#events) throw new Error('no RailsEvents registered')
+    return this.#events.credit(c)
+  }
 
   /** Payments to this account are rejected by the "scheme" with this reason. */
   reject(account: string, reason: string) { this.#rejects.set(account.toUpperCase(), reason) }
@@ -71,6 +141,7 @@ export class SimulatorRails implements Rails {
   reset() {
     this.#rejects.clear(); this.#noInstant.clear(); this.#instantFails.clear(); this.#collectionRejects.clear()
     this.sent.length = 0; this.collections.length = 0
+    this.held.clear(); this.#deferred = false
   }
 
   async collect(c: OutgoingCollection): Promise<CollectionOutcome> {
@@ -81,17 +152,21 @@ export class SimulatorRails implements Rails {
     return outcome
   }
 
-  async send(p: OutgoingPayment): Promise<RailsOutcome> {
+  async send(p: OutgoingPayment): Promise<RailsAnswer> {
     const target = (p.creditor.iban ?? p.creditor.account ?? '').toUpperCase()
     const reason = this.#rejects.get(target)
     const outcome: RailsOutcome = p.scheme === 'INST' && this.#instantFails.has(target) ? { status: 'unavailable' }
       : reason ? { status: 'rejected', reason } : { status: 'settled' }
     this.sent.push({ ...p, outcome })
     keepLast(this.sent, RAILS_LOG_MAX)
+    if (this.#deferred) {
+      this.held.set(p.ref, outcome)
+      return { status: 'accepted' }
+    }
     return outcome
   }
 
-  instantReachable(iban: string) { return !this.#noInstant.has(iban.toUpperCase()) }
+  async instantReachable(iban: string) { return !this.#noInstant.has(iban.toUpperCase()) }
 
   settlementAccount(scheme: string) { return `@settlement:${scheme}` }
 }

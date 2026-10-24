@@ -197,5 +197,20 @@ export function simRoutes(emulator: Emulator) {
     }))
 
     app.post('/rails/reset', async () => { simRails().reset(); return { ok: true } })
+
+    // Deferred rails (decision 931): payments are answered `accepted` and settle on /rails/deliver.
+    app.post('/rails/defer', async (req) => {
+      const b = (req.body ?? {}) as { on?: boolean }
+      simRails().defer(b.on !== false)
+      return { deferred: simRails().deferred }
+    })
+    app.get('/rails/held', async () => ({ payments: [...simRails().held].map(([ref, outcome]) => ({ ref, outcome })) }))
+    // Delivers the held outcomes (all, or `ref`); `reject` (a reason) or `unavailable` overrides the outcome.
+    app.post('/rails/deliver', async (req) => {
+      const b = (req.body ?? {}) as { ref?: string; reject?: string; unavailable?: boolean }
+      if (b.ref !== undefined && !simRails().held.has(b.ref)) throw bad(`no held payment ${b.ref}`)
+      const outcome = b.reject !== undefined ? { status: 'rejected' as const, reason: b.reject } : b.unavailable ? { status: 'unavailable' as const } : undefined
+      return { delivered: await simRails().deliver(b.ref, outcome) }
+    })
   }
 }
