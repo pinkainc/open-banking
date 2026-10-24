@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto'
 import { describe, test } from 'node:test'
 import { BoundedMap, BoundedSet, DEFAULT_BOUNDS } from '../src/bounded.js'
 import { DAY_MS, ManualClock } from '../src/clock.js'
-import { C1, call, drain, pain001, report, reportError, setup } from './helpers.js'
+import { C1, INBOXES, call, drain, pain001, report, reportError, setup } from './helpers.js'
 
 describe('BoundedMap', () => {
   test('an entry lives exactly its TTL', () => {
@@ -48,55 +48,57 @@ describe('BoundedMap', () => {
   })
 })
 
-describe('inbox tombstones', () => {
-  const confirmed = async (n: number, opts = {}) => {
-    const ctx = await setup(opts)
-    const ids: string[] = []
-    for (let i = 0; i < n; i++) ids.push((await ctx.emulator.inbox.add({ customer: C1, type: 'HEARTBEAT', body: '<x/>' })).id)
-    for (const id of ids) assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${id}` })).statusCode, 200)
-    return { ctx, ids }
-  }
+for (const [store, inbox] of INBOXES) {
+  describe(`inbox tombstones (${store})`, () => {
+    const confirmed = async (n: number, opts = {}) => {
+      const ctx = await setup({ ...opts, ...(await inbox()) })
+      const ids: string[] = []
+      for (let i = 0; i < n; i++) ids.push((await ctx.emulator.inbox.add({ customer: C1, type: 'HEARTBEAT', body: '<x/>' })).id)
+      for (const id of ids) assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${id}` })).statusCode, 200)
+      return { ctx, ids }
+    }
 
-  test('a repeat DELETE is 200 while the message is kept as processed (a week from creation, decision 621), then 404', async () => {
-    const { ctx, ids } = await confirmed(1)
-    ctx.clock.advance(7 * DAY_MS - 1)
-    assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${ids[0]}` })).statusCode, 200)
-    ctx.clock.advance(1)
-    assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${ids[0]}` })).statusCode, 404)
-  })
+    test('a repeat DELETE is 200 while the message is kept as processed (a week from creation, decision 621), then 404', async () => {
+      const { ctx, ids } = await confirmed(1)
+      ctx.clock.advance(7 * DAY_MS - 1)
+      assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${ids[0]}` })).statusCode, 200)
+      ctx.clock.advance(1)
+      assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${ids[0]}` })).statusCode, 404)
+    })
 
-  test('confirmed late, the tombstone answers 200 for five days after the confirmation', async () => {
-    const ctx = await setup()
-    const id = (await ctx.emulator.inbox.add({ customer: C1, type: 'HEARTBEAT', body: '<x/>' })).id
-    ctx.clock.advance(4 * DAY_MS)
-    assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${id}` })).statusCode, 200)
-    ctx.clock.advance(5 * DAY_MS - 1)
-    assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${id}` })).statusCode, 200)
-    ctx.clock.advance(1)
-    assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${id}` })).statusCode, 404)
-  })
+    test('confirmed late, the tombstone answers 200 for five days after the confirmation', async () => {
+      const ctx = await setup(await inbox())
+      const id = (await ctx.emulator.inbox.add({ customer: C1, type: 'HEARTBEAT', body: '<x/>' })).id
+      ctx.clock.advance(4 * DAY_MS)
+      assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${id}` })).statusCode, 200)
+      ctx.clock.advance(5 * DAY_MS - 1)
+      assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${id}` })).statusCode, 200)
+      ctx.clock.advance(1)
+      assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${id}` })).statusCode, 404)
+    })
 
-  test('purge drops expired tombstones and archived processed messages too', async () => {
-    const { ctx } = await confirmed(3)
-    assert.equal(await ctx.emulator.inbox.tombstones(), 3)
-    assert.equal(await ctx.emulator.inbox.processedKept(), 3)
-    ctx.clock.advance(5 * DAY_MS)
-    await ctx.emulator.inbox.purge()
-    assert.equal(await ctx.emulator.inbox.tombstones(), 0)
-    assert.equal(await ctx.emulator.inbox.processedKept(), 3)
-    ctx.clock.advance(2 * DAY_MS)
-    await ctx.emulator.inbox.purge()
-    assert.equal(await ctx.emulator.inbox.processedKept(), 0)
-  })
+    test('purge drops expired tombstones and archived processed messages too', async () => {
+      const { ctx } = await confirmed(3)
+      assert.equal(await ctx.emulator.inbox.tombstones(), 3)
+      assert.equal(await ctx.emulator.inbox.processedKept(), 3)
+      ctx.clock.advance(5 * DAY_MS)
+      await ctx.emulator.inbox.purge()
+      assert.equal(await ctx.emulator.inbox.tombstones(), 0)
+      assert.equal(await ctx.emulator.inbox.processedKept(), 3)
+      ctx.clock.advance(2 * DAY_MS)
+      await ctx.emulator.inbox.purge()
+      assert.equal(await ctx.emulator.inbox.processedKept(), 0)
+    })
 
-  test('beyond the cap the oldest tombstone is forgotten', async () => {
-    const { ctx, ids } = await confirmed(3, { memory: { tombstones: { max: 2 }, processed: { max: 2 } } })
-    assert.equal(await ctx.emulator.inbox.tombstones(), 2)
-    assert.equal(await ctx.emulator.inbox.processedKept(), 2)
-    assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${ids[0]}` })).statusCode, 404)
-    assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${ids[2]}` })).statusCode, 200)
+    test('beyond the cap the oldest tombstone is forgotten', async () => {
+      const { ctx, ids } = await confirmed(3, { memory: { tombstones: { max: 2 }, processed: { max: 2 } } })
+      assert.equal(await ctx.emulator.inbox.tombstones(), 2)
+      assert.equal(await ctx.emulator.inbox.processedKept(), 2)
+      assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${ids[0]}` })).statusCode, 404)
+      assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${ids[2]}` })).statusCode, 200)
+    })
   })
-})
+}
 
 describe('remembered MsgIds', () => {
   const duplicate = async (ctx: Awaited<ReturnType<typeof setup>>, msgId: string) => {

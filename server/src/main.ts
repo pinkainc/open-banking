@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildApp } from './app.js'
 import { Emulator, type Seed } from './emulator.js'
+import { PgInbox, PgInboxDb } from './pg/inbox.js'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const env = process.env
@@ -23,7 +24,11 @@ const max = (v: string | undefined) => {
   if (!/^[1-9]\d*$/.test(v)) throw new Error(`a MAX_* setting must be a positive integer, not ${v}`)
   return { max: Number(v) }
 }
+// DATABASE_URL: the inbox in Postgres (decision 900), under INBOX_NAMESPACE (default
+// "default"), so a restart keeps the messages; without it, in memory.
+const inboxDb = env.DATABASE_URL ? await PgInboxDb.connect(env.DATABASE_URL) : undefined
 const emulator = await Emulator.fromSeed(seed, {
+  inbox: inboxDb && ((clock, bounds) => new PgInbox(inboxDb, clock, { ...bounds, namespace: env.INBOX_NAMESPACE ?? 'default' })),
   xsdDir: existsSync(xsdDir) ? xsdDir : undefined,
   strictIban: env.STRICT_IBAN !== '0',
   pain00103Until: env.PAIN_001_001_03_UNTIL,

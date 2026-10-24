@@ -11,6 +11,7 @@ import addFormats from 'ajv-formats'
 import { buildApp, type AppOptions } from '../src/app.js'
 import { ManualClock } from '../src/clock.js'
 import { Emulator, type EmulatorOptions, type Seed } from '../src/emulator.js'
+import { PgInbox, PgInboxDb } from '../src/pg/inbox.js'
 import { XsdValidator } from '../src/payments/xsd.js'
 import { parseXml } from '../src/xml.js'
 
@@ -56,6 +57,22 @@ export const DE_IBAN = 'DE89370400440532013000'
 
 export function seed(): Seed {
   return JSON.parse(readFileSync(join(ROOT, 'config/dev-seed.json'), 'utf8'))
+}
+
+let pgDb: Promise<PgInboxDb> | undefined
+/** One pool per test process for DATABASE_URL; every PgInbox on it has its own namespace. */
+export const pgInboxDb = () => (pgDb ??= PgInboxDb.connect(process.env.DATABASE_URL!, { max: 4 }))
+/**
+ * Inbox stores to run inbox behaviour against, as emulator options: memory always,
+ * Postgres when DATABASE_URL is set (npm run check sets it; without it the Postgres
+ * variants are not registered, never skipped).
+ */
+export const INBOXES: [string, () => Promise<EmulatorOptions>][] = [['memory', async () => ({})]]
+if (process.env.DATABASE_URL) {
+  INBOXES.push(['postgres', async () => {
+    const db = await pgInboxDb()
+    return { inbox: (clock, bounds) => new PgInbox(db, clock, bounds) }
+  }])
 }
 
 export interface Ctx { app: FastifyInstance; emulator: Emulator; clock: ManualClock }
