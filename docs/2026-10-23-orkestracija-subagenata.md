@@ -155,3 +155,24 @@ Mali neovisni zadaci stanu u jednog agenta po području, bez drugog agenta za te
 
 Nalazi: `payment.oneoff` je LHV uklonio (P 01 changelog), pa plan za +1 operaciju ne vrijedi; PAYMENT_MULTI ponavlja InstrId pa duplikat ne može biti samo InstrId; iso20022.org stranice vraćaju 403 skriptama, ali `.xsd` datoteke se skidaju izravno; xmllint-wasm treba 1 GiB za stranicu od 10 000 stavki.
 
+## S4: provjera primatelja i messages v2 (2026-10-24, noćni rad)
+
+Dva agenta strogo jedan za drugim, svaki implementacija i testovi zajedno.
+
+| Agent | Effort | Poziva | Tokena konteksta | Ishod |
+|---|---|---|---|---|
+| VoP/CoP requester | high | ~43 | 151k | 3 operacije + `test.accounts.ibans`, +18 testova, odluke 600–610, pitanja 52–55 |
+| messages v2 + requests | high | 60 | 179k | 5 operacija (`test.next` je već bio gotov), +36 testova, odluke 620–632, pitanja 56–61 |
+
+Nalazi:
+
+1. **API 529 Overloaded tri puta zaredom** prekinuo je prvog agenta. Nastavak preko
+   `SendMessage` istom agentu (kontekst ostaje) radio je; posao nije izgubljen jer je
+   radni stablo ostalo netaknuto. U promptu nastavka treba reći što je na disku i da
+   prvo commita zeleni korak.
+2. **Nijedan servis nije pamtio tijelo zahtjeva**, pa je `GET /v2/requests/{id}` tražio
+   novi dnevnik. Lokalni `accepted()` helperi (app, payee, fx, viban, DD) spojeni su u
+   jedan u `requests.ts`. Prvi agent je to uočio i predao drugome u izvještaju, što je
+   uštedjelo istraživanje.
+3. Jedno stanje za v1 i v2 promijenilo je v1 ponašanje: ponovljeni DELETE daje 200 dok
+   je poruka u tjednoj arhivi obrađenih (odluka 621).

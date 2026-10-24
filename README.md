@@ -51,10 +51,10 @@ Test counts are `node:test` cases in `server/test/`, all green (`npm run check`)
 | **L3** | virtual IBANs: open / bulk (1–1000) / modify / info / close, all 13 documented error codes, status notifications, screening → ON_HOLD, payments to and from VIBANs booked on the master account (camt.054 carries the VIBAN, the master's camt.053 shows the VIBAN as its own side) | done | **~51** (viban 51) |
 | **L4** | SEPA direct debit: `POST /direct-debit/collection` pain.008.001.08 → pain.002.001.10 (`DIRECT_DEBIT_OUTGOING`, ACCP then ACSC / RJCT at 11:30 CET on the TARGET2 settlement date, AM04), debtor notification pain.008 (`DIRECT_DEBIT_INCOMING_COLLECTION_NOTIFICATION`), `POST /direct-debit/incoming-collection` pain.007.001.09 refusal (cancel before the cut-off, return after it, refund within 8 weeks with camt.054 `RtrInf`), external creditors and R-transactions via `/_sim/direct-debit`; DD agreement and debtor notification per customer (decision 527) | done; creditor-side pain.007 not implemented (endpoint not named, decision 309); Bacs DD is UK (S5) | **71** (creditor 45, debtor 25, real mTLS 1) |
 | **L5a** | EE JSON services: FX `POST /fx/trade-offer` and `/fx/trade-offer-confirmation` (quotes valid 2 min, TODAY settled at confirmation, SPOT on T+2 TARGET2 days with the sold amount reserved, both legs booked with BkTxCd FORX in camt.054 / camt.053, documented error texts incl. the Jackson parse text); contract management `POST` / `GET /contracts` (service providers only, unsigned BDOC container, activation via `/_sim`); EE webhooks: one GENERAL_WEBHOOK subscription (subscribe / list / update / delete) and delivery of every inbox message, retried 1 min / 5 min / 30 min / 2 h (decision 421). Every JSON body is validated against `ssot/json-schemas/` in the tests | done; rates are made up, no currency holiday calendars | **67** (fx 17, fx errors 16, contracts 15, webhooks 9, webhooks over HTTP 10) |
-| **L5b** | verification of payee (VoP / CoP), messages v2, signed (BDOC/ASiC-E) requests | not started | — |
+| **L5b** | verification of payee requester: EE XML `POST /verification-of-payee` (both hosts, answers XSD-valid), UK JSON `/payment/vop-request` and `/payment/cop-request` (name matcher, CoP by account category, `/_sim/payee/accounts` for other banks), EE TEST `GET /test/accounts/ibans`; messages v2 on the UK host (`GET /v2/messages` with pages, `includeProcessed`, metadata; `PATCH /v2/messages/processed` with undelete and a week's archive) sharing the v1 inbox; requests API (`GET /v2/requests`, `/v2/requests/{id}` with the body as submitted); `GET /messages/test/next`. Signed (BDOC/ASiC-E) requests not started | partly (S4) | **~54** (payee 18, messages v2 35) |
 | **L6** | agency accounts / indirect scheme access | not started | — |
 
-Total: **429 tests, 429 passing** (per-level counts are approximate since S3). Line coverage of `server/src` over the unit tests is
+Total: **483 tests, 483 passing** (per-level counts are approximate since S3). Line coverage of `server/src` over the unit tests is
 about 99.5 % (`npm run coverage`, c8 through tsx source maps, so treat it as approximate).
 Not yet compared against the real sandbox: everything above is "as documented", not
 "as recorded".
@@ -118,6 +118,7 @@ creditor IBANs, so start with `STRICT_IBAN=0` for them.
 | `LOG` | off | one line per request on stderr |
 | `CONNECT_FLAVOUR` | `EE` | `UK` makes the server behave as connect.lhv.eu (`X-Idempotency-Key`, compression of ≥10 MB messages, default `X-Bank-Code`) |
 | `MAX_TOMBSTONES`, `MAX_MSGIDS`, `MAX_IDEMPOTENCY_KEYS` | 100000, 200000, 100000 | caps on what is remembered (decision 504) |
+| `MAX_PROCESSED`, `MAX_REQUESTS` | 10000, 10000 (7 d, 5 d) | caps on processed (v2) messages and the request log behind `/v2/requests` |
 
 ## `/_sim`: the emulator's control plane
 

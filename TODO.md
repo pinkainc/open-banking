@@ -62,7 +62,10 @@ Legend: `[x]` done · `[ ]` open · `[~]` in progress · `(?)` needs a sandbox r
 - [ ] FX: currency holiday calendars, TODAY cut-off, zero-decimal currencies (JPY); `contractStatus: failed` never produced; 10 s webhook delivery timeout untested
 - [ ] Route EE webhooks / EE services on the UK host by `x-bank-code: LHVEE` → S5
 - [ ] (?) FX: one or two confirmations for TODAY, rates, error texts; contracts status codes; EE webhook retries and ownership (sandbox q35–42) → S8
-- [ ] VoP / CoP requester, messages v2, requests API → S4
+- [x] VoP / CoP requester (EE XML both hosts, UK JSON VoP and CoP), `GET /test/accounts/ibans` (decisions 600–610, S4)
+- [x] Messages v2 (list, metadata, processed / undelete) on the shared inbox, requests API, `/messages/test/next` (decisions 620–632, S4)
+- [ ] Request log bounded by count only; bodies up to 5 MB each (decision 630)
+- [ ] (?) VoP/CoP error delivery, matching rules, service grant, EE VoP via UK host; v2 archive and EE messages in v2 (sandbox q52–61) → S8
 - [ ] Signed payments: `heartbeat.post` + BDOC/ASiC-E on `/payment`
 
 ## UK flavour → S5
@@ -97,3 +100,15 @@ Odluke iz noćnog rada S3 (2026-10-24), sve označene „(noćni rad, potvrditi)
 - [ ] 527 DD: klijent bez `directDebit` polja više ne može slati naplate ni primati obavijest (zamjenjuje 310)
 - [ ] 551 VIBAN kao vlastita strana u camt.053 mastera; 553 adresa banke po zemlji BIC-a
 
+Odluke iz noćnog rada S4 (2026-10-24), označene „(noćni rad, potvrditi)”:
+
+- [ ] 601 pravila usporedbe imena (FULL / CLOSE) u `payee/match.ts`
+- [ ] 602 vlasnik računa: klijenti su uvijek BUSINESS, ACTIVE VIBAN odgovara imenom vlasnika; nepoznat račun NOT_APPLICABLE / NOAP / AC01
+- [ ] 603 greške EE VoP zahtjeva idu u inbox kao `<Errors>` (kao odluka 200), ne kao HTTP 4xx
+- [ ] 604–606 oblik UK VoP/CoP odgovora po G primjerima, greške u inboxu s `Data: null`, CoP ishod po kategoriji
+- [ ] 608 oblik `GET /test/accounts/ibans` (JSON polje IBAN-ova klijenta)
+- [ ] 609 VoP/CoP bez service granta
+- [ ] 620 v2 samo na UK hostu, jedno stanje za v1 i v2
+- [ ] 621 obrađene poruke čuvaju se tjedan dana od nastanka; **ponovljeni v1 DELETE sad daje 200 do 7 dana** (mijenja ponašanje iz 504)
+- [ ] 622–624 parametri `/v2/messages`, metapodaci, validacija PATCH-a
+- [ ] 630, 632 dnevnik zahtjeva (5 d / 10 000), datumi `/v2/requests` po UK kalendaru
