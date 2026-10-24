@@ -70,7 +70,7 @@ for ((i = 1; i <= MAX; i++)); do
   [ -z "$(git status --porcelain)" ] || fail "sesija $i ostavila necommitane promjene"
   [ "$(git rev-parse --short HEAD)" != "$HEAD0" ] || fail "sesija $i nije ništa commitala"
   npm run check > "$RUN/check-$i.log" 2>&1 || fail "npm run check pada nakon sesije $i (vidi $RUN/check-$i.log)"
-  note "check: $(grep -E '^ℹ (pass|fail|skipped)' "$RUN/check-$i.log" | tr '\n' ' ')"
+  note "check: $(grep -E '^ *ℹ (pass|fail|skipped)' "$RUN/check-$i.log" | tr '\n' ' ')"
   [ ! -f "$STOP_FILE" ] || fail "sesija $i traži čovjeka: $(cat "$STOP_FILE")"
 done
 
