@@ -7,6 +7,7 @@ import { beforeEach, describe, test } from 'node:test'
 import { DAY_MS } from '../src/clock.js'
 import type { Booking } from '../src/payments/camt054.js'
 import { fold1257 } from '../src/statements/codepage.js'
+import { MemoryJournal } from '../src/statements/journal.js'
 import { MAX_TRANSACTIONS, PAGE_SIZE } from '../src/statements/reports.js'
 import { many, parseXml, text } from '../src/xml.js'
 import {
@@ -58,7 +59,7 @@ async function statement(o: ReportReq = {}, opts: { as?: string; headers?: Recor
 
 let refN = 0
 /** A booking straight into the journal (for volume and timing); the ledger is not touched. */
-function book(o: { at?: number; amount?: string; ccy?: string; dir?: 'CRDT' | 'DBIT'; account?: string; remittance?: string } = {}) {
+async function book(o: { at?: number; amount?: string; ccy?: string; dir?: 'CRDT' | 'DBIT'; account?: string; remittance?: string } = {}) {
   const b: Booking = {
     account: o.account ?? C1.iban, owner: { name: 'Demo Customer 1', code: C1.code }, direction: o.dir ?? 'CRDT',
     amount: BigInt(Math.round(Number(o.amount ?? '1.00') * 100)), currency: o.ccy ?? 'EUR',
@@ -108,11 +109,11 @@ describe('POST /account-statement', () => {
 
   test('a date range: entries of those days only, opening = balance before, full-day dates', async () => {
     ctx.clock.advance(DAY_MS) // 2026-03-11 10:00
-    book({ amount: '10.00' })
+    await book({ amount: '10.00' })
     ctx.clock.advance(DAY_MS) // 2026-03-12
-    book({ amount: '2.50', dir: 'DBIT' })
+    await book({ amount: '2.50', dir: 'DBIT' })
     ctx.clock.advance(DAY_MS) // 2026-03-13
-    book({ amount: '99.00' })
+    await book({ amount: '99.00' })
     const p = page((await statement({ frDt: '2026-03-11', toDt: '2026-03-12' })).msgs[0])
     const eur = p.blocks.find((b) => b.ccy === 'EUR')!
     assert.deepEqual([eur.open.amt, eur.close.amt, eur.n, eur.cdt, eur.dbt], ['10000.00', '10007.50', 2, '1', '1'])
@@ -127,7 +128,7 @@ describe('POST /account-statement', () => {
 
   test('daylight saving: a summer day is reported with +03:00', async () => {
     ctx.clock.set('2026-07-01T12:00:00Z')
-    book({ at: Date.parse('2026-06-15T09:00:00Z') })
+    await book({ at: Date.parse('2026-06-15T09:00:00Z') })
     const p = page((await statement({ frDt: '2026-06-15', toDt: '2026-06-15' })).msgs[0])
     assert.equal(p.blocks[0].from, '2026-06-15T00:00:00.000+03:00')
     assert.equal(p.blocks[0].to, '2026-06-15T23:59:59.999+03:00')
@@ -232,15 +233,17 @@ describe('POST /account-statement', () => {
     })
     test('too many transactions: errStatement_TransactionLimitExceeded (injected cap)', async () => {
       ctx = await setup({ reports: { maxTransactions: 3 } })
-      book(); book() // with the three funding credits: 5 > 3
+      await book(); await book() // with the three funding credits: 5 > 3
       assert.deepEqual(await err({}), { code: 'errStatement_TransactionLimitExceeded', description: 'The requested period contains too many transactions', field: undefined })
       // The cap counts the period only.
       assert.equal(reportError((await statement({ prtry: 'DATETIME', frTm: '00:00:00', toTm: '10:00:00' })).msgs[0]), undefined)
     })
     test('the documented cap: 100 000 transactions', async () => {
       assert.equal(MAX_TRANSACTIONS, 100_000)
+      // The cap, not the store: 100 000 bookings straight into a memory journal.
+      ctx = await setup({ journal: () => new MemoryJournal() })
       const at = ctx.clock.now().getTime()
-      for (let i = 0; i < MAX_TRANSACTIONS - 2; i++) book({ at })
+      for (let i = 0; i < MAX_TRANSACTIONS - 2; i++) await book({ at })
       assert.equal((await err({}))!.code, 'errStatement_TransactionLimitExceeded')
     })
   })
@@ -249,7 +252,7 @@ describe('POST /account-statement', () => {
     test('page boundaries: INTM balances at the boundary entry, currencies in order', async () => {
       ctx = await setup({ reports: { pageSize: 3 } })
       const t0 = ctx.clock.now().getTime()
-      for (let i = 1; i <= 4; i++) book({ at: t0 + i * 1000, amount: `${i}.00` })
+      for (let i = 1; i <= 4; i++) await book({ at: t0 + i * 1000, amount: `${i}.00` })
       // EUR: funding + 4 = 5 entries, GBP 1, USD 1 → [EUR×3] [EUR×2, GBP] [USD]
       ctx.clock.advance(10_000)
       const { msgs } = await statement()
@@ -280,7 +283,7 @@ describe('POST /account-statement', () => {
     test('the last page carries the currencies without entries in the period', async () => {
       ctx = await setup({ reports: { pageSize: 3 } })
       ctx.clock.advance(DAY_MS)
-      for (let i = 0; i < 4; i++) book({ amount: '1.00' })
+      for (let i = 0; i < 4; i++) await book({ amount: '1.00' })
       const pages = (await statement({ frDt: '2026-03-11' })).msgs.map(page)
       assert.deepEqual(pages.map((p) => p.blocks.map((b) => `${b.ccy}×${b.n}`)), [['EUR×3'], ['EUR×1', 'GBP×0', 'USD×0']])
       assert.deepEqual(pages[1].blocks.slice(1).map((b) => [b.open.amt, b.close.amt, b.open.intm]), [['500.00', '500.00', false], ['500.00', '500.00', false]])
@@ -288,8 +291,9 @@ describe('POST /account-statement', () => {
 
     test(`the documented page size: ${PAGE_SIZE} entries per message`, async () => {
       assert.equal(PAGE_SIZE, 10_000)
+      ctx = await setup({ journal: () => new MemoryJournal() })
       const at = ctx.clock.now().getTime()
-      for (let i = 0; i < PAGE_SIZE; i++) book({ at }) // + 1 EUR funding = 10 001 EUR entries
+      for (let i = 0; i < PAGE_SIZE; i++) await book({ at }) // + 1 EUR funding = 10 001 EUR entries
       const pages = (await report(ctx, { kind: 'statement' })).msgs.map(page)
       assert.deepEqual(pages.map((p) => p.blocks.map((b) => `${b.ccy}×${b.n}`)), [['EUR×10000'], ['EUR×1', 'GBP×1', 'USD×1']])
     })
@@ -365,7 +369,7 @@ describe('camt.053.001.02 (answer to camt.060.001.03)', () => {
     const s = await setup({ clock: ctx.clock }, { customers: [{ code: '12349999', country: 'EE', name: 'Company of John', accounts: [iban] }] })
     ctx = { ...s, clock: ctx.clock }
     // The booking of the sample: 1.00 EUR SEPA to John Smith at 18:20 Tallinn time.
-    ctx.emulator.journal.record({
+    await ctx.emulator.journal.record({
       account: iban, owner: { name: 'Company of John', code: '12349999' }, direction: 'DBIT', amount: 100n, currency: 'EUR',
       servicerRef: 'F56A3D416EF4EB11911400155D41A83F', scheme: 'SEPA', bookedAt: new Date('2021-08-03T15:20:00Z'),
       pmtInfId: 'PMTINFID-58974', instrId: 'INSTRID-58974', endToEndId: 'E2E-58974',
@@ -403,9 +407,9 @@ describe('automatic end-of-day statement', () => {
     assert.equal((await put({ automaticStatement: '08' })).statusCode, 200)
     // Nothing for the day still running.
     assert.equal((await call(ctx, { method: 'POST', url: '/_sim/end-of-day', body: {} })).json().messages, 0)
-    book({ amount: '3.00', dir: 'DBIT' })
+    await book({ amount: '3.00', dir: 'DBIT' })
     ctx.clock.advance(DAY_MS)
-    book({ amount: '7.00' }) // the next day: not in the statement
+    await book({ amount: '7.00' }) // the next day: not in the statement
     assert.equal((await call(ctx, { method: 'POST', url: '/_sim/end-of-day', body: {} })).json().messages, 1)
     assert.equal(await ctx.emulator.reports.tick(), 0)
     const msgs = await drain(ctx)

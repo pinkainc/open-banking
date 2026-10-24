@@ -2,6 +2,8 @@
 // customer account, as the payment engine reported it (the same record the camt.054
 // notification is made from), plus simulator funding. Balances at any instant are the
 // sum of the entries booked before it, so statements reconcile with the ledger.
+// A store interface (decision 960): MemoryJournal here, PgJournal (pg/journal.ts) in
+// Postgres, so a restarted emulator still reports the bookings made before it.
 import type { Booking } from '../payments/camt054.js'
 
 export interface JournalEntry extends Booking {
@@ -9,11 +11,21 @@ export interface JournalEntry extends Booking {
   seq: number
 }
 
-export class Journal {
+export interface JournalStore {
+  record(b: Booking): Promise<JournalEntry>
+  /** Entries of an account booked in [from, to), oldest first (booking time, then seq). */
+  entries(account: string, from: number, to: number): Promise<JournalEntry[]>
+  /** Balance per currency of everything booked before the instant (signed, minor units). */
+  balancesBefore(account: string, before: number): Promise<Map<string, bigint>>
+  /** The sum of the accounts' debits in a currency booked in [from, to] (payment-limit usage). */
+  debits(accounts: string[], currency: string, from: number, to: number): Promise<bigint>
+}
+
+export class MemoryJournal implements JournalStore {
   #byAccount = new Map<string, JournalEntry[]>()
   #seq = 0
 
-  record(b: Booking): JournalEntry {
+  async record(b: Booking): Promise<JournalEntry> {
     const e: JournalEntry = { ...b, seq: ++this.#seq }
     let list = this.#byAccount.get(b.account)
     if (!list) this.#byAccount.set(b.account, (list = []))
@@ -21,8 +33,7 @@ export class Journal {
     return e
   }
 
-  /** Entries of an account booked in [from, to), oldest first. */
-  entries(account: string, from: number, to: number): JournalEntry[] {
+  async entries(account: string, from: number, to: number): Promise<JournalEntry[]> {
     const out = (this.#byAccount.get(account) ?? []).filter((e) => {
       const t = e.bookedAt.getTime()
       return t >= from && t < to
@@ -30,8 +41,7 @@ export class Journal {
     return out.sort((a, b) => a.bookedAt.getTime() - b.bookedAt.getTime() || a.seq - b.seq)
   }
 
-  /** Balance per currency of everything booked before the instant (signed, minor units). */
-  balancesBefore(account: string, before: number): Map<string, bigint> {
+  async balancesBefore(account: string, before: number): Promise<Map<string, bigint>> {
     const out = new Map<string, bigint>()
     for (const e of this.#byAccount.get(account) ?? []) {
       if (e.bookedAt.getTime() >= before) continue
@@ -40,6 +50,14 @@ export class Journal {
     return out
   }
 
-  /** Every entry of the given accounts (for payment-limit usage). */
-  all(accounts: string[]): JournalEntry[] { return accounts.flatMap((a) => this.#byAccount.get(a) ?? []) }
+  async debits(accounts: string[], currency: string, from: number, to: number): Promise<bigint> {
+    let sum = 0n
+    for (const a of new Set(accounts)) {
+      for (const e of this.#byAccount.get(a) ?? []) {
+        const t = e.bookedAt.getTime()
+        if (e.direction === 'DBIT' && e.currency === currency && t >= from && t <= to) sum += e.amount
+      }
+    }
+    return sum
+  }
 }

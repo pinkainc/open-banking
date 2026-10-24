@@ -101,8 +101,8 @@ describe('collection from a debtor here', () => {
     await collect(pain008([{ txs: [{ amount: '5.00' }] }]))
     await settle()
     const range = [0, Date.parse('2027-01-01')] as const
-    const debit = ctx.emulator.journal.entries(C2.iban, ...range).filter((e) => e.scheme === 'SEPADD')
-    const credit = ctx.emulator.journal.entries(C1.iban, ...range).filter((e) => e.scheme === 'SEPADD')
+    const debit = (await ctx.emulator.journal.entries(C2.iban, ...range)).filter((e) => e.scheme === 'SEPADD')
+    const credit = (await ctx.emulator.journal.entries(C1.iban, ...range)).filter((e) => e.scheme === 'SEPADD')
     assert.deepEqual([debit.length, debit[0].direction, credit.length, credit[0].direction], [1, 'DBIT', 1, 'CRDT'])
   })
 

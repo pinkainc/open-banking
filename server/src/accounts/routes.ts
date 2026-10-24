@@ -39,7 +39,7 @@ export function registerAccounts(app: FastifyInstance, emulator: Emulator, calle
       json(reply, await emulator.accounts.list(customerOf(req), req.query as Record<string, unknown>)))
     scope.get('/accounts/:accountNumber/transactions/:reference', async (req, reply) => {
       const p = req.params as { accountNumber: string; reference: string }
-      return json(reply, emulator.accounts.transaction(customerOf(req), p.accountNumber, p.reference))
+      return json(reply, await emulator.accounts.transaction(customerOf(req), p.accountNumber, p.reference))
     })
     scope.get('/accounts/:accountNumber/payments', async (req, reply) => {
       const p = req.params as { accountNumber: string }

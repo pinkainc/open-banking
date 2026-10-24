@@ -14,12 +14,17 @@ import { ManualClock } from '../src/clock.js'
 import { Emulator, type EmulatorOptions, type Seed } from '../src/emulator.js'
 import { MemoryInbox } from '../src/inbox.js'
 import { MemoryLedger, type Ledger } from '../src/ledger.js'
+import { MemoryAgencyStore } from '../src/agency/store.js'
+import { MemoryAcquiringStore } from '../src/acquiring/store.js'
+import { MemoryRailsPending } from '../src/payments/pending.js'
+import { MemoryJournal } from '../src/statements/journal.js'
 import { PgDb } from '../src/pg/db.js'
 import { PgInbox } from '../src/pg/inbox.js'
 import { PgLedger } from '../src/pg/ledger.js'
 import { PgAgencyStore } from '../src/pg/agency.js'
 import { PgAcquiringStore } from '../src/pg/acquiring.js'
 import { PgRailsPending } from '../src/pg/rails-pending.js'
+import { PgJournal } from '../src/pg/journal.js'
 import { OpenLedgerLedger } from '../src/ledgers/open-ledger.js'
 import { openLedgerUrl } from './open-ledger-server.js'
 import { XsdValidator } from '../src/payments/xsd.js'
@@ -79,7 +84,7 @@ export const pgInboxDb = pgDb
  * namespace; default memory. `npm run check` runs the whole suite once on each.
  */
 export const STORE = process.env.OPEN_BANKING_STORE ?? 'memory'
-if (STORE !== 'memory' && STORE !== 'postgres') throw new Error(`OPEN_BANKING_STORE must be memory or postgres, not ${STORE}`)
+if (STORE !== 'memory' && STORE !== 'postgres' && STORE !== 'deferred') throw new Error(`OPEN_BANKING_STORE must be memory, postgres or deferred, not ${STORE}`)
 if (STORE === 'postgres' && !process.env.DATABASE_URL) throw new Error('OPEN_BANKING_STORE=postgres needs DATABASE_URL')
 /**
  * Emulator options with the inbox, the ledger, agency and acquiring in Postgres, one fresh
@@ -93,10 +98,34 @@ export async function postgresStore(namespace: string = randomUUID()): Promise<E
     agency: (clock, bounds) => new PgAgencyStore(db, clock, { namespace, bounds }),
     acquiring: (clock, bounds) => new PgAcquiringStore(db, clock, { namespace, bounds }),
     railsPending: () => new PgRailsPending(db, { namespace }),
+    journal: () => new PgJournal(db, { namespace }),
   }
 }
+/**
+ * A store whose every async method starts 1–7 ms later, at random (decision 960): run with
+ * OPEN_BANKING_STORE=deferred before trusting Postgres, since memory stores answer at once
+ * and hide a missing await (a fixed delay keeps writes in order and hides some, step E).
+ */
+export function deferred<T extends object>(store: T): T {
+  return new Proxy(store, {
+    get(target, prop) {
+      const v = Reflect.get(target, prop, target)
+      if (typeof v !== 'function' || v.constructor.name !== 'AsyncFunction') return typeof v === 'function' ? v.bind(target) : v
+      return (...args: unknown[]) => new Promise((r) => setTimeout(r, 1 + Math.floor(Math.random() * 7))).then(() => v.apply(target, args))
+    },
+  })
+}
+/** The memory stores, each deferred. */
+export const deferredStore = (): EmulatorOptions => ({
+  inbox: (clock, bounds) => deferred(new MemoryInbox(clock, undefined, bounds.tombstones, bounds.processed)),
+  ledger: () => deferred(new MemoryLedger()),
+  agency: (clock, bounds) => deferred(new MemoryAgencyStore(clock, bounds)),
+  acquiring: (clock, bounds) => deferred(new MemoryAcquiringStore(clock, bounds)),
+  railsPending: () => deferred(new MemoryRailsPending()),
+  journal: () => deferred(new MemoryJournal()),
+})
 /** The options of the selected store (STORE), for every emulator a test builds. */
-export const storeOptions = async (): Promise<EmulatorOptions> => (STORE === 'postgres' ? postgresStore() : {})
+export const storeOptions = async (): Promise<EmulatorOptions> => (STORE === 'postgres' ? postgresStore() : STORE === 'deferred' ? deferredStore() : {})
 /**
  * Inbox stores to run inbox behaviour against, as emulator options: memory always,
  * Postgres when DATABASE_URL is set (npm run check sets it; without it the Postgres

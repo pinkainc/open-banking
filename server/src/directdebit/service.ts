@@ -104,7 +104,7 @@ export interface DirectDebitDeps {
   xsd?: XsdValidator
   virtual?: VirtualAccounts
   strictIban?: boolean
-  onBooking?: (customer: Customer, b: Booking) => void
+  onBooking?: (customer: Customer, b: Booking) => void | Promise<void>
 }
 
 /** A collection from a creditor at another bank (the /_sim trigger). */
@@ -457,7 +457,7 @@ export class DirectDebitService {
   }
 
   async #notify(customer: Customer, b: Booking) {
-    this.d.onBooking?.(customer, b)
+    await this.d.onBooking?.(customer, b)
     await this.d.inbox.add({ customer, type: 'CREDIT_DEBIT_NOTIFICATION', body: camt054(b, customer.camt054, this.d.bank) })
   }
 }

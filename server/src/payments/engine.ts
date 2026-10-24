@@ -56,14 +56,14 @@ export interface EngineOptions {
   pain00103Until?: string
   xsd?: XsdValidator
   /** Called with every booking on a customer account (the statement journal listens here). */
-  onBooking?: (customer: Customer, b: Booking) => void
+  onBooking?: (customer: Customer, b: Booking) => void | Promise<void>
   /** Virtual IBANs: booked on their master account (L3). */
   virtual?: VirtualAccounts
   /**
    * The customer's Connect payment limits in EUR minor units: daily and monthly totals with
    * what booked debits already used, and the per-payment SEPA Instant limit (decision 524).
    */
-  limits?: (c: Customer) => PaymentLimits
+  limits?: (c: Customer) => Promise<PaymentLimits>
   /** Incoming payments to a customer that are not (yet) booked: pending, rejected, then booked (UK /accounts, decision 711). */
   onIncoming?: (e: IncomingEvent) => void
   /** Synchronised agency accounts (indirect scheme access, decisions 830–836): paid from and to via their master account. */
@@ -346,7 +346,7 @@ export class PaymentEngine {
 
     if (creditorIban && this.opts.strictIban !== false && !ibanChecksumOk(creditorIban)) return rj(R.accountNumber)
     const requested = tx.scheme ?? block.scheme
-    const instantLimit = this.opts.limits?.(customer).instant
+    const instantLimit = (await this.opts.limits?.(customer))?.instant
     // An INST_RESTRICTED agency debtor sends no SEPA Instant (decision 834).
     const instantOk = (instantLimit === undefined || amount <= instantLimit) && debtorA?.status !== 'INST_RESTRICTED'
     const chosen = await this.#scheme(requested, tx.currency!, creditorIban, instantOk, creditorId)
@@ -365,7 +365,7 @@ export class PaymentEngine {
     // Funds first, then the Connect limits (EUR payments only, decision 524).
     if ((await this.ledger.available(p.debtorAccount, p.currency)) < p.amount) return rj(R.funds, scheme)
     if (p.currency === 'EUR' && this.opts.limits) {
-      const l = this.opts.limits(file.customer)
+      const l = await this.opts.limits(file.customer)
       const inflight = this.#inflightOf(file.customer)
       if (p.amount > l.dailyFree - inflight) return rj(R.dailyLimit, scheme)
       if (p.amount > l.monthlyFree - inflight) return rj(R.monthlyLimit, scheme)
@@ -673,7 +673,7 @@ export class PaymentEngine {
 
   async #notify(customer: Customer, b: Booking) {
     if (b.direction === 'DBIT') this.#inflight.delete(b.servicerRef)
-    this.opts.onBooking?.(customer, b)
+    await this.opts.onBooking?.(customer, b)
     // Notifications carry no Message-Request-Id.
     await this.inbox.add({ customer, type: 'CREDIT_DEBIT_NOTIFICATION', body: camt054(b, customer.camt054, this.bank) })
   }

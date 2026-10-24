@@ -141,7 +141,7 @@ export interface BacsDeps {
   clock: Clock
   bank: Bank
   virtual: VirtualAccounts
-  onBooking?: (customer: Customer, b: Booking) => void
+  onBooking?: (customer: Customer, b: Booking) => void | Promise<void>
   /** Pending / rejected incoming payments for GET /accounts/{acc}/payments (decision 711). */
   onIncoming?: (e: IncomingEvent) => void
   /** Books an incoming credit (the payment engine's, so VIBANs work as for any credit). */
@@ -460,7 +460,7 @@ export class BacsService {
   }
 
   async #notify(customer: Customer, b: Booking) {
-    this.d.onBooking?.(customer, b)
+    await this.d.onBooking?.(customer, b)
     await this.d.inbox.add({ customer, type: 'CREDIT_DEBIT_NOTIFICATION', body: camt054(b, customer.camt054, this.d.bank) })
   }
 }

@@ -13,7 +13,7 @@ import { dateTallinn } from '../time.js'
 import { camt052, type ReportBalance } from './camt052.js'
 import { camt053, type StatementBlock, type StatementVersion } from './camt053.js'
 import { addDays, instant, isDate, isMidnight, isTime, parseCamt060, RequestInvalid, type ReportRequest } from './camt060.js'
-import type { Journal, JournalEntry } from './journal.js'
+import type { JournalEntry, JournalStore } from './journal.js'
 
 export const STATEMENT_TYPE = 'ACCOUNT_STATEMENT'
 export const BALANCE_TYPE = 'ACCOUNT_BALANCE'
@@ -57,7 +57,7 @@ export interface ReportsDeps {
   msgIds?: Bounds
   directory: Directory
   ledger: Ledger
-  journal: Journal
+  journal: JournalStore
   inbox: InboxStore
   clock: Clock
   bank: Bank
@@ -104,7 +104,7 @@ export class AccountReports {
       if (this.#seen.has(`${seenKey}|${req.msgId}`)) throw new StatementError(E.duplicate)
       const owner = this.d.directory.ownerOf(req.iban!)
       if (!owner || keyOf(owner) !== keyOf(customer)) throw new StatementError(E.noAccess)
-      const bodies = kind === 'statement' ? this.#statementRequest(req, owner) : [await this.#balanceRequest(req, owner)]
+      const bodies = kind === 'statement' ? await this.#statementRequest(req, owner) : [await this.#balanceRequest(req, owner)]
       this.#seen.add(`${seenKey}|${req.msgId}`)
       for (const b of bodies) await add(b)
     } catch (e) {
@@ -136,7 +136,7 @@ export class AccountReports {
 
   // --- Statements -------------------------------------------------------------------
 
-  #statementRequest(req: ReportRequest, owner: Customer): string[] {
+  async #statementRequest(req: ReportRequest, owner: Customer): Promise<string[]> {
     const now = this.d.clock.now().getTime()
     if (!req.frDt) throw new StatementError(E.fromRequired)
     const datetime = req.prtry === 'DATETIME'
@@ -147,18 +147,18 @@ export class AccountReports {
     if (from >= to) throw new StatementError(E.fromAfterTo)
     // A period reaching into the future ends now (inclusive end = the current millisecond).
     to = Math.min(to, now + 1)
-    const entries = this.d.journal.entries(req.iban!, from, to)
+    const entries = await this.d.journal.entries(req.iban!, from, to)
     if (entries.length > this.maxTransactions) throw new StatementError(E.tooMany)
     return this.statementPages({ version: req.version === '05' ? '08' : '02', iban: req.iban!, owner, from, to, entries })
   }
 
   /** The camt.053 messages (one per page) of an account for [from, to). */
-  statementPages(s: { version: StatementVersion; iban: string; owner: Customer; from: number; to: number; entries?: JournalEntry[] }): string[] {
+  async statementPages(s: { version: StatementVersion; iban: string; owner: Customer; from: number; to: number; entries?: JournalEntry[] }): Promise<string[]> {
     const created = this.d.clock.now()
-    const entries = s.entries ?? this.d.journal.entries(s.iban, s.from, s.to)
+    const entries = s.entries ?? await this.d.journal.entries(s.iban, s.from, s.to)
     const fullDays = isMidnight(s.from) && isMidnight(s.to)
-    const opening = this.d.journal.balancesBefore(s.iban, s.from)
-    const history = new Set([...this.d.journal.balancesBefore(s.iban, s.to).keys()])
+    const opening = await this.d.journal.balancesBefore(s.iban, s.from)
+    const history = new Set([...(await this.d.journal.balancesBefore(s.iban, s.to)).keys()])
     const withEntries = new Set(entries.map((e) => e.currency))
     // v08 reports every currency with history; v02 mid-day reports only currencies with entries.
     let currencies = [...(s.version === '08' || fullDays ? history : withEntries)].sort(ccyOrder)
@@ -212,7 +212,7 @@ export class AccountReports {
       if (!req.frDt) throw new StatementError(E.fromRequired)
       if (req.frDt >= today) throw new StatementError(E.fromFuture)
       const end = instant(addDays(req.frDt, 1))
-      const bal = this.d.journal.balancesBefore(req.iban!, end)
+      const bal = await this.d.journal.balancesBefore(req.iban!, end)
       const currencies = [...bal.keys()].sort(ccyOrder)
       return camt052({
         version, created: now, at: new Date(end - 1), date: req.frDt, iban: req.iban!,
@@ -227,12 +227,12 @@ export class AccountReports {
     const live = new Map(Object.entries(await this.d.ledger.balances(iban)))
     if (live.size === 0 || (limits && !live.has('EUR'))) live.set('EUR', live.get('EUR') ?? { balance: 0n, available: 0n })
     const currencies = [...live.keys()].sort(ccyOrder)
-    const blocks = currencies.map((c) => {
+    const blocks = await Promise.all(currencies.map(async (c) => {
       const b = live.get(c)!
       const balances: ReportBalance[] = [{ code: 'ITBD', amount: b.balance }, { code: 'ITAV', amount: b.available }]
-      if (limits && c === 'EUR') balances.push(...this.#limits(owner, now, today))
+      if (limits && c === 'EUR') balances.push(...(await this.#limits(owner, now, today)))
       return { currency: c, balances }
-    })
+    }))
     return camt052({ version, created: now, at: now, date: today, iban, blocks })
   }
 
@@ -241,23 +241,19 @@ export class AccountReports {
    * debits (Tallinn calendar) leave free, and the per-payment instant limit. The payment
    * engine enforces these (decision 524).
    */
-  paymentLimits(owner: Customer, now = this.d.clock.now()) {
+  async paymentLimits(owner: Customer, now = this.d.clock.now()) {
     const today = dateTallinn(now)
     const l = { ...DEFAULT_LIMITS, ...this.settings(owner).limits }
-    let day = 0n, month = 0n
-    for (const e of this.d.journal.all(owner.accounts)) {
-      if (e.direction !== 'DBIT' || e.currency !== 'EUR') continue
-      const d = dateTallinn(e.bookedAt)
-      if (d.slice(0, 7) === today.slice(0, 7) && e.bookedAt <= now) month += e.amount
-      if (d === today && e.bookedAt <= now) day += e.amount
-    }
+    // Debits booked since the start of this Tallinn month / day, up to now.
+    const month = await this.d.journal.debits(owner.accounts, 'EUR', instant(`${today.slice(0, 7)}-01`), now.getTime())
+    const day = await this.d.journal.debits(owner.accounts, 'EUR', instant(today), now.getTime())
     const free = (total: bigint, used: bigint) => (total > used ? total - used : 0n)
     const monthly = toMinor(l.monthly), daily = toMinor(l.daily)
     return { monthly, daily, monthlyFree: free(monthly, month), dailyFree: free(daily, day), instant: toMinor(l.instant) }
   }
 
-  #limits(owner: Customer, now: Date, _today: string): ReportBalance[] {
-    const { monthly, daily, monthlyFree, dailyFree, instant } = this.paymentLimits(owner, now)
+  async #limits(owner: Customer, now: Date, _today: string): Promise<ReportBalance[]> {
+    const { monthly, daily, monthlyFree, dailyFree, instant } = await this.paymentLimits(owner, now)
     return [
       { prtry: 'PAYMENT_LIMIT_MONTHLY_TOTAL', amount: monthly },
       { prtry: 'PAYMENT_LIMIT_MONTHLY_FREE', amount: monthlyFree },
@@ -281,7 +277,7 @@ export class AccountReports {
       const version = this.settings(c).automaticStatement
       if (!version) continue
       for (const iban of c.accounts) {
-        for (const body of this.statementPages({ version, iban, owner: c, from: instant(date), to: instant(addDays(date, 1)) })) {
+        for (const body of await this.statementPages({ version, iban, owner: c, from: instant(date), to: instant(addDays(date, 1)) })) {
           await this.d.inbox.add({ customer: c, type: STATEMENT_TYPE, body })
           n++
         }

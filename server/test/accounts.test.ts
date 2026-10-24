@@ -63,7 +63,7 @@ async function pay(creditorIban: string, amount: string, creditorName = 'Katie B
   const body = pain001([{ debtorIban: A, debtorName: U1.name, txs: [{ amount, currency: 'GBP', creditorIban, creditorName, endToEndId: `E2E-${amount}` }] }])
   const r = await call(ctx, { method: 'POST', url: '/payment', as: U1.code, body })
   assert.equal(r.statusCode, 202, r.body)
-  const e = ctx.emulator.journal.entries(A, 0, Infinity).filter((x) => x.endToEndId === `E2E-${amount}`)
+  const e = (await ctx.emulator.journal.entries(A, 0, Infinity)).filter((x) => x.endToEndId === `E2E-${amount}`)
   return e.length ? e[0].servicerRef : ctx.emulator.engine.parked().find((p) => p.endToEndId === `E2E-${amount}`)!.ref
 }
 
@@ -154,7 +154,7 @@ describe('GET /accounts/{acc}/transactions/{ref}', () => {
     const g = gJson('get-transaction-by-reference.md')[0] as any
     if (g) assert.deepEqual(Object.keys(debit), Object.keys(g))
     assert.deepEqual(await ok(`/accounts/${A}/transactions/${transactionId(ref).toLowerCase()}`, 'accounts-transaction.response'), debit)
-    const credit = ctx.emulator.journal.entries(C, 0, Infinity).at(-1)!
+    const credit = (await ctx.emulator.journal.entries(C, 0, Infinity)).at(-1)!
     const c = await ok(`/accounts/${C}/transactions/${credit.servicerRef}`, 'accounts-transaction.response', U2.code)
     assert.equal(c.CreditDebitIndicator, 'Credit')
     assert.deepEqual(c.DebtorAccount, { Identification: A, Name: U1.name })

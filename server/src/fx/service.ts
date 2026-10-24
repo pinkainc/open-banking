@@ -107,7 +107,7 @@ export interface FxDeps {
   inbox: InboxStore
   clock: Clock
   bank: Bank
-  onBooking?: (c: Customer, b: Booking) => void
+  onBooking?: (c: Customer, b: Booking) => void | Promise<void>
 }
 
 /** "2021-12-15T23:59:59+02:00": the end of a Tallinn date, without milliseconds. */
@@ -334,7 +334,7 @@ export class FxService {
       bankTxCode: { domain: 'FORX', family: 'OTHR', subFamily: 'OTHR' },
     })
     for (const b of [leg('DBIT', o.amountFrom!, o.currencyFrom, servicerRef()), leg('CRDT', o.amountTo!, o.currencyTo, creditRef)]) {
-      this.d.onBooking?.(c, b)
+      await this.d.onBooking?.(c, b)
       await this.d.inbox.add({ customer: c, type: 'CREDIT_DEBIT_NOTIFICATION', body: camt054(b, c.camt054, this.d.bank) })
     }
   }

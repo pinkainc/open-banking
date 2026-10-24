@@ -11,6 +11,7 @@ import { PgLedger } from './pg/ledger.js'
 import { PgAgencyStore } from './pg/agency.js'
 import { PgAcquiringStore } from './pg/acquiring.js'
 import { PgRailsPending } from './pg/rails-pending.js'
+import { PgJournal } from './pg/journal.js'
 import { OpenLedgerLedger } from './ledgers/open-ledger.js'
 import { HttpRails, railsCallbackApp } from './rails-http.js'
 import type { Scheme } from './rails.js'
@@ -73,6 +74,7 @@ const emulator = await Emulator.fromSeed(seed, {
   agency: db && ((clock, bounds) => new PgAgencyStore(db, clock, { namespace, bounds })),
   acquiring: db && ((clock, bounds) => new PgAcquiringStore(db, clock, { namespace, bounds })),
   railsPending: db && (() => new PgRailsPending(db, { namespace })),
+  journal: db && (() => new PgJournal(db, { namespace })),
   ledger: ledgerKind === 'open-ledger' ? new OpenLedgerLedger({ url: env.OPEN_LEDGER_URL!, namespace, secretKey: env.OPEN_LEDGER_KEY, timeoutMs })
     : ledgerKind === 'postgres' ? (clock) => new PgLedger(db!, { namespace, clock }) : undefined,
   xsdDir: existsSync(xsdDir) ? xsdDir : undefined,

@@ -146,6 +146,24 @@ create table if not exists rails_pending (
 `
 
 /** Serialises schema creation between processes connecting at once (as open-ledger's 815). */
+// The statements journal (decision 960): every booking, whole as JSON, with the columns
+// statements filter and sum on. Append-only like the ledger's postings.
+const JOURNAL_SCHEMA = `
+create sequence if not exists journal_seq;
+create table if not exists journal_entries (
+  ns        text   not null,
+  seq       bigint not null,
+  account   text   not null,
+  booked_at bigint not null,
+  direction text   not null,
+  currency  text   not null,
+  amount    bigint not null,
+  entry     jsonb  not null,
+  primary key (ns, seq)
+);
+create index if not exists journal_entries_account on journal_entries (ns, account, booked_at, seq);
+`
+
 const SCHEMA_LOCK = 4410
 
 /** Statements one by one: `create index if not exists` locks its table even when the index exists. */
@@ -173,7 +191,7 @@ export class PgDb {
     const c = await pool.connect()
     try {
       await c.query('select pg_advisory_lock($1)', [SCHEMA_LOCK])
-      for (const s of [INBOX_SCHEMA, LEDGER_SCHEMA, AGENCY_SCHEMA, ACQUIRING_SCHEMA, RAILS_SCHEMA].flatMap(statements)) await c.query(s)
+      for (const s of [INBOX_SCHEMA, LEDGER_SCHEMA, AGENCY_SCHEMA, ACQUIRING_SCHEMA, RAILS_SCHEMA, JOURNAL_SCHEMA].flatMap(statements)) await c.query(s)
     } finally {
       await c.query('select pg_advisory_unlock($1)', [SCHEMA_LOCK])
       c.release()

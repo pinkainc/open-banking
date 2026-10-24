@@ -11,7 +11,7 @@ import { normalizeIban } from '../iban.js'
 import { fromMinor, type Ledger } from '../ledger.js'
 import type { IncomingEvent, PaymentEngine } from '../payments/engine.js'
 import { isUkAccount } from '../routing.js'
-import type { Journal, JournalEntry } from '../statements/journal.js'
+import type { JournalEntry, JournalStore } from '../statements/journal.js'
 import { dateLondon } from '../time.js'
 import type { VibanRegistry } from '../viban/registry.js'
 
@@ -48,7 +48,7 @@ export interface HeldIncoming {
 }
 
 export interface AccountsDeps {
-  directory: Directory; ledger: Ledger; journal: Journal; viban: VibanRegistry; clock: Clock; bank: { bic: string }
+  directory: Directory; ledger: Ledger; journal: JournalStore; viban: VibanRegistry; clock: Clock; bank: { bic: string }
   engine: () => PaymentEngine
 }
 
@@ -132,14 +132,14 @@ export class AccountsService {
   // --- One transaction by reference -------------------------------------------------
 
   /** GET /accounts/{accountNumber}/transactions/{accountServicerReference}. */
-  transaction(customer: Customer, accountNumber: string, reference: string) {
+  async transaction(customer: Customer, accountNumber: string, reference: string) {
     const iban = normalizeIban(decodeURIComponent(accountNumber))
     // Master accounts of LHV UK only: a VIBAN, another's or an EE account is refused (decision 710).
     if (!isUkAccount(iban) || !customer.accounts.includes(iban)) throw denied()
     const ref = decodeURIComponent(reference).replace(/-/g, '').toUpperCase()
     if (!/^[0-9A-F]{32}$/.test(ref)) throw new JsonBodyError(404, NO_TRANSACTION)
     const now = this.deps.clock.now().getTime()
-    const booked = this.deps.journal.entries(iban, now - LOOKBACK_DAYS * DAY_MS, now + 1).filter((e) => e.servicerRef === ref)
+    const booked = (await this.deps.journal.entries(iban, now - LOOKBACK_DAYS * DAY_MS, now + 1)).filter((e) => e.servicerRef === ref)
     if (booked.length) return this.#bookedView(booked[booked.length - 1])
     const r = this.deps.engine().reserved(ref)
     if (r && r.account === iban) {

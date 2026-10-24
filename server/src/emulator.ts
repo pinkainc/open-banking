@@ -17,7 +17,7 @@ import { DEFAULT_EVENT_BOUNDS, UkWebhooks, type UkDeliver } from './webhooks/uk.
 import { SimulatorRails, type Rails } from './rails.js'
 import { normalizeIban } from './iban.js'
 import { servicerRef } from './ids.js'
-import { Journal } from './statements/journal.js'
+import { MemoryJournal, type JournalStore } from './statements/journal.js'
 import { AccountReports, type ReportsOptions } from './statements/reports.js'
 import { checkBankAddress, defaultBankAddress } from './statements/bank-address.js'
 import { VibanSchemas } from './viban/messages.js'
@@ -65,6 +65,8 @@ export interface EmulatorOptions {
   acquiring?: (clock: Clock, bounds: Bounds) => AcquiringStore
   /** Payments waiting at the rails for their outcome (decision 948); default in memory, PgRailsPending in Postgres. */
   railsPending?: () => RailsPending
+  /** The statements journal, every booking (decision 960); default in memory, PgJournal (pg/journal.ts) in Postgres. */
+  journal?: () => JournalStore
   memory?: { tombstones?: Partial<Bounds>; msgIds?: Partial<Bounds>; processed?: Partial<Bounds>; requests?: Partial<Bounds>; incoming?: Partial<Bounds>; webhookEvents?: Partial<Bounds>; bacs?: Partial<typeof BACS_BOUNDS>; agency?: Partial<Bounds> }
 }
 
@@ -82,7 +84,7 @@ export class Emulator {
   readonly requests: RequestLog
   readonly engine: PaymentEngine
   readonly bank: Bank
-  readonly journal = new Journal()
+  readonly journal: JournalStore
   readonly reports: AccountReports
   readonly viban: VibanService
   readonly directDebit: DirectDebitService
@@ -105,6 +107,7 @@ export class Emulator {
     this.clock = opts.clock ?? systemClock
     this.ledger = typeof opts.ledger === 'function' ? opts.ledger(this.clock) : opts.ledger ?? new MemoryLedger()
     this.rails = opts.rails ?? new SimulatorRails()
+    this.journal = opts.journal?.() ?? new MemoryJournal()
     const tombstones = { ...DEFAULT_BOUNDS.tombstones, ...opts.memory?.tombstones }
     const msgIds = { ...DEFAULT_BOUNDS.msgIds, ...opts.memory?.msgIds }
     const processed = { ...DEFAULT_BOUNDS.processed, ...opts.memory?.processed }
@@ -128,24 +131,24 @@ export class Emulator {
     }, { ...DEFAULT_INCOMING, ...opts.memory?.incoming })
     this.engine = new PaymentEngine(this.directory, this.ledger, this.rails, this.inbox, this.clock, this.bank, {
       strictIban: opts.strictIban, pain00103Until: opts.pain00103Until ?? '2026-11-15', xsd, virtual: this.viban.registry, msgIds,
-      onBooking: (_c, b) => { this.journal.record(b) }, limits: (c) => this.reports.paymentLimits(c),
+      onBooking: async (_c, b) => { await this.journal.record(b) }, limits: (c) => this.reports.paymentLimits(c),
       onIncoming: (e) => this.accounts.onIncoming(e), agency: () => this.agency?.accounts, pending: opts.railsPending?.(),
     })
     // Outcomes the rails deliver later and credits from the scheme come in here (decision 930).
     this.rails.listen({ outcome: (ref, o) => this.engine.settle(ref, o), credit: (c) => this.engine.received(c) })
     this.directDebit = new DirectDebitService({
       directory: this.directory, ledger: this.ledger, rails: this.rails, inbox: this.inbox, clock: this.clock, bank: this.bank,
-      xsd, virtual: this.viban.registry, strictIban: opts.strictIban, onBooking: (_c, b) => { this.journal.record(b) }, msgIds,
+      xsd, virtual: this.viban.registry, strictIban: opts.strictIban, onBooking: async (_c, b) => { await this.journal.record(b) }, msgIds,
     })
     this.fx = new FxService({
       directory: this.directory, ledger: this.ledger, inbox: this.inbox, clock: this.clock, bank: this.bank,
-      onBooking: (_c, b) => { this.journal.record(b) },
+      onBooking: async (_c, b) => { await this.journal.record(b) },
     })
     this.contracts = new Contracts(this.directory, this.clock)
     this.payee = new PayeeService({ directory: this.directory, viban: this.viban.registry, inbox: this.inbox, clock: this.clock, agency: () => this.agency?.accounts })
     this.bacs = new BacsService({
       directory: this.directory, ledger: this.ledger, rails: this.rails, inbox: this.inbox, clock: this.clock, bank: this.bank, virtual: this.viban.registry,
-      onBooking: (_c, b) => { this.journal.record(b) }, onIncoming: (e) => this.accounts.onIncoming(e),
+      onBooking: async (_c, b) => { await this.journal.record(b) }, onIncoming: (e) => this.accounts.onIncoming(e),
       credit: (p) => this.engine.incoming(p),
     }, opts.memory?.bacs)
     this.agency = new Agency({ directory: this.directory, inbox: this.inbox, clock: this.clock, bank: this.bank }, opts.memory?.agency, opts.agency)
@@ -203,7 +206,7 @@ export class Emulator {
     const ref = servicerRef()
     const minor = toMinor(amount)
     await this.ledger.transfer({ ref, from: FUNDING, to: n, amount: minor, currency })
-    this.journal.record({
+    await this.journal.record({
       account: n, owner: { name: owner.name, code: owner.code }, direction: 'CRDT', amount: minor, currency,
       servicerRef: ref, scheme: 'INTERNAL', bookedAt: this.clock.now(),
       counterparty: { name: this.bank.name, bic: this.bank.bic }, remittance: 'Simulator funding',
