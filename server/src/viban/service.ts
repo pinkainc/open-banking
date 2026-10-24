@@ -14,7 +14,7 @@ import type { Clock } from '../clock.js'
 import { keyOf, type CustomerKey, type DirectoryStore } from '../directory.js'
 import { normalizeIban } from '../iban.js'
 import type { InboxStore } from '../inbox.js'
-import { memoryKeyed, type KeyedFactory } from '../keyed.js'
+import { memoryKeyed, UNBOUNDED, type KeyedFactory, type KeyedStore } from '../keyed.js'
 import { dateTallinn } from '../time.js'
 import { parseXml } from '../xml.js'
 import { isCountry } from './countries.js'
@@ -61,19 +61,33 @@ export const BULK_MAX = 1000
 
 export class VibanService {
   readonly registry: VibanRegistry
-  errorDelivery: ErrorDelivery
-  /** Holder names the simulated background check flags: their VIBANs stay ON_HOLD. */
-  readonly screening = new Set<string>()
-  /** The next requests answered TECHNICAL_ERROR (simulator fault injection). */
-  faults = 0
+  /** The delivery when /_sim/viban/errors has not set one (EmulatorOptions.vibanErrors). */
+  readonly #errorDelivery: ErrorDelivery
+  /**
+   * The /_sim/viban settings (decision 989), kind viban-sim: `screening` (holder names the
+   * simulated background check flags, lower case: their VIBANs stay ON_HOLD), `faults` (the
+   * next requests answered TECHNICAL_ERROR) and `errors` (the error delivery).
+   */
+  readonly #sim: KeyedStore<string[] | number | ErrorDelivery>
 
   /** The service's operations in this process, one after the other (decision 984). */
   #queue: Promise<unknown> = Promise.resolve()
 
   constructor(private directory: DirectoryStore, private inbox: InboxStore, private clock: Clock, private opts: VibanOptions = {}) {
     this.registry = new VibanRegistry(opts.range ?? DEFAULT_RANGE, async (iban) => !!(await directory.ownerOf(iban)), opts.keyed ?? memoryKeyed(clock))
-    this.errorDelivery = opts.errors ?? 'inbox'
+    this.#errorDelivery = opts.errors ?? 'inbox'
+    this.#sim = (opts.keyed ?? memoryKeyed(clock))('viban-sim', UNBOUNDED)
   }
+
+  /** How business errors are delivered: "inbox" or "sync" (/_sim/viban/errors, else the option). */
+  async errorDelivery(): Promise<ErrorDelivery> { return ((await this.#sim.get('errors')) as ErrorDelivery | undefined) ?? this.#errorDelivery }
+  async setErrorDelivery(d: ErrorDelivery) { await this.#sim.set('errors', d) }
+  /** The screening list, lower case. */
+  async screening(): Promise<string[]> { return ((await this.#sim.get('screening')) as string[] | undefined) ?? [] }
+  /** Replaces the screening list. */
+  async setScreening(names: string[]) { await this.#sim.set('screening', [...new Set(names.map((n) => n.toLowerCase()))]) }
+  /** The next `count` requests fail with TECHNICAL_ERROR. */
+  setFaults(count: number): Promise<void> { return this.#serial(() => this.#sim.set('faults', count)) }
 
   #serial<T>(f: () => Promise<T>): Promise<T> {
     const run = this.#queue.then(f, f)
@@ -86,7 +100,8 @@ export class VibanService {
   async #handle(op: Op, body: string, customer: CustomerKey): Promise<Outcome> {
     const type = RESPONSE_TYPE[op]
     const fail = (...errors: VibanError[]): Outcome => ({ type, errors })
-    if (this.faults > 0) { this.faults--; return fail(E.technical) }
+    const faults = ((await this.#sim.get('faults')) as number | undefined) ?? 0
+    if (faults > 0) { await this.#sim.set('faults', faults - 1); return fail(E.technical) }
     try {
       let doc: any
       try { doc = parseXml(body) } catch { return fail(E.request) }
@@ -140,9 +155,10 @@ export class VibanService {
   }
 
   /** The simulated background check: ACTIVE unless a holder name is on the screening list. */
-  #screen(u: VibanUser): VibanStatus {
+  async #screen(u: VibanUser): Promise<VibanStatus> {
     const names = [holderName(u), u.company?.Representative.Name].filter((n): n is string => !!n).map((n) => n.toLowerCase())
-    return names.some((n) => this.screening.has(n)) ? 'ON_HOLD' : 'ACTIVE'
+    const flagged = new Set(await this.screening())
+    return names.some((n) => flagged.has(n)) ? 'ON_HOLD' : 'ACTIVE'
   }
 
   async #open(r: VibanRequest, master: string, owner: CustomerKey): Promise<Outcome> {
@@ -153,7 +169,7 @@ export class VibanService {
       iban: await this.registry.generate(master), master, owner: { code: owner.code, country: owner.country },
       status: 'PENDING', clientReference: r.clientReference, user: r.user, createdAt: now,
     })
-    await this.registry.setStatus(v, this.#screen(r.user!), now)
+    await this.registry.setStatus(v, await this.#screen(r.user!), now)
     return { type, body: openResponse(v) }
   }
 
@@ -179,7 +195,7 @@ export class VibanService {
       v.clientReference = r.clientReference
     }
     v.user = r.user // block replace
-    await this.registry.setStatus(v, this.#screen(r.user!), this.clock.now())
+    await this.registry.setStatus(v, await this.#screen(r.user!), this.clock.now())
     return { type, body: modifyResponse(v) }
   }
 

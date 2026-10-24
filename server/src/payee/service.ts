@@ -7,7 +7,8 @@
 // simulator registered for another bank (`/_sim/payee/accounts`, which can also force an
 // answer). Nothing else is remembered.
 import type { AgencyStore } from '../agency/store.js'
-import { BoundedMap, type Bounds } from '../bounded.js'
+import type { Bounds } from '../bounded.js'
+import { memoryKeyed, type KeyedFactory, type KeyedStore } from '../keyed.js'
 import type { Clock } from '../clock.js'
 import type { CustomerKey, DirectoryStore } from '../directory.js'
 import { errorsXml } from '../errors.js'
@@ -86,6 +87,8 @@ export interface PayeeDeps {
   directory: DirectoryStore; viban: VibanRegistry; inbox: InboxStore; clock: Clock
   /** Synchronised agency accounts: LHV answers for them too (decision 836). */
   agency?: () => AgencyStore | undefined
+  /** Where the simulated accounts are kept (decision 989); default in memory. */
+  keyed?: KeyedFactory
 }
 
 export const DEFAULT_PAYEE_ACCOUNTS: Bounds = { max: 10_000 }
@@ -105,9 +108,10 @@ const IBAN_PATTERN = /^[A-Z]{2}[0-9]{2}[a-zA-Z0-9]{1,30}$/
 const BIC_PATTERN = /^[A-Z0-9]{4}[A-Z]{2}[A-Z0-9]{2}([A-Z0-9]{3})?$/
 
 export class PayeeService {
-  readonly accounts: BoundedMap<string, SimAccount>
+  /** The /_sim/payee accounts by IBAN or BBAN (kind payee-accounts); `take` removes one. */
+  readonly accounts: KeyedStore<SimAccount>
   constructor(private deps: PayeeDeps, bounds: Bounds = DEFAULT_PAYEE_ACCOUNTS) {
-    this.accounts = new BoundedMap(deps.clock, bounds)
+    this.accounts = (deps.keyed ?? memoryKeyed(deps.clock))('payee-accounts', bounds)
   }
 
   /** The bank's own holder of an IBAN: a customer's account or an ACTIVE, named VIBAN. */
@@ -130,8 +134,8 @@ export class PayeeService {
   async lookup(account: { iban?: string; bban?: string }): Promise<Found> {
     const iban = account.iban ? normalizeIban(account.iban) : undefined
     const bban = account.bban ?? (iban ? gbBban(iban) : undefined)
-    const sim = (iban ? this.accounts.get(iban) : undefined) ?? (bban ? this.accounts.get(bban) : undefined)
-      ?? (bban && !iban ? this.accounts.entries().find(([k]) => gbBban(k) === bban)?.[1] : undefined)
+    const sim = (iban ? await this.accounts.get(iban) : undefined) ?? (bban ? await this.accounts.get(bban) : undefined)
+      ?? (bban && !iban ? (await this.accounts.entries()).find(([k]) => gbBban(k) === bban)?.[1] : undefined)
     let own = iban ? await this.#ownHolder(iban) : undefined
     if (!own && bban && !iban) {
       const match = (i: string) => gbBban(i) === bban

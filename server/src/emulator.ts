@@ -157,7 +157,7 @@ export class Emulator {
       onBooking: async (_c, b) => { await this.journal.record(b) }, keyed,
     })
     this.contracts = new Contracts(this.directory, this.clock, keyed)
-    this.payee = new PayeeService({ directory: this.directory, viban: this.viban.registry, inbox: this.inbox, clock: this.clock, agency: () => this.agency?.accounts })
+    this.payee = new PayeeService({ directory: this.directory, viban: this.viban.registry, inbox: this.inbox, clock: this.clock, agency: () => this.agency?.accounts, keyed })
     this.bacs = new BacsService({
       directory: this.directory, ledger: this.ledger, rails: this.rails, inbox: this.inbox, clock: this.clock, bank: this.bank, virtual: this.viban.registry,
       onBooking: async (_c, b) => { await this.journal.record(b) }, onIncoming: (e) => this.accounts.onIncoming(e),

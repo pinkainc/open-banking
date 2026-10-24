@@ -18,7 +18,7 @@ export function registerViban(app: FastifyInstance, emulator: Emulator, caller: 
       const c = await caller(req)
       const body = typeof req.body === 'string' ? req.body : ''
       const out = await emulator.viban.handle(op, body, c.customer)
-      if ('errors' in out && emulator.viban.errorDelivery === 'sync') {
+      if ('errors' in out && (await emulator.viban.errorDelivery()) === 'sync') {
         const codes = out.errors.map((e) => e.code)
         const status = codes.includes('FORBIDDEN') ? 403 : codes.includes('TECHNICAL_ERROR') ? 500 : 400
         return reply.code(status).type('application/xml').send(errorsXml(out.errors))
@@ -59,9 +59,8 @@ export function vibanSimRoutes(emulator: Emulator) {
     app.post('/screening', async (req) => {
       const names = (req.body as { names?: unknown } | undefined)?.names
       if (!Array.isArray(names) || names.some((n) => typeof n !== 'string')) throw bad('names must be an array of strings')
-      svc.screening.clear()
-      for (const n of names as string[]) svc.screening.add(n.toLowerCase())
-      return { names: [...svc.screening] }
+      await svc.setScreening(names as string[])
+      return { names: await svc.screening() }
     })
 
     app.post('/agreements', async (req) => {
@@ -76,7 +75,7 @@ export function vibanSimRoutes(emulator: Emulator) {
     app.post('/fault', async (req) => {
       const count = (req.body as { count?: number } | undefined)?.count ?? 1
       if (!Number.isInteger(count) || count < 0) throw bad('count must be a non-negative integer')
-      svc.faults = count
+      await svc.setFaults(count)
       return { count }
     })
 
@@ -84,7 +83,7 @@ export function vibanSimRoutes(emulator: Emulator) {
     app.post('/errors', async (req) => {
       const delivery = (req.body as { delivery?: string } | undefined)?.delivery
       if (delivery !== 'inbox' && delivery !== 'sync') throw bad('delivery must be "inbox" or "sync"')
-      svc.errorDelivery = delivery
+      await svc.setErrorDelivery(delivery)
       return { delivery }
     })
   }

@@ -58,7 +58,7 @@ export function payeeSimRoutes(emulator: Emulator) {
     return k
   }
   return async (app: FastifyInstance) => {
-    app.get('/accounts', async () => ({ accounts: emulator.payee.accounts.entries().map(([k, a]) => view(k, a)) }))
+    app.get('/accounts', async () => ({ accounts: (await emulator.payee.accounts.entries()).map(([k, a]) => view(k, a)) }))
 
     // { name?, category?: PERSONAL|BUSINESS, answer?: FULL_MATCH|…|MTCH|…|ACCP|… }
     app.put('/accounts/:account', async (req) => {
@@ -77,13 +77,13 @@ export function payeeSimRoutes(emulator: Emulator) {
         ...(b.category !== undefined ? { category: b.category as Category } : {}),
         ...(b.answer !== undefined ? { answer: b.answer as string } : {}),
       }
-      emulator.payee.accounts.set(account, a)
+      await emulator.payee.accounts.set(account, a)
       return view(account, a)
     })
 
     app.delete('/accounts/:account', async (req, reply) => {
       const account = key((req.params as { account: string }).account)
-      if (!emulator.payee.accounts.delete(account)) throw new ConnectError(404, 'NOT_FOUND', `no simulated account ${account}`)
+      if (!(await emulator.payee.accounts.take(account))) throw new ConnectError(404, 'NOT_FOUND', `no simulated account ${account}`)
       return reply.code(204).send()
     })
   }
