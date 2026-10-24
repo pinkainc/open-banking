@@ -99,9 +99,10 @@ Legend: `[x]` done · `[ ]` open · `[~]` in progress · `(?)` needs a sandbox r
 - [x] Agency, acquiring, statements journal, payment engine state (duplicates, parked, limits), SEPA DD MsgIds in Postgres (S7, 940–947, 960–966)
 - [x] Remaining business state in Postgres: customers and accounts, DD collections, Bacs, FX, contracts, VIBANs, webhooks, UK account reports, request log, idempotency keys, payee sim (S7b, 970–989)
 - [x] Ledger outbox (906, 916) and idempotent bookings by key (S7b, 990–999)
-- [ ] After a crash a file round's pain.002 and parked-payment decision reports are not resent; a DD rejection report (nothing booked) can be lost (999)
-- [ ] Two emulators writing the same VIBAN, FX pricing, webhook config or `/_sim/viban` fault at once: last write wins (984, 987, 989)
-- [ ] A return of our own outgoing payment arrives as a plain `credit` without RtrInf; recall-return camt.054 carries no VIBAN/agency party (1000–1001)
+- [x] After a crash a file round's pain.002 and parked-payment decision reports are resent once; a DD rejection report kept in the outbox (S7c, 1005–1007)
+- [x] Two emulators writing the same VIBAN, FX pricing, webhook config or `/_sim/viban` fault: compare-and-set / `updateKeyed` / `claimName`; pg-contracts flake fixed (S7c, 1008–1013)
+- [x] Returns of our own payments as rails `payment.returned` (camt.054 per LHV return sample), recall-return camt.054 with the VIBAN/agency party (S7c, 1014–1016, sandbox question 90)
+- [ ] Still open from S7c: a crash during a file's checks loses the file (MsgId seen, nothing planned); a crash after a round's report and before rails leaves an external payment ACSP and reserved; later rounds (immediate rails outcomes) have no plan; payments settled before 1014 cannot be returned (1005, 1014)
 - [x] Rails: DD returns and recalls (camt.056), reconciliation `GET /payments/{ref}` after a timeout, first stored outcome wins (S7b, 1000–1003)
 - [x] `OPEN_BANKING_STORE=deferred` is the fourth step of `npm run check` (S7b, 1004)
 - [ ] Conformance harness: record exchanges against connect.test.lhv.eu once a sandbox certificate exists, divergences file → S8
@@ -180,3 +181,11 @@ Promjene ponašanja iz S7b (2026-10-24, korisnik budan, paket odobren; pogledati
 - [ ] 987 prvi pokušaj UK webhooka čeka da se zahtjev upiše u request log (do 5 s)
 - [ ] 1002 `POST` prema bridgeu koji istekne više nije odmah RJCT nego ACSP i rekonsilijacija; bridge nakon 404 mora odbiti zakašnjeli `POST`
 - [ ] 1001 opoziv (camt.056): DUPL / TECH / FRAD vraćaju se odmah, inače NOOR / ARDT / AM04 / NOAS
+
+Promjene ponašanja iz S7c (2026-10-25, autonomno, paket odobren; pogledati):
+
+- [ ] 1005 krug datoteke: sve transakcije se prvo provjere, plan kruga ide u outbox prije knjiženja; recovery dovrši prekinuti krug, timer ostavlja krugove 10 min
+- [ ] 1006 ref naveden dvaput u jednoj odluci o parkiranim plaćanjima odlučuje se jednom
+- [ ] 1009 VIBAN clientReference jedinstven preko emulatora (`viban-client-refs`); gubitnik dobiva „must be unique”
+- [ ] 1011–1012 UK webhook: jedan config po vlasniku i tipu (400 za zauzet tip), `update` spaja polja; EE subscribe na isti URL daje istu pretplatu
+- [ ] 1014 povrat vlastitog plaćanja: camt.054 po LHV uzorku „Credit Notification (Return)” (RvslInd, PMNT/RCDT/OTHR, RtrInf NARR + kod + `ORIG:<ref>`), ne ISO PMNT/ICDT/RRTN; djelomičan povrat dopušten, jedan po plaćanju; returnRef i MsgId nisu u camt.054

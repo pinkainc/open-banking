@@ -278,6 +278,23 @@ Glavna sesija je orkestrirala sedam agenata strogo jednog za drugim (bez worktre
 - Svi agenti su završili ispod guarda (185k–234k) s jednim do pet manjih područja po agentu. E i F su bili najbliže granici jer su dirali sva mjesta knjiženja.
 - `deferred` je korak checka paralelno s memory i Postgres runom, pa check traje oko 1 min 40 s umjesto 80 s.
 
+## S7c: otvorene core stavke (2026-10-25, danju)
+
+Sandbox certifikata još nema, pa je korisnik umjesto S8 izabrao tri otvorene stavke iz „Core and conformance” i pustio rad autonomno. Tri agenta strogo jedan za drugim, Opus 5.5, effort high, svaki implementira i testira.
+
+| Agent | Poziva | Tokena | Ishod |
+|---|---|---|---|
+| 1 pain.002 kruga nakon pada | 53 | 180k | plan kruga u outboxu prije knjiženja, recovery dovrši krug, `payment-decided` za parkirane odluke, DD RJCT u outboxu, 829 ×2 (1005–1007) |
+| 2 last-write-wins | 57 | 151k | `replace(key, value, expected)`, `updateKeyed`, `claimName`; svaki slučaj prvo reproduciran testom s dva emulatora; uzrok flakea u `pg-contracts` (seed ugovora), 847 ×2 (1008–1013) |
+| 3 povrat vlastitog plaćanja | 66 | 173k | `payment.returned`, `payment-settled` zapis kroz outbox pri namiri, camt.054 po LHV uzorku povrata umjesto ISO koda, party na recall debitu, pitanje 90, 857 ×2 + 715 (1014–1016) |
+
+Što se pokazalo:
+
+- Jedno područje po agentu staje u 150–180k, dakle ispod S7b agenata s više područja.
+- Uputa „prvo reproduciraj, pa popravi” je radila: agent 2 je za svako mjesto imao crveni test prije popravka i našao pravi uzrok flakea, a ne samo dulji timeout.
+- Prvi check nakon agenta 1 pao je na jednom memory testu (log se prepisao); dva ponovljena checka bila su zelena. Brief agenta 2 dobio je flake kao sporedni zadatak i pokazalo se da je bio stvaran.
+- Agent 3 je odstupio od briefa gdje je dokumentacija imala uzorak (PMNT/RCDT/OTHR s RvslInd umjesto ISO PMNT/ICDT/RRTN): dokumentacija ima prednost pred pretpostavkom u briefu.
+
 ## Noćni lanac: `scripts/overnight.sh` (2026-10-24)
 
 S3–S7 su odrađeni bez čovjeka, od 01:03 do 06:18. Svaku sesiju je pokrenula shell petlja kao

@@ -1,4 +1,4 @@
-# Handoffi za sesije S1–S8 (i S7b)
+# Handoffi za sesije S1–S8 (i S7b, S7c)
 
 Plan je u `docs/2026-10-23-plan-do-paritete.md`. Svaka sesija ima svoj handoff `SN.md`.
 Korisnik nakon `/clear` kaže „nastavi zadnji handoff” ili zalijepi prompt iz clipboarda.
@@ -39,6 +39,7 @@ povijest.
 | S6 | L6 agency + ostatak | gotovo | e3b395a | 57/58 | 602 | noćni rad; odluke 800–813, 820–849 (većina „potvrditi”), pitanja 77–86; katalog pokriven (`payment.oneoff` namjerni 404); partner-site PSP primjeri nisu replayani |
 | S7 | Trajnost i jezgra | gotovo | 9ce3088 | 57/58 | 745 ×2 + 21 | noćni rad; odluke 900–968 (većina „potvrditi”), pitanje 87; suite na memoryju i Postgresu, open-ledger kao `Ledger`, async `Rails` + `HttpRails`; partner PSP primjeri replayani; ostatak stanja u S7b (odluka 968) |
 | S7b | Ostatak trajnog stanja | gotovo | 5496d3e | 57/58 | 817 ×2 + 690 + 27 | danju, 7 agenata; odluke 970–1004, pitanja 88–89; outbox i idempotentna knjiženja, `deferred` kao 4. korak checka |
+| S7c | Otvorene core stavke | gotovo | 4cc1df6 | 57/58 | 857 ×2 + 715 + 27 | danju, 3 agenta; odluke 1005–1016, pitanje 90; pain.002 kruga nakon pada, compare-and-set preko emulatora, `payment.returned` |
 | S8 | Conformance harness | blokirano | | | | treba sandbox certifikat |
 
 ## Zajednička pravila (vrijede u svakoj sesiji)

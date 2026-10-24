@@ -24,11 +24,12 @@ firme, odluka korisnika). Zato:
 - nova pitanja za sandbox dopisuju se u `sandbox-questions.md` (mirror repo, lokalno,
   nikad ne pushati).
 
-## Gdje smo (2026-10-24, nakon S7b)
+## Gdje smo (2026-10-25, nakon S7c)
 
-S1–S7b gotovi (`5496d3e`): katalog pokriven 57/58 (`payment.oneoff` namjerni 404), 817 testova
-na memory storeu i 817 na Postgresu, 690 na deferred storeu, plus 27 protiv pravog open-ledgera;
-sandbox pitanja do 89. Restart na istom namespaceu ne gubi poslovno stanje (odluke 970–1004).
+S1–S7c gotovi (`4cc1df6`): katalog pokriven 57/58 (`payment.oneoff` namjerni 404), 857 testova
+na memory storeu i 857 na Postgresu, 715 na deferred storeu, plus 27 protiv pravog open-ledgera;
+sandbox pitanja do 90. Restart na istom namespaceu ne gubi poslovno stanje (odluke 970–1004), krug
+datoteke se nastavlja nakon pada, a zapisi dvaju emulatora ne gube se (odluke 1005–1016).
 Lanac stoji: S8 čeka sandbox certifikat.
 
 ## Polazno stanje (commit `bcc23e0`)
