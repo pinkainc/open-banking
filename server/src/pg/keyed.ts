@@ -59,10 +59,12 @@ export class PgKeyed<V> implements KeyedStore<V> {
     return row.value as V
   }
 
-  async replace(key: string, value: V) {
+  async replace(key: string, value: V, expected?: V) {
+    // With expected: a compare-and-set (decision 1008); jsonb equality ignores key order.
     const r = await this.db.pool.query(
-      'update keyed_entries set value = $4 where ns = $1 and kind = $2 and key = $3 and (until is null or until > $5)',
-      [this.namespace, this.kind, key, JSON.stringify(value), this.#now()])
+      `update keyed_entries set value = $4 where ns = $1 and kind = $2 and key = $3 and (until is null or until > $5)
+         and ($6::jsonb is null or value = $6::jsonb)`,
+      [this.namespace, this.kind, key, JSON.stringify(value), this.#now(), expected === undefined ? null : JSON.stringify(expected)])
     return r.rowCount === 1
   }
 

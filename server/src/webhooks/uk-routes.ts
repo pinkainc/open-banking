@@ -142,7 +142,9 @@ export function registerUkWebhooks(app: FastifyInstance, emulator: Emulator, cal
     if (input.messageType !== undefined && input.messageType !== cfg.messageType && await hooks.forType(c.customer, input.messageType)) {
       throw bad(`A webhook configuration for messageType ${input.messageType} already exists`)
     }
-    return json(reply, configView(await hooks.update(cfg, input), true))
+    const updated = await hooks.update(cfg, input)
+    if (!updated) throw bad(`A webhook configuration for messageType ${input.messageType} already exists`)
+    return json(reply, configView(updated, true))
   })
 
   app.delete('/notifications/subscription/:ref', async (req, reply) => {

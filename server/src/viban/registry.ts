@@ -16,7 +16,7 @@
 import { systemClock } from '../clock.js'
 import { keyOf, type CustomerKey } from '../directory.js'
 import { makeIban, normalizeIban } from '../iban.js'
-import { memoryKeyed, UNBOUNDED, type KeyedFactory, type KeyedStore } from '../keyed.js'
+import { claimName, memoryKeyed, UNBOUNDED, type KeyedFactory, type KeyedStore } from '../keyed.js'
 
 export type VibanStatus = 'ACTIVE' | 'PENDING' | 'ON_HOLD' | 'CLOSED' | 'REJECTED' | 'BLOCKED'
 
@@ -93,6 +93,8 @@ const decode = (s: StoredViban): Viban => {
   return v
 }
 
+const refKey = (owner: CustomerKey, ref: string) => `${keyOf(owner)}|${ref}`
+
 export class VibanRegistry implements VirtualAccounts {
   /** Every VIBAN by its IBAN, in the order they were made. */
   #vibans: KeyedStore<StoredViban>
@@ -100,6 +102,10 @@ export class VibanRegistry implements VirtualAccounts {
   #numbers: KeyedStore<true>
   /** The master account agreements: true signed, false ended (kept, so the seed does not sign it again). */
   #agreements: KeyedStore<boolean>
+  /** Each clientReference taken, by `<owner key>|<reference>`: the VIBAN's IBAN (decision 1009). */
+  #refs: KeyedStore<string>
+  /** The stored form each VIBAN handed out was read from, for save's compare-and-set. */
+  #read = new WeakMap<Viban, StoredViban>()
   #serial = 0
 
   constructor(
@@ -109,6 +115,13 @@ export class VibanRegistry implements VirtualAccounts {
     this.#vibans = keyed('vibans', UNBOUNDED)
     this.#numbers = keyed('viban-numbers', UNBOUNDED)
     this.#agreements = keyed('viban-agreements', UNBOUNDED)
+    this.#refs = keyed('viban-client-refs', UNBOUNDED)
+  }
+
+  #read1(s: StoredViban): Viban {
+    const v = decode(s)
+    this.#read.set(v, s)
+    return v
   }
 
   /**
@@ -125,9 +138,9 @@ export class VibanRegistry implements VirtualAccounts {
   /** The VIBAN (a copy: change it with setStatus or save). */
   async get(iban: string): Promise<Viban | undefined> {
     const s = await this.#vibans.get(normalizeIban(iban))
-    return s && decode(s)
+    return s && this.#read1(s)
   }
-  async all(): Promise<Viban[]> { return (await this.#vibans.entries()).map(([, s]) => decode(s)) }
+  async all(): Promise<Viban[]> { return (await this.#vibans.entries()).map(([, s]) => this.#read1(s)) }
 
   async byClientReference(owner: CustomerKey, ref: string): Promise<Viban | undefined> {
     const k = keyOf(owner)
@@ -156,19 +169,45 @@ export class VibanRegistry implements VirtualAccounts {
   }
 
   async add(v: Viban): Promise<Viban> {
-    await this.#vibans.set(v.iban, encode(v))
+    const s = encode(v)
+    await this.#vibans.set(v.iban, s)
+    this.#read.set(v, s)
+    if (v.clientReference) await this.#refs.add(refKey(v.owner, v.clientReference), v.iban)
     return v
   }
 
-  /** Stores a changed VIBAN. */
-  async save(v: Viban) { await this.#vibans.replace(v.iban, encode(v)) }
+  /**
+   * Stores a changed VIBAN unless it was changed elsewhere since it was read (get, all, add):
+   * a compare-and-set, so of two emulators changing one VIBAN at once one stores and the
+   * other gets false and reads it again (decision 1009). A VIBAN not read here is stored as is.
+   */
+  async save(v: Viban): Promise<boolean> {
+    const s = encode(v)
+    if (!(await this.#vibans.replace(v.iban, s, this.#read.get(v)))) return false
+    this.#read.set(v, s)
+    return true
+  }
 
-  /** Moves a VIBAN to a status, stamping the activation and closing dates, and stores it. */
-  async setStatus(v: Viban, status: VibanStatus, at: Date) {
+  /** Moves a VIBAN to a status, stamping the activation and closing dates, and stores it (save). */
+  async setStatus(v: Viban, status: VibanStatus, at: Date): Promise<boolean> {
     v.status = status
     if (status === 'ACTIVE' && !v.activatedAt) v.activatedAt = at
     if (status === 'CLOSED') v.closedAt = at
-    await this.save(v)
+    return this.save(v)
+  }
+
+  /**
+   * Takes an owner's clientReference for a VIBAN, once for the namespace (decisions 1009,
+   * 1012): whether it is this VIBAN's now. A closed VIBAN keeps its reference.
+   */
+  async claimReference(owner: CustomerKey, ref: string, iban: string): Promise<boolean> {
+    const shows = async (holder: string) => (await this.get(holder))?.clientReference === ref
+    return (await claimName(this.#refs, refKey(owner, ref), iban, shows)) === iban
+  }
+  /** Gives a reference back when the change that took it was not stored. */
+  async releaseReference(owner: CustomerKey, ref: string, iban: string) {
+    const k = refKey(owner, ref)
+    if ((await this.#refs.get(k)) === iban) await this.#refs.take(k)
   }
 
   async resolve(iban: string): Promise<VirtualAccount | undefined> {

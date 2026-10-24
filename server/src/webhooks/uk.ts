@@ -17,7 +17,7 @@ import { DAY_MS, type Clock } from '../clock.js'
 import { keyOf, type CustomerKey, type DirectoryStore } from '../directory.js'
 import { requestRecorded } from '../ids.js'
 import type { InboxStore, Message } from '../inbox.js'
-import { memoryKeyed, UNBOUNDED, type KeyedFactory, type KeyedStore } from '../keyed.js'
+import { claimName, memoryKeyed, UNBOUNDED, updateKeyed, type KeyedFactory, type KeyedStore } from '../keyed.js'
 import { messageMetadata } from '../metadata.js'
 import { isoLondon } from '../time.js'
 
@@ -211,6 +211,8 @@ export class UkWebhooks {
   readonly #events: KeyedStore<StoredEvent>
   /** One attempt of an event at a time, across emulators on a namespace (decision 986). */
   readonly #claims: KeyedStore<true>
+  /** The message type each owner has a configuration of, `<owner key>|<type>` → its subscriptionReference (decision 1012). */
+  readonly #types: KeyedStore<string>
   #queue: Promise<unknown> = Promise.resolve()
   #inflight = new Set<Promise<unknown>>()
   deliver: UkDeliver
@@ -227,6 +229,7 @@ export class UkWebhooks {
     this.#configs = keyed('uk-webhook-configs', UNBOUNDED)
     this.#events = keyed('uk-webhook-events', opts.events ?? DEFAULT_EVENT_BOUNDS)
     this.#claims = keyed('uk-webhook-claims', { ttlMs: CLAIM_MS, max: 100_000 })
+    this.#types = keyed('uk-webhook-types', UNBOUNDED)
     inbox.onAdd((m) => this.#onMessage(m))
   }
 
@@ -262,12 +265,28 @@ export class UkWebhooks {
     return (await this.list(owner)).find((c) => c.messageType === messageType)
   }
 
+  /**
+   * Takes an owner's message type for a configuration, once for the namespace (decision
+   * 1012): whether it is this configuration's now.
+   */
+  async #claimType(owner: CustomerKey, messageType: string, ref: string): Promise<boolean> {
+    const shows = async (holder: string) => (await this.#config(holder))?.messageType === messageType
+    return (await claimName(this.#types, `${keyOf(owner)}|${messageType}`, ref, shows)) === ref
+  }
+  async #releaseType(owner: CustomerKey, messageType: string, ref: string) {
+    const k = `${keyOf(owner)}|${messageType}`
+    if ((await this.#types.get(k)) === ref) await this.#types.take(k)
+  }
+
   /** A new configuration; the caller has checked the mandatory fields. Undefined: the owner has one of that type. */
   create(owner: CustomerKey, input: ConfigInput & Pick<Config, 'messageType' | 'requestUrl' | 'active'>): Promise<Config | undefined> {
     return this.#serial(async () => {
       if (await this.forType(owner, input.messageType)) return undefined
+      const subscriptionReference = randomUUID()
+      // The type is taken before the configuration is stored: of two emulators at once, one makes it.
+      if (!(await this.#claimType(owner, input.messageType, subscriptionReference))) return undefined
       const c: Config = {
-        subscriptionReference: randomUUID(),
+        subscriptionReference,
         owner: { code: owner.code, country: owner.country },
         messageType: input.messageType,
         requestUrl: input.requestUrl,
@@ -284,16 +303,30 @@ export class UkWebhooks {
     })
   }
 
-  /** Edits the given fields; an absent secret is replaced by a new one (G "Editing a Config"). */
-  update(cfg: Config, input: ConfigInput): Promise<Config> {
+  /**
+   * Edits the given fields; an absent secret is replaced by a new one (G "Editing a Config").
+   * Applied to the stored configuration with a compare-and-set, again on the newer one when
+   * another emulator edited it meanwhile, so both edits stay (decision 1012). Undefined: the
+   * new message type is taken by another configuration of the owner.
+   */
+  update(cfg: Config, input: ConfigInput): Promise<Config | undefined> {
     return this.#serial(async () => {
-      const c = (await this.#config(cfg.subscriptionReference)) ?? cfg
-      for (const k of ['messageType', 'requestUrl', 'active', 'attachMetadata', 'attachFullBody', 'removeAfterDelivery', 'compressionEnabled'] as const) {
-        if (input[k] !== undefined) (c as any)[k] = input[k]
+      const ref = cfg.subscriptionReference
+      const before = (await this.#config(ref)) ?? cfg
+      const retyped = input.messageType !== undefined && input.messageType !== before.messageType
+      if (retyped && !(await this.#claimType(before.owner, input.messageType!, ref))) return undefined
+      const secret = input.sharedSecret ?? generateSecret()
+      const edit = (c: Config) => {
+        for (const k of ['messageType', 'requestUrl', 'active', 'attachMetadata', 'attachFullBody', 'removeAfterDelivery', 'compressionEnabled'] as const) {
+          if (input[k] !== undefined) (c as any)[k] = input[k]
+        }
+        c.sharedSecret = secret
+        return c
       }
-      c.sharedSecret = input.sharedSecret ?? generateSecret()
-      await this.#configs.replace(c.subscriptionReference, encodeConfig(c))
-      if (!c.active) await this.#stop(c.subscriptionReference, 'Webhook configuration is not active')
+      const s = await updateKeyed(this.#configs, ref, (stored) => stored && encodeConfig(edit(decodeConfig(stored))))
+      const c = s ? decodeConfig(s) : edit(before) // removed meanwhile: answered as edited, nothing stored (as before)
+      if (retyped) await this.#releaseType(before.owner, s ? before.messageType : input.messageType!, ref)
+      if (!c.active) await this.#stop(ref, 'Webhook configuration is not active')
       return c
     })
   }
@@ -301,6 +334,7 @@ export class UkWebhooks {
   remove(c: Config): Promise<void> {
     return this.#serial(async () => {
       await this.#configs.take(c.subscriptionReference)
+      await this.#releaseType(c.owner, c.messageType, c.subscriptionReference)
       await this.#stop(c.subscriptionReference, 'Webhook configuration was deleted')
     })
   }

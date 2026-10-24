@@ -21,7 +21,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Clock } from '../clock.js'
 import { keyOf, type Customer, type CustomerKey, type DirectoryStore } from '../directory.js'
-import { memoryKeyed, UNBOUNDED, type KeyedFactory, type KeyedStore } from '../keyed.js'
+import { updateKeyed, memoryKeyed, UNBOUNDED, type KeyedFactory, type KeyedStore } from '../keyed.js'
 import { normalizeIban } from '../iban.js'
 import { servicerRef } from '../ids.js'
 import type { InboxStore } from '../inbox.js'
@@ -174,12 +174,19 @@ export class FxService {
   /** The current pricing (a copy: change it with setPricing). */
   async pricing(): Promise<Pricing> { return new Pricing(await this.#pricing.get('pricing')) }
 
-  /** Changes the pricing with f (which may throw: nothing is stored then) and stores it. */
+  /**
+   * Changes the pricing with f (which may throw: nothing is stored then) and stores it with a
+   * compare-and-set, calling f again on the newer pricing when another emulator changed it
+   * meanwhile, so two partial changes at once both stay (decision 1011).
+   */
   setPricing(f: (p: Pricing) => void): Promise<Pricing> {
     return this.#serial(async () => {
-      const p = await this.pricing()
-      f(p)
-      await this.#pricing.set('pricing', p.state())
+      let p!: Pricing
+      await updateKeyed(this.#pricing, 'pricing', (stored) => {
+        p = new Pricing(stored)
+        f(p)
+        return p.state()
+      })
       return p
     })
   }

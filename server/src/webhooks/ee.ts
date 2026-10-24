@@ -13,7 +13,7 @@ import { randomUUID } from 'node:crypto'
 import type { Clock } from '../clock.js'
 import { keyOf, type CustomerKey } from '../directory.js'
 import type { InboxStore, Message } from '../inbox.js'
-import { memoryKeyed, UNBOUNDED, type KeyedFactory, type KeyedStore } from '../keyed.js'
+import { claimName, memoryKeyed, UNBOUNDED, type KeyedFactory, type KeyedStore } from '../keyed.js'
 
 export const EVENT_TYPE = 'GENERAL_WEBHOOK'
 /** Pause before each retry, after a failed attempt; the length is the number of retries. */
@@ -57,6 +57,8 @@ export interface Delivery {
 }
 
 /** "2024-03-25T06:01:02.171+00:00", the P 15 sample's form. */
+const urlKey = (customer: CustomerKey, url: string) => `${keyOf(customer)}|${url}`
+
 export const utcIso = (d: Date) => d.toISOString().replace('Z', '+00:00')
 
 export interface EeWebhookOptions {
@@ -82,6 +84,8 @@ export class EeWebhooks {
   readonly #deliveries: KeyedStore<StoredDelivery>
   /** One attempt of a delivery at a time, across emulators on a namespace (decision 986). */
   readonly #claims: KeyedStore<true>
+  /** The URLs each customer subscribed, `<customer key>|<url>` → its subscriptionReference (decision 1012). */
+  readonly #urls: KeyedStore<string>
   #queue: Promise<unknown> = Promise.resolve()
   #eventSeq: number | undefined
   #inflight = new Set<Promise<unknown>>()
@@ -95,6 +99,7 @@ export class EeWebhooks {
     this.#subs = keyed('ee-webhook-subscriptions', UNBOUNDED)
     this.#deliveries = keyed('ee-webhook-deliveries', UNBOUNDED)
     this.#claims = keyed('ee-webhook-claims', { ttlMs: CLAIM_MS, max: 100_000 })
+    this.#urls = keyed('ee-webhook-urls', UNBOUNDED)
     inbox.onAdd((m) => this.#onMessage(m))
   }
 
@@ -112,8 +117,13 @@ export class EeWebhooks {
     return this.#serial(async () => {
       const existing = (await this.list(customer)).find((s) => s.url === url)
       if (existing) return existing
+      // The URL is taken before the subscription is stored: two emulators at once make one (decision 1012).
+      const subscriptionReference = randomUUID()
+      let held: StoredSubscription | undefined
+      const holder = await claimName(this.#urls, urlKey(customer, url), subscriptionReference, async (h) => (held = await this.#subs.get(h))?.url === url)
+      if (holder !== subscriptionReference) return decodeSubscription(held!)
       const s: Subscription = {
-        subscriptionReference: randomUUID(), customer: { code: customer.code, country: customer.country }, url, eventType, createdAt: this.clock.now(),
+        subscriptionReference, customer: { code: customer.code, country: customer.country }, url, eventType, createdAt: this.clock.now(),
       }
       await this.#subs.add(s.subscriptionReference, { ...s, createdAt: s.createdAt.getTime() })
       return s
@@ -132,11 +142,20 @@ export class EeWebhooks {
     return s && keyOf(s.customer) === keyOf(customer) ? decodeSubscription(s) : undefined
   }
 
+  async #releaseUrl(s: Subscription, url: string) {
+    const k = urlKey(s.customer, url)
+    if ((await this.#urls.get(k)) === s.subscriptionReference) await this.#urls.take(k)
+  }
+
   update(customer: CustomerKey, ref: string, url: string): Promise<boolean> {
     return this.#serial(async () => {
       const s = await this.get(customer, ref)
       if (!s) return false
-      return this.#subs.replace(s.subscriptionReference, { ...s, url, createdAt: s.createdAt.getTime() })
+      // A whole value: of two changes at once the later stands (decision 1012). The URL's name moves with it.
+      if (!(await this.#subs.replace(s.subscriptionReference, { ...s, url, createdAt: s.createdAt.getTime() }))) return false
+      await this.#releaseUrl(s, s.url)
+      await this.#urls.add(urlKey(s.customer, url), s.subscriptionReference)
+      return true
     })
   }
 
@@ -145,6 +164,7 @@ export class EeWebhooks {
     return this.#serial(async () => {
       const s = await this.get(customer, ref)
       if (!s || !(await this.#subs.take(s.subscriptionReference))) return false
+      await this.#releaseUrl(s, s.url)
       for (const [, d] of await this.#deliveries.entries()) {
         if (d.subscriptionReference === s.subscriptionReference && d.state === 'PENDING') {
           await this.#deliveries.replace(String(d.eventId), { ...d, state: 'CANCELLED', nextAt: undefined })

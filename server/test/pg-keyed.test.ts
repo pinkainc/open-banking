@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto'
 import { describe, test } from 'node:test'
 import type { Bounds } from '../src/bounded.js'
 import { ManualClock } from '../src/clock.js'
-import { memoryKeyed, type KeyedFactory } from '../src/keyed.js'
+import { claimName, memoryKeyed, updateKeyed, type KeyedFactory } from '../src/keyed.js'
 import { pgKeyed } from '../src/pg/keyed.js'
 import { pgDb } from './helpers.js'
 
@@ -60,6 +60,43 @@ for (const [name, make] of STORES) {
       clock.advance(600)
       assert.equal(await s.replace('a', { n: 5 }), false, 'expired at its first time to live')
       assert.deepEqual(await s.entries(), [['b', { n: 2 }]])
+    })
+
+    test('replace with expected is a compare-and-set; updateKeyed loses no write of two at once (decision 1008)', async () => {
+      const { s } = await store<{ n: number; tags?: string[]; b?: { y: number; x: number } }>({ max: 10 })
+      await s.set('a', { n: 1, b: { x: 1, y: 2 } })
+      assert.equal(await s.replace('a', { n: 2 }, { n: 9 }), false, 'another value stored: nothing written')
+      assert.equal(await s.replace('a', { n: 2 }, { b: { y: 2, x: 1 }, n: 1 }), true, 'equal as JSON, whatever the key order')
+      assert.equal(await s.replace('c', { n: 3 }, { n: 2 }), false, 'absent')
+      assert.equal(await s.has('c'), false)
+      // Twenty writers at once, each adding its tag with a read-modify-write: every tag is kept.
+      const tags = Array.from({ length: 20 }, (_, i) => `t${i}`)
+      await Promise.all(tags.map((t) => updateKeyed(s, 'u', async (v) => {
+        await new Promise((r) => setTimeout(r, Math.random() * 5))
+        return { n: (v?.n ?? 0) + 1, tags: [...(v?.tags ?? []), t] }
+      })))
+      const u = await s.get('u')
+      assert.equal(u?.n, 20)
+      assert.deepEqual([...u!.tags!].sort(), [...tags].sort())
+      assert.equal(await updateKeyed(s, 'u', () => undefined), undefined, 'f stores nothing')
+      assert.equal((await s.get('u'))?.n, 20)
+    })
+
+    test('claimName: one holder of a name; one that does not show is waited for, then taken over (decision 1012)', async () => {
+      const { s } = await store<string>({ max: 10 })
+      const shown = new Set<string>()
+      const shows = async (h: string) => shown.has(h)
+      const got = await Promise.all(['r1', 'r2', 'r3'].map((r) => claimName(s, 'n', r, async (h) => { shown.add(h); return true })))
+      assert.equal(new Set(got).size, 1, 'every claimant answers the same holder')
+      assert.equal(await claimName(s, 'n', got[0], shows), got[0], 'the holder again: its own')
+      // A holder stored right after the claim is waited for and answered.
+      await s.set('m', 'slow')
+      setTimeout(() => shown.add('slow'), 30)
+      assert.equal(await claimName(s, 'm', 'r4', shows, 1000), 'slow')
+      // One that never shows (a crash between the claim and the store) is taken over.
+      await s.set('k', 'lost')
+      assert.equal(await claimName(s, 'k', 'r5', shows, 50), 'r5')
+      assert.equal(await s.get('k'), 'r5')
     })
 
     test('kinds are apart', async () => {

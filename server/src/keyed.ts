@@ -15,8 +15,12 @@ export interface KeyedStore<V> {
   add(key: string, value: V): Promise<boolean>
   /** Removes and returns the value; at most once for a key. */
   take(key: string): Promise<V | undefined>
-  /** Replaces the value of a live key, keeping its place and expiry (unlike set); whether it did. */
-  replace(key: string, value: V): Promise<boolean>
+  /**
+   * Replaces the value of a live key, keeping its place and expiry (unlike set); whether it did.
+   * With `expected`, only while the stored value is still that one (equal as JSON): a
+   * compare-and-set, one step in Postgres (decision 1008). See updateKeyed.
+   */
+  replace(key: string, value: V, expected?: V): Promise<boolean>
   /** The live entries, oldest first. */
   entries(): Promise<[string, V][]>
 }
@@ -43,8 +47,60 @@ export class MemoryKeyed<V> implements KeyedStore<V> {
     if (v !== undefined) this.#m.delete(key)
     return v
   }
-  async replace(key: string, value: V) { return this.#m.replace(key, value) }
+  async replace(key: string, value: V, expected?: V) {
+    if (expected !== undefined) {
+      const cur = this.#m.get(key)
+      if (cur === undefined || canonical(cur) !== canonical(expected)) return false
+    }
+    return this.#m.replace(key, value)
+  }
   async entries() { return this.#m.entries() }
+}
+
+/** JSON with object keys sorted, so two equal values compare equal whatever their key order (as jsonb does). */
+function canonical(v: unknown): string {
+  return JSON.stringify(v, (_k, x) => x && typeof x === 'object' && !Array.isArray(x)
+    ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, x[k]])) : x)
+}
+
+/**
+ * Changes the value of a key with f and stores it with a compare-and-set, reading and
+ * calling f again when another writer (another emulator of the namespace) changed it in
+ * between, so neither write is lost (decision 1008). f gets a copy of the stored value
+ * (undefined: absent) and answers the new value, or undefined to store nothing; an absent
+ * key is added. Returns the value stored, or undefined when f stored nothing.
+ */
+export async function updateKeyed<V>(store: KeyedStore<V>, key: string, f: (v: V | undefined) => V | undefined | Promise<V | undefined>): Promise<V | undefined> {
+  for (let i = 0; ; i++) {
+    const cur = await store.get(key)
+    const next = await f(cur === undefined ? undefined : structuredClone(cur))
+    if (next === undefined) return undefined
+    if (cur === undefined ? await store.add(key, next) : await store.replace(key, next, cur)) return next
+    if (i >= 1000) throw new Error(`keyed ${key}: too many conflicting writes`)
+  }
+}
+
+/**
+ * Takes a unique name (a VIBAN clientReference, a webhook message type, a subscribed URL)
+ * for `ref` in a store of names → holder refs, once for the namespace (decision 1012), and
+ * answers its holder: `ref` when taken now or before, else the other holder. A holder that
+ * does not show (`shows` false: its thing not stored, or not with this name) is waited for,
+ * polling every 10 ms up to `waitMs` of real time, since it is usually being stored right
+ * now; after that it is taken over with a compare-and-set (left by a crash between the two).
+ */
+export async function claimName(store: KeyedStore<string>, key: string, ref: string, shows: (holder: string) => Promise<boolean>, waitMs = 1000): Promise<string> {
+  const start = Date.now()
+  for (;;) {
+    if (await store.add(key, ref)) return ref
+    const holder = await store.get(key)
+    if (holder === undefined) continue // given back meanwhile
+    if (holder === ref || (await shows(holder))) return holder
+    if (Date.now() - start >= waitMs) {
+      if (await store.replace(key, ref, holder)) return ref
+      continue
+    }
+    await new Promise((r) => setTimeout(r, 10))
+  }
 }
 
 export const memoryKeyed = (clock: Clock): KeyedFactory => <V>(_kind: string, bounds: Bounds) => new MemoryKeyed<V>(clock, bounds)

@@ -14,7 +14,7 @@ import type { Clock } from '../clock.js'
 import { keyOf, type CustomerKey, type DirectoryStore } from '../directory.js'
 import { normalizeIban } from '../iban.js'
 import type { InboxStore } from '../inbox.js'
-import { memoryKeyed, UNBOUNDED, type KeyedFactory, type KeyedStore } from '../keyed.js'
+import { memoryKeyed, UNBOUNDED, updateKeyed, type KeyedFactory, type KeyedStore } from '../keyed.js'
 import { dateTallinn } from '../time.js'
 import { parseXml } from '../xml.js'
 import { isCountry } from './countries.js'
@@ -100,8 +100,13 @@ export class VibanService {
   async #handle(op: Op, body: string, customer: CustomerKey): Promise<Outcome> {
     const type = RESPONSE_TYPE[op]
     const fail = (...errors: VibanError[]): Outcome => ({ type, errors })
-    const faults = ((await this.#sim.get('faults')) as number | undefined) ?? 0
-    if (faults > 0) { await this.#sim.set('faults', faults - 1); return fail(E.technical) }
+    // A fault is used up with a decrement-if-positive, so two emulators never use one twice (decision 1010).
+    let faulted = false
+    await updateKeyed(this.#sim, 'faults', (n) => {
+      faulted = typeof n === 'number' && n > 0
+      return faulted ? (n as number) - 1 : undefined
+    })
+    if (faulted) return fail(E.technical)
     try {
       let doc: any
       try { doc = parseXml(body) } catch { return fail(E.request) }
@@ -127,16 +132,18 @@ export class VibanService {
         const ibans = await this.#bulk(r.amount!, master, owner)
         return { type, body: bulkResponse(master, ibans) }
       }
-      const v = await this.registry.get(r.virtualIban!)
-      if (!v) return fail(E.viban)
-      if (v.master !== master) return fail(E.vibanForbidden)
-      if (op === 'info') return { type, body: infoResponse(v) }
-      if (op === 'close') {
-        if (!['ACTIVE', 'PENDING', 'BLOCKED'].includes(v.status)) return fail(E.statusClose)
-        await this.registry.setStatus(v, 'CLOSED', this.clock.now())
-        return { type, body: closeResponse(v) }
-      }
-      return await this.#modify(r, v)
+      return await retried(async () => {
+        const v = await this.registry.get(r.virtualIban!)
+        if (!v) return fail(E.viban)
+        if (v.master !== master) return fail(E.vibanForbidden)
+        if (op === 'info') return { type, body: infoResponse(v) }
+        if (op === 'close') {
+          if (!['ACTIVE', 'PENDING', 'BLOCKED'].includes(v.status)) return fail(E.statusClose)
+          stored(await this.registry.setStatus(v, 'CLOSED', this.clock.now()))
+          return { type, body: closeResponse(v) }
+        }
+        return await this.#modify(r, v)
+      })
     } catch {
       return fail(E.technical)
     }
@@ -165,11 +172,14 @@ export class VibanService {
     const type = RESPONSE_TYPE.open
     if (r.clientReference && (await this.registry.byClientReference(owner, r.clientReference))) return { type, errors: [E.refUnique] }
     const now = this.clock.now()
+    const iban = await this.registry.generate(master)
+    // The reference is taken before the VIBAN is stored: of two emulators opening one at once, one gets it.
+    if (r.clientReference && !(await this.registry.claimReference(owner, r.clientReference, iban))) return { type, errors: [E.refUnique] }
     const v = await this.registry.add({
-      iban: await this.registry.generate(master), master, owner: { code: owner.code, country: owner.country },
+      iban, master, owner: { code: owner.code, country: owner.country },
       status: 'PENDING', clientReference: r.clientReference, user: r.user, createdAt: now,
     })
-    await this.registry.setStatus(v, await this.#screen(r.user!), now)
+    stored(await this.registry.setStatus(v, await this.#screen(r.user!), now))
     return { type, body: openResponse(v) }
   }
 
@@ -189,13 +199,18 @@ export class VibanService {
     if (v.status === 'PENDING' && r.modifyReason) return fail(E.reasonPending)
     if (v.status !== 'PENDING' && !r.modifyReason) return fail(E.reasonMissing)
     if (v.user && !!v.user.person !== !!r.user!.person) return fail(E.userType)
-    if (r.clientReference && r.clientReference !== v.clientReference) {
+    const claimed = !!r.clientReference && r.clientReference !== v.clientReference
+    if (claimed) {
       if (v.clientReference) return fail(E.refChange)
-      if (await this.registry.byClientReference(v.owner, r.clientReference)) return fail(E.refUnique)
+      if (await this.registry.byClientReference(v.owner, r.clientReference!)) return fail(E.refUnique)
+      if (!(await this.registry.claimReference(v.owner, r.clientReference!, v.iban))) return fail(E.refUnique)
       v.clientReference = r.clientReference
     }
     v.user = r.user // block replace
-    await this.registry.setStatus(v, await this.#screen(r.user!), this.clock.now())
+    if (!(await this.registry.setStatus(v, await this.#screen(r.user!), this.clock.now()))) {
+      if (claimed) await this.registry.releaseReference(v.owner, r.clientReference!, v.iban)
+      throw new Conflict()
+    }
     return { type, body: modifyResponse(v) }
   }
 
@@ -204,14 +219,28 @@ export class VibanService {
    * closure), notified to the master account owner with VIBAN_STATUS_NOTIFICATION.
    * Returns an explanation when the change is not one the bank makes from this status.
    */
-  bankStatus(iban: string, status: VibanStatus): Promise<string | undefined> { return this.#serial(() => this.#bankStatus(iban, status)) }
+  bankStatus(iban: string, status: VibanStatus): Promise<string | undefined> { return this.#serial(() => retried(() => this.#bankStatus(iban, status))) }
 
   async #bankStatus(iban: string, status: VibanStatus): Promise<string | undefined> {
     const v = await this.registry.get(iban)
     if (!v) return `no VIBAN ${normalizeIban(iban)}`
     if (!BANK_TRANSITIONS[v.status].includes(status)) return `${v.status} cannot become ${status}`
-    await this.registry.setStatus(v, status, this.clock.now())
+    stored(await this.registry.setStatus(v, status, this.clock.now()))
     await this.inbox.add({ customer: v.owner, type: STATUS_NOTIFICATION, body: statusNotification(v) })
     return undefined
+  }
+}
+
+/** The VIBAN was changed by another emulator after it was read (decision 1009). */
+class Conflict extends Error { constructor() { super('VIBAN changed meanwhile') } }
+const stored = (ok: boolean) => { if (!ok) throw new Conflict() }
+/** Runs a change of one VIBAN again, from its read, while another emulator's change gets in between. */
+async function retried<T>(f: () => Promise<T>): Promise<T> {
+  for (let i = 0; ; i++) {
+    try {
+      return await f()
+    } catch (e) {
+      if (!(e instanceof Conflict) || i >= 100) throw e
+    }
   }
 }
