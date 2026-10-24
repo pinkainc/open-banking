@@ -14,7 +14,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Clock } from '../clock.js'
 import { keyOf, type Customer, type CustomerKey, type DirectoryStore } from '../directory.js'
-import { memoryKeyed, UNBOUNDED, type KeyedFactory, type KeyedStore } from '../keyed.js'
+import { claimName, memoryKeyed, UNBOUNDED, type KeyedFactory, type KeyedStore } from '../keyed.js'
 import { dateTallinn } from '../time.js'
 import { bdoc } from './bdoc.js'
 
@@ -57,8 +57,11 @@ const pair = (c: Contract) => `${keyOf(c.provider)}|${keyOf(c.customer)}`
 export class Contracts {
   /** Every contract by id, in the order they were made (decision 982). */
   #contracts: KeyedStore<StoredContract>
-  /** The seeded connections already made a contract (provider|customer), once per namespace. */
-  #seeded: KeyedStore<true>
+  /**
+   * The seeded connections already made a contract (provider|customer), once per namespace:
+   * the contract's id (true in namespaces from before decision 1013).
+   */
+  #seeded: KeyedStore<string | true>
   /** Who is changing a provider's contracts right now (decision 983). */
   #claims: KeyedStore<true>
   #queue: Promise<unknown> = Promise.resolve()
@@ -82,10 +85,15 @@ export class Contracts {
         id: randomUUID(), provider: { code: provider.code, country: provider.country }, customer: { code: k.code, country: k.country },
         status: 'ACTIVE', createdAt: this.#startedAt, changedAt: this.#startedAt, startDate: dateTallinn(this.#startedAt), services: [...DEFAULT_SERVICES],
       }
-      // One emulator of a namespace makes it, once (a restart does not make another).
-      if (!(await this.#seeded.add(pair(c), true))) continue
-      await this.#contracts.set(c.id, encode(c))
-      all.push(c)
+      // One emulator of a namespace makes it, once (a restart does not make another); the
+      // others wait for it to be stored and list it too (decision 1013).
+      let made: StoredContract | undefined
+      const shows = async (id: string) => typeof id !== 'string' || (made = await this.#contracts.get(id)) !== undefined
+      const holder = await claimName(this.#seeded as KeyedStore<string>, pair(c), c.id, shows)
+      if (holder === c.id) await this.#contracts.set(c.id, encode(c))
+      else if (!made) continue
+      const got = holder === c.id ? c : decode(made!)
+      if (!all.some((o) => o.id === got.id)) all.push(got)
     }
   }
 

@@ -1,7 +1,8 @@
 // Two emulators on one namespace writing the same thing at once (decisions 1008-1012): a
 // read-modify-write of a VIBAN, the /_sim/viban fault count, the FX pricing settings and a
-// UK webhook configuration loses neither write, and a VIBAN clientReference, a UK webhook
-// message type and an EE subscription URL are taken once. Run against memory keyed stores
+// UK webhook configuration loses neither write, a VIBAN clientReference, a UK webhook
+// message type and an EE subscription URL are taken once, and a seeded contract listed by
+// both at once is listed by both. Run against memory keyed stores
 // shared by both emulators, each call 1-7 ms late at random (decision 960), and against
 // Postgres when DATABASE_URL is set.
 import assert from 'node:assert/strict'
@@ -124,6 +125,16 @@ for (const [name, make] of STORES) {
         const now = (await a.emulator.webhooksUk.get(owner, cfg.subscriptionReference))!
         assert.equal(now.requestUrl, `https://x.test/u${i}`, 'the URL is not lost')
         assert.equal(now.compressionEnabled, i % 2 === 0, 'the compression flag is not lost')
+      }
+    })
+
+    test('the contracts of seeded connections listed by both at once: both list them, made once (decision 1013)', async () => {
+      for (let i = 0; i < 5; i++) {
+        const [a, b] = await two()
+        const lists = await Promise.all([a, b].map(async (ctx) => (await call(ctx, { url: '/_sim/contracts' })).json().contracts as { id: string }[]))
+        const after = (await call(a, { url: '/_sim/contracts' })).json().contracts as { id: string }[]
+        assert.ok(after.length > 0, 'a seeded connection')
+        assert.deepEqual(lists.map((l) => l.map((c) => c.id).sort()), [after.map((c) => c.id).sort(), after.map((c) => c.id).sort()])
       }
     })
 
