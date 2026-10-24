@@ -230,3 +230,29 @@ Nalazi:
    testovi su prilagođeni; promjene su na popisu „Za pregled ujutro”.
 5. Drugi agent je stao blizu guarda (274k) sa 111 poziva. Tri teme u jednom agentu je gornja
    granica; za S7 (Postgres) je bolje dva agenta po storeu.
+
+## S7: trajnost i jezgra (2026-10-24, noćni rad)
+
+Sedam agenata strogo jedan za drugim (bez worktreeja), Opus 5.5, effort high.
+
+| Agent | Poziva | Tokena | Ishod |
+|---|---|---|---|
+| A inbox u Postgresu | 83 | 167k | async `InboxStore`, `PgInbox`, `dev-db.sh`, 667 testova (900–907) |
+| B ledger u Postgresu | 48 | 121k | `PgLedger`, cijeli suite dvaput (memory, Postgres), 691 ×2 (910–918) |
+| C open-ledger kao `Ledger` | 54 | 151k | HTTP + ed25519 bez SDK-a, hold wallet po računu, treći korak checka 21 (920–928) |
+| D `Rails` za bridge | 42 | 139k | `accepted` + `RailsEvents`, `HttpRails`, protokol, 716 ×2 (930–938) |
+| E agency i acquiring | 77 | 190k | async storeovi + Pg, pending rails nakon restarta, 722 ×2 (940–949) |
+| F partner PSP primjeri | 74 | 190k | case1..8 replayani, nijedan točno, razlike potvrđene; pitanje 87 (950–955) |
+| G journal i payment engine | 94 | 179k | journal, `KeyedStore`, duplikati, parkirana plaćanja, DD MsgId, 745 ×2 (960–967) |
+
+Što se pokazalo:
+
+- **Postgres run je pao nula puta na prvom pokretanju** jer je korak A odmah pretvorio sve
+  pozive inboxa u `await` i provjerio ih odgođenim inboxom. Pravi bugovi bili su drugdje:
+  MemoryLedger je kod paralelnih rezervacija prekoračivao saldo (913), a perzistentni ledger
+  je na svakom startu ponovno financirao seed (914).
+- **Detektor propuštenih awaita** mora imati nasumična kašnjenja (E): s fiksnim kašnjenjem
+  timeri se izvrše redom i propušteni await na pisanju prođe.
+- Svaki agent je stao ispod guarda (121k–190k) jer je zadatak bio jedno područje stanja.
+  Za S7b isti rez: jedno do dva područja po agentu.
+- Sve poslovno stanje nije stalo u S7, pa je umetnut S7b (odluka 968).

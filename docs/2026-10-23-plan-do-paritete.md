@@ -24,10 +24,12 @@ firme, odluka korisnika). Zato:
 - nova pitanja za sandbox dopisuju se u `sandbox-questions.md` (mirror repo, lokalno,
   nikad ne pushati).
 
-## Gdje smo (2026-10-24, nakon S6)
+## Gdje smo (2026-10-24, nakon S7)
 
-S1–S6 gotovi (`e3b395a`): katalog pokriven 57/58 (`payment.oneoff` namjerni 404), 602 testa,
-sandbox pitanja do 86. Sljedeći je S7 (trajnost i jezgra); S8 čeka sandbox certifikat.
+S1–S7 gotovi (`9ce3088`): katalog pokriven 57/58 (`payment.oneoff` namjerni 404), 745 testova
+na memory storeu i 745 na Postgresu, plus 21 protiv pravog open-ledgera; sandbox pitanja do 87.
+Sljedeći je S7b (ostatak poslovnog stanja u Postgres, outbox ledger + inbox, odluka 968);
+S8 čeka sandbox certifikat.
 
 ## Polazno stanje (commit `bcc23e0`)
 
@@ -52,6 +54,7 @@ se paralelni worktreeji ne sudare.
 | **S5** | UK flavour | `/accounts/*` (`accounts.list`, `accounts.transaction.get`, `accounts.payments.pending_rejected`, PascalCase JSON, AWS-style greške), UK webhookovi (`webhook.subscribe/list/get/update/delete/delivery/history/replay`, X-LHV-HMAC, golden vrijednost iz mirrora), Bacs (`notification.bacs_incoming`, `dd.bacs.*` ×4), `x-bank-code: LHVEE` routing na EE servise | +17 → 52 | 700– | isti klijent radi protiv EE i UK hosta; HMAC jednak golden vrijednosti |
 | **S6** | L6 agency + ostatak | `agent.account.sync` (+ v2 s VoP poljima), `agent.report.rtf`, `vop.incoming_notification`, `cop.incoming`, `acq.merchant_report` (sekcija P 13 još nije pročitana); plaćanja s agency računa; PSP use caseovi 1–8 iz mirrora kao e2e lanci | +6 → **58** | 800– | `PAYMENT_PSP_USECASES/case1..8` prolaze cijeli lanac |
 | **S7** | Trajnost i jezgra | Postgres za inbox i ledger; open-ledger kao `Ledger` (SDK/HTTP); prvi pravi `Rails` bridge ili jasno sučelje za njega; ograničena memorija | — | 900– | testovi zeleni i na memory i na Postgres storeu |
+| **S7b** | Ostatak trajnog stanja *(umetnut, odluka 968)* | Direktorij klijenata i računa, DD naplate na čekanju, Bacs, FX, ugovori, VIBAN-i, webhookovi, UK izvještaji, request log, idempotency ključevi (odluka 967); outbox ledger + inbox (906, 916); DD povrati i opozivi u `Rails` (933), rekonsilijacija bridgea (936) | — | 970– | restart na istom namespaceu ne gubi poslovno stanje; testovi zeleni na oba storea |
 | **S8** | Conformance harness *(blokirano: sandbox certifikat)* | Snimanje prema `connect.test.lhv.eu` po `sandbox-questions.md`, usporedba po uzoru na open-ledger `conformance/` s `divergences.json`; revizija odluka koje snimke riješe; zatvaranje 10 `uncertain` unosa u katalogu | — | revizije | svih 42 pitanja odgovoreno snimkom ili upisano kao odstupanje |
 
 **Procjena: 7 sesija koje se mogu odraditi bez sandboxa, plus S8 kad stigne

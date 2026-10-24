@@ -86,14 +86,21 @@ Legend: `[x]` done · `[ ]` open · `[~]` in progress · `(?)` needs a sandbox r
 - [x] Merchant payment report `POST /acq/merchant-report` (P 13, decisions 820–826)
 - [x] Payments from / to agency accounts, requester VoP / CoP over agency accounts, G PSP use cases 1–8 end to end (decisions 830–849)
 - [ ] RTF for EBA STEP2 / RT1: 7 of 8 sample zips are password-protected, so the emulator only generates TARGET2 content; other schemes need the content supplied
-- [ ] Replay the partner-site `PAYMENT_PSP_USECASES/case1..8` samples (EE accounts, different from the G pages); only the G use cases are chains today
+- [x] Replay the partner-site `PAYMENT_PSP_USECASES/case1..8` samples on the EE host (S7, decisions 950–955): no case matches exactly, divergences asserted per case; sandbox q87
 - [ ] Use case 7/8 camt.054: account currency and creditor bank name differ from the samples (no bank directory)
 - [ ] `errMerchantReport_4` has no trigger
 - [ ] (?) Agency bank codes, v2 rules, RTF content types, responder notification shapes, merchant report, agency payments on LHV UK (sandbox q77–86) → S8
 
 ## Core and conformance
 
-- [ ] Persistence (Postgres) for inbox and ledger; open-ledger as the backing `Ledger`; real rails bridges behind `Rails` → S7
+- [x] Postgres for inbox (bytea bodies) and ledger, whole suite green on memory and Postgres (S7, decisions 900–918)
+- [x] open-ledger as the `Ledger` over HTTP, ledger contract + e2e payment against a real open-ledger in `npm run check` (S7, 920–928)
+- [x] `Rails` with asynchronous outcomes and scheme credits; `HttpRails` bridge client + protocol doc, pending rails payments survive a restart (S7, 930–938, 948)
+- [x] Agency, acquiring, statements journal, payment engine state (duplicates, parked, limits), SEPA DD MsgIds in Postgres (S7, 940–947, 960–966)
+- [ ] Remaining memory-only business state (decision 967): directory of customers and accounts (~250 lines, widest), SEPA DD collections awaiting settlement (~150), Bacs (~250), FX (~120), contracts (~120), VIBANs (~180), webhooks (~200), UK account reports (~150), request log, idempotency keys, payee sim accounts → S7b
+- [ ] No shared transaction between ledger and inbox (decisions 906, 916): crash between booking and message loses the message → S7b (outbox)
+- [ ] Rails: DD returns after settlement and recalls (camt.056) not in the interface (933); bridge reconciliation `GET /payments/{ref}` described, not called (936) → S7b
+- [ ] `OPEN_BANKING_STORE=deferred` (missing-await detector) is not part of `npm run check`
 - [ ] Conformance harness: record exchanges against connect.test.lhv.eu once a sandbox certificate exists, divergences file → S8
 
 ## Za pregled ujutro
@@ -150,3 +157,14 @@ Odluke iz noćnog rada S6 (2026-10-24), označene „(noćni rad, potvrditi)”:
 - [ ] 831, 834–835 agency plaćanja: ime i adresa dužnika obavezni, INST_RESTRICTED, dolazni krediti na master račun
 - [ ] 840–841 GBP na UK račun ide Faster Paymentsom (`FAST`); Ultimate Debtor / Creditor sad u camt.054
 - [ ] **Promjena izlaza:** pain.002 više nema `OrgnlEndToEndId` (G: „Not used”); adresa VIBAN vlasnika u camt.054 sad samo ulica
+
+Odluke iz noćnog rada S7 (2026-10-24), označene „(noćni rad, potvrditi)”:
+
+- [ ] 900–907 inbox u Postgresu: async sučelje, `bytea` + oznaka stringa, `ns` stupac, vrijeme iz injektiranog sata, granice u tablicama, bez zajedničke transakcije s ledgerom
+- [ ] 910–918 ledger u Postgresu: zaključavanje samo kod tereta (911, commit/release bez locka), prekidač testova, **popravak MemoryLedgera kod paralelnih rezervacija (913)**, seed se ne financira ponovno nakon restarta (914), ograničeni logovi (915)
+- [ ] 920–928 open-ledger kao `Ledger`: hold wallet po računu, imena walleta, `@` računi s limitom -(2^53-1), ključ `OPEN_LEDGER_KEY`, iznosi do 2^53-1 i abecedni redoslijed valuta (925)
+- [ ] 930–938 asinkroni `Rails`, odgođeni simulator, `HttpRails` protokol, ponašanje kod pada bridgea (936), **SEPA nakon INST pada nosi isti ref (937): bridge ključ ref + shema**
+- [ ] 940–949 agency i acquiring storeovi, seed se piše samo ako stanja nema (941), jedna sinkronizacija po procesu (942), pending rails plaćanja preživljavaju restart (948)
+- [ ] 950–955 partner PSP primjeri: **camt.054 sad nosi `PstlAdr` banke pod `Svcr` (950), `NOTPROVIDED` se ne ponavlja (951)**; razlike potvrđene u testu
+- [ ] 960–967 journal, keyed store, stanje payment enginea i DD MsgId u Postgresu; **knjiženje sad ide u journal prije izlaska iz in-flight limita (963)**
+- [ ] Umetnut paket **S7b** (ostatak trajnog stanja) prije S8, jer S7 nije stigao sve poslovno stanje (odluka 967) (noćni rad, potvrditi)
