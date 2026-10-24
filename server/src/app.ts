@@ -28,6 +28,7 @@ import { BALANCE_TYPE, STATEMENT_TYPE } from './statements/reports.js'
 import { registerMessagesProcessed, registerMessagesV2 } from './messages-v2.js'
 import { registerRequestsV2 } from './requests-v2.js'
 import { accountsSimRoutes, registerAccounts } from './accounts/routes.js'
+import { bacsSimRoutes, registerBacs } from './bacs/routes.js'
 
 export interface AppOptions {
   emulator: Emulator
@@ -269,6 +270,8 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     registerAccounts(app, emulator, caller)
     // Webhooks, LHV UK: per-type configurations, history and replay (decisions 720–729).
     jsonTextScope(app, (scope) => registerUkWebhooks(scope, emulator, caller))
+    // Bacs Direct Debit (paying bank): mandate responses and cancellations, collection responses (decisions 740–749).
+    registerBacs(app, emulator, caller)
   }
 
   // --- Payment initiation ---------------------------------------------------------
@@ -332,6 +335,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     app.register(ukWebhookSimRoutes(emulator), { prefix: '/_sim/webhooks/uk' })
     app.register(payeeSimRoutes(emulator), { prefix: '/_sim/payee' })
     app.register(accountsSimRoutes(emulator), { prefix: '/_sim/accounts' })
+    if (flavour === 'UK') app.register(bacsSimRoutes(emulator), { prefix: '/_sim/bacs' })
   }
   return app
 }

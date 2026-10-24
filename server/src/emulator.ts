@@ -1,5 +1,5 @@
 // The parts of the bank wired together: directory, ledger, rails, inbox, the payment
-// engine, SEPA Direct Debit, FX, service provider contracts and the EE and UK webhooks. Ledger
+// engine, SEPA Direct Debit, Bacs, FX, service provider contracts and the EE and UK webhooks. Ledger
 // and rails are interfaces; the defaults are in memory and the simulator.
 import { DEFAULT_BOUNDS, type Bounds } from './bounded.js'
 import { systemClock, type Clock } from './clock.js'
@@ -24,6 +24,7 @@ import { VibanSchemas } from './viban/messages.js'
 import { VibanService, type ErrorDelivery } from './viban/service.js'
 import { PayeeService } from './payee/service.js'
 import { AccountsService, DEFAULT_INCOMING } from './accounts/service.js'
+import { BACS_BOUNDS, BacsService } from './bacs/service.js'
 
 export interface Seed {
   bank?: Partial<Bank>
@@ -47,7 +48,7 @@ export interface EmulatorOptions {
   /** How UK webhooks are sent (default HTTP POST); tests record them instead. */
   ukWebhookDeliver?: UkDeliver
   /** Limits of what is remembered (decision 504); each part overrides DEFAULT_BOUNDS. */
-  memory?: { tombstones?: Partial<Bounds>; msgIds?: Partial<Bounds>; processed?: Partial<Bounds>; requests?: Partial<Bounds>; incoming?: Partial<Bounds>; webhookEvents?: Partial<Bounds> }
+  memory?: { tombstones?: Partial<Bounds>; msgIds?: Partial<Bounds>; processed?: Partial<Bounds>; requests?: Partial<Bounds>; incoming?: Partial<Bounds>; webhookEvents?: Partial<Bounds>; bacs?: Partial<typeof BACS_BOUNDS> }
 }
 
 export const DEFAULT_BANK: Bank = { bic: 'LHVBEE22', name: 'open-banking emulator' }
@@ -76,6 +77,8 @@ export class Emulator {
   readonly payee: PayeeService
   /** UK account reports: account list, transaction by reference, incoming pending and rejected. */
   readonly accounts: AccountsService
+  /** Bacs on the UK host: incoming credits, mandates and collections (LHV as the paying bank). */
+  readonly bacs: BacsService
 
   constructor(opts: EmulatorOptions & { bank?: Partial<Bank> } = {}) {
     this.clock = opts.clock ?? systemClock
@@ -116,6 +119,11 @@ export class Emulator {
     })
     this.contracts = new Contracts(this.directory, this.clock)
     this.payee = new PayeeService({ directory: this.directory, viban: this.viban.registry, inbox: this.inbox, clock: this.clock })
+    this.bacs = new BacsService({
+      directory: this.directory, ledger: this.ledger, rails: this.rails, inbox: this.inbox, clock: this.clock, bank: this.bank, virtual: this.viban.registry,
+      onBooking: (_c, b) => { this.journal.record(b) }, onIncoming: (e) => this.accounts.onIncoming(e),
+      credit: (p) => this.engine.incoming(p),
+    }, opts.memory?.bacs)
     this.reports = new AccountReports({
       directory: this.directory, ledger: this.ledger, journal: this.journal, inbox: this.inbox, clock: this.clock, bank: this.bank, xsd, msgIds,
     }, opts.reports)

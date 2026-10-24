@@ -537,7 +537,7 @@ export class PaymentEngine {
   }
 
   /** An incoming credit from outside (the simulator's SEPA / SEPA Instant credit). */
-  async incoming(p: { iban: string; amount: bigint; currency: string; scheme: string; debtor: { name?: string; iban?: string; bic?: string }; remittance?: string; reference?: string; endToEndId?: string; /** Reuse a reference (a held payment, decision 712). */ ref?: string }) {
+  async incoming(p: { iban: string; amount: bigint; currency: string; scheme: string; debtor: { name?: string; iban?: string; bic?: string; /** A non-IBAN account (Bacs: sort code + account number). */ account?: string }; remittance?: string; reference?: string; endToEndId?: string; /** Reuse a reference (a held payment, decision 712). */ ref?: string }) {
     const iban = normalizeIban(p.iban)
     const v = this.opts.virtual?.resolve(iban)
     // To a VIBAN that is not ACTIVE: returned to the sender, nothing booked or notified.
@@ -554,7 +554,7 @@ export class PaymentEngine {
     this.#notify(owner, {
       account, virtual: v && virtualParty(v), owner: { name: owner.name, code: owner.code }, direction: 'CRDT', amount: p.amount, currency: p.currency,
       servicerRef: ref, scheme: p.scheme, bookedAt: this.clock.now(), endToEndId: p.endToEndId,
-      counterparty: { name: codePage(p.debtor.name), iban: p.debtor.iban ? normalizeIban(p.debtor.iban) : undefined, bic: p.debtor.bic },
+      counterparty: { name: codePage(p.debtor.name), iban: p.debtor.iban ? normalizeIban(p.debtor.iban) : undefined, account: p.debtor.account, bic: p.debtor.bic },
       remittance: codePage(p.remittance), reference: codePage(p.reference),
     })
     return { servicerRef: ref }

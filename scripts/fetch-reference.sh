@@ -2,7 +2,9 @@
 # Downloads the public XML schemas and sample messages of the LHV Connect
 # documentation into reference/ (git-ignored: they are not ours to redistribute), and the
 # ISO 20022 schemas of the message versions LHV publishes no XSD for (reference/iso/, from
-# the iso20022.org message archive: camt.053.001.02, camt.052.001.06; decision 550).
+# the iso20022.org message archive: camt.053.001.02, camt.052.001.06, decision 550; the Bacs
+# pain.009/.012/.011/.008.001.11/.002.001.14/.007.001.11 of G "LHV uses the standard version",
+# decision 748).
 # The server validates pain.001, pain.008, pain.007, camt.060 and the VIBAN requests against these schemas when
 # they are present, and the tests run the sample payments through the server. Checksums are pinned in
 # scripts/reference.sha256; a changed file is reported, not silently used.
@@ -27,7 +29,8 @@ PAYMENT_VIBAN_SEPA/ACCOUNT_STATEMENT_CAMT.060.xml PAYMENT_VIBAN_SEPA/ACCOUNT_STA
 PAYMENT_VIBAN_SEPA/PAYMENT_PAIN.001.xml PAYMENT_VIBAN_SEPA/PAYMENT_PAIN.002A.xml PAYMENT_VIBAN_SEPA/PAYMENT_PAIN.002B.xml
 PAYMENT_VIBAN_SEPA/CREDIT_DEBIT_NOTIFICATION_CAMT.054A.xml
 DIRECT_DEBIT_SEPA/DIRECT_DEBIT_PAIN.008.xml"
-isoxsd="camt.053.001.02 camt.052.001.06"
+isoxsd="camt.053.001.02 camt.052.001.06
+pain.009.001.07 pain.012.001.07 pain.011.001.07 pain.008.001.11 pain.002.001.14 pain.007.001.11"
 
 fetch() { # url file
   [ -s "$2" ] && return 0

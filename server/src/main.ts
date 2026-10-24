@@ -43,6 +43,8 @@ setInterval(() => { emulator.inbox.purge(); emulator.requests.purge() }, 60 * 60
 if (env.EOD_STATEMENTS !== '0') setInterval(() => emulator.reports.tick(), 60 * 1000).unref()
 // SEPA Direct Debit: collections due are settled at 11:30 CET; checked every minute.
 setInterval(() => { emulator.directDebit.tick().catch((e) => console.error('direct debit settlement failed:', e)) }, 60 * 1000).unref()
+// Bacs (UK): mandate activation, credits, debits and refunds on the UK cut-offs; checked every minute.
+setInterval(() => { emulator.bacs.tick().catch((e) => console.error('Bacs processing failed:', e)) }, 60 * 1000).unref()
 // FX: SPOT deals settle in the first hour of their settlement date; checked every minute.
 setInterval(() => { emulator.fx.tick().catch((e) => console.error('FX settlement failed:', e)) }, 60 * 1000).unref()
 // EE webhooks: retries fall due on the clock; checked every 15 seconds.
