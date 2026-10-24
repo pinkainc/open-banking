@@ -221,6 +221,18 @@ export function simRoutes(emulator: Emulator) {
       if (typeof b.ref !== 'string' || !b.ref || typeof b.code !== 'string' || !/^[A-Z0-9]{4}$/.test(b.code)) throw bad('ref and a four-character code are required')
       return simRails().recall({ ref: b.ref, code: b.code, recallRef: typeof b.recallRef === 'string' && b.recallRef ? b.recallRef : `RCL-${b.ref}` })
     })
+    // Timeouts (decision 1002): payments are taken but answered `unknown`; the engine reconciles them.
+    app.post('/rails/timeout', async (req) => {
+      const b = (req.body ?? {}) as { on?: boolean }
+      simRails().timeouts(b.on !== false)
+      return { timeouts: simRails().timingOut }
+    })
+    // Asks the rails about every payment waiting at least minAgeMs (default 0) and settles what they tell.
+    app.post('/rails/reconcile', async (req) => {
+      const b = (req.body ?? {}) as { minAgeMs?: unknown }
+      if (b.minAgeMs !== undefined && (typeof b.minAgeMs !== 'number' || b.minAgeMs < 0)) throw bad('minAgeMs must be a number ≥ 0')
+      return { settled: await emulator.engine.reconcile({ minAgeMs: (b.minAgeMs as number | undefined) ?? 0 }) }
+    })
     app.get('/rails/held', async () => ({ payments: [...simRails().held].map(([ref, outcome]) => ({ ref, outcome })) }))
     // Delivers the held outcomes (all, or `ref`); `reject` (a reason) or `unavailable` overrides the outcome.
     app.post('/rails/deliver', async (req) => {

@@ -2,7 +2,8 @@
 // schemes (SEPA SCT, SEPA Instant, Faster Payments …). Small JSON protocol, documented in
 // docs/rails-bridge-protocol.md (decisions 935–938):
 //
-//   us → bridge   POST /payments, POST /collections, GET /reachability/{iban}
+//   us → bridge   POST /payments, GET /payments/{ref}?scheme= (reconciliation), POST /collections,
+//                 GET /reachability/{iban}
 //   bridge → us   POST /rails/events (payment outcomes, credits, collection returns,
 //                 recalls of credits), railsCallbackApp()
 //
@@ -15,7 +16,7 @@ import Fastify, { type FastifyInstance } from 'fastify'
 import { fromMinor, toMinor } from './ledger.js'
 import {
   RailsRetryLater, type CollectionOutcome, type CreditRecall, type CreditResult, type IncomingCredit, type OutgoingCollection, type OutgoingPayment, type Rails,
-  type RailsAnswer, type RailsEvents, type RailsOutcome, type Scheme,
+  type RailsAnswer, type RailsEvents, type RailsOutcome, type RailsStatus, type Scheme,
 } from './rails.js'
 
 export const HMAC_HEADER = 'x-rails-hmac'
@@ -47,8 +48,22 @@ export interface HttpRailsOptions {
   fetch?: typeof fetch
 }
 
-/** The bridge did not answer usefully (transport, 5xx after the retries, 4xx, or an answer outside the protocol). */
-export class RailsBridgeError extends Error {}
+/**
+ * The bridge did not answer usefully (transport, 5xx after the retries, 4xx, or an answer
+ * outside the protocol). `ambiguous`: an attempt may have reached it (a timeout, a
+ * connection lost after connecting); `httpStatus` the bridge's own refusal.
+ */
+export class RailsBridgeError extends Error {
+  constructor(message: string, readonly ambiguous = false, readonly httpStatus?: number) { super(message) }
+}
+
+/** Connection errors that mean the request never reached the bridge. */
+const NOT_SENT = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'UND_ERR_CONNECT_TIMEOUT'])
+function mayHaveArrived(e: unknown): boolean {
+  const err = e as { name?: string; code?: string; cause?: { code?: string } }
+  if (err?.name === 'TimeoutError' || err?.name === 'AbortError') return true
+  return !NOT_SENT.has(err?.cause?.code ?? err?.code ?? '')
+}
 
 /** A creditor's account as the bridge receives it: a 14-digit UK account also as sort code + account number. */
 function creditorOf(c: OutgoingPayment['creditor']) {
@@ -74,7 +89,8 @@ export class HttpRails implements Rails {
   /**
    * POST /payments. A bridge that cannot be reached (after the retries) or answers outside
    * the protocol: `unavailable` (INST automatic → SEPA, else RJCT "Technical problem"),
-   * decision 936.
+   * decision 936. When an attempt may have reached it (a timeout), the bridge is asked
+   * (`status`) instead of guessing; no answer there either: `unknown`, reconciled later (1002).
    */
   async send(p: OutgoingPayment): Promise<RailsAnswer> {
     const base = this.#o.urls?.[p.scheme] ?? this.#o.url
@@ -83,13 +99,29 @@ export class HttpRails implements Rails {
       debtor: p.debtor, creditor: creditorOf(p.creditor), endToEndId: p.endToEndId, remittance: p.remittance,
     }
     try {
-      const a = await this.#request(base, 'POST', '/payments', body) as { status?: string; reason?: unknown }
-      if (a.status === 'accepted' || a.status === 'settled' || a.status === 'unavailable') return { status: a.status }
-      if (a.status === 'rejected') return { status: 'rejected', reason: typeof a.reason === 'string' && a.reason ? a.reason : 'Payment declined.' }
-      throw new RailsBridgeError(`payment ${p.ref}: status ${String(a.status)} is not in the protocol`)
+      const a = answerOf(await this.#request(base, 'POST', '/payments', body))
+      if (!a) throw new RailsBridgeError(`payment ${p.ref}: an answer outside the protocol`)
+      return a
     } catch (e) {
-      if (e instanceof RailsBridgeError) return { status: 'unavailable' }
-      throw e
+      if (!(e instanceof RailsBridgeError)) throw e
+      if (!e.ambiguous) return { status: 'unavailable' }
+      const s = await this.status(p.ref, p.scheme)
+      return s.status === 'absent' ? { status: 'unavailable' } : s
+    }
+  }
+
+  /**
+   * GET /payments/{ref}?scheme= (decision 1002): the payment's state as POST would answer
+   * it, `absent` on 404 (never taken; the bridge then refuses a late POST of it), `unknown`
+   * when the bridge does not answer usefully.
+   */
+  async status(ref: string, scheme: Scheme): Promise<RailsStatus> {
+    const base = this.#o.urls?.[scheme] ?? this.#o.url
+    try {
+      return answerOf(await this.#request(base, 'GET', `/payments/${encodeURIComponent(ref)}?scheme=${scheme}`)) ?? { status: 'unknown' }
+    } catch (e) {
+      if (!(e instanceof RailsBridgeError)) throw e
+      return e.httpStatus === 404 ? { status: 'absent' } : { status: 'unknown' }
     }
   }
 
@@ -125,7 +157,9 @@ export class HttpRails implements Rails {
     if (e?.type === 'payment.outcome') {
       const outcome = outcomeOf(e.outcome)
       if (typeof e.ref !== 'string' || !e.ref || !outcome) return { status: 400, body: { error: 'payment.outcome needs ref and outcome' } }
-      return { status: 200, body: { applied: await this.#events.outcome(e.ref, outcome) } }
+      // The attempt's scheme (decision 1003), optional: ref + scheme is the payment (937).
+      if (e.scheme !== undefined && !SCHEMES.includes(e.scheme)) return { status: 400, body: { error: `unknown scheme ${String(e.scheme)}` } }
+      return { status: 200, body: { applied: await this.#events.outcome(e.ref, outcome, e.scheme) } }
     }
     if (e?.type === 'credit') {
       const credit = creditOf(e.credit)
@@ -162,22 +196,32 @@ export class HttpRails implements Rails {
     if (body !== undefined) headers['content-type'] = 'application/json'
     const url = base.replace(/\/+$/, '') + path
     let last = ''
+    let ambiguous = false
     for (let attempt = 0; attempt <= this.#o.retries; attempt++) {
       if (attempt) await new Promise((r) => setTimeout(r, this.#o.retryDelayMs))
       let res: Response
+      let text: string
       try {
         res = await this.#fetch(url, { method, headers, body: body === undefined ? undefined : raw, signal: AbortSignal.timeout(this.#o.timeoutMs) })
+        text = await res.text()
       } catch (e) {
         last = `${method} ${url}: ${(e as Error).message}`
+        if (mayHaveArrived(e)) ambiguous = true
         continue
       }
-      const text = await res.text()
+      // A 5xx did not take the request (the protocol says so); a retry may.
       if (res.status >= 500) { last = `${method} ${url}: HTTP ${res.status}`; continue }
-      if (res.status !== 200) throw new RailsBridgeError(`${method} ${url}: HTTP ${res.status} ${text.slice(0, 200)}`)
-      try { return JSON.parse(text) } catch { throw new RailsBridgeError(`${method} ${url}: not JSON`) }
+      if (res.status !== 200) throw new RailsBridgeError(`${method} ${url}: HTTP ${res.status} ${text.slice(0, 200)}`, ambiguous, res.status)
+      try { return JSON.parse(text) } catch { throw new RailsBridgeError(`${method} ${url}: not JSON`, ambiguous) }
     }
-    throw new RailsBridgeError(last)
+    throw new RailsBridgeError(last, ambiguous)
   }
+}
+
+/** A payment's answer (POST /payments, GET /payments/{ref}); undefined outside the protocol. */
+function answerOf(a: any): RailsAnswer | undefined {
+  if (a?.status === 'accepted') return { status: 'accepted' }
+  return outcomeOf(a)
 }
 
 function outcomeOf(o: any): RailsOutcome | undefined {

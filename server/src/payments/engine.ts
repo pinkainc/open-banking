@@ -29,7 +29,7 @@ import { ibanChecksumOk, ibanCountry, isSepaCountry, normalizeIban } from '../ib
 import { servicerRef } from '../ids.js'
 import type { InboxStore } from '../inbox.js'
 import { InsufficientFunds, toMinor, type Ledger } from '../ledger.js'
-import type { CreditRecall, CreditResult, IncomingCredit, Rails, RailsOutcome, RecallResult, Scheme } from '../rails.js'
+import { sameOutcome, type CreditRecall, type CreditResult, type IncomingCredit, type Rails, type RailsOutcome, type RecallResult, type Scheme } from '../rails.js'
 import { parseXml, XmlSyntaxError } from '../xml.js'
 import { isUkAccount } from '../routing.js'
 import type { Booking } from './camt054.js'
@@ -467,7 +467,15 @@ export class PaymentEngine {
       creditor: { name: tx.creditorName, iban: p.creditorIban, account: tx.creditorOther, bic: tx.creditorBic },
       endToEndId: tx.endToEndId, remittance: tx.ustrd,
     })
-    if (answer.status === 'accepted') return undefined
+    // `unknown` (a bridge timeout) waits as `accepted` and is reconciled (decision 1002).
+    if (answer.status === 'accepted' || answer.status === 'unknown') return undefined
+    // The first stored outcome wins (decision 1003): a callback with another one that came
+    // first goes on, this answer is dropped.
+    const d = await this.#pending.decide(p.ref, answer, p.scheme!)
+    if (d?.outcome && !sameOutcome(d.outcome, answer)) {
+      console.warn(`rails: payment ${p.ref} (${p.scheme}) answered ${JSON.stringify(answer)} after ${JSON.stringify(d.outcome)} was stored; ignored`)
+      return undefined
+    }
     // Settled through the events while the answer was on its way: already reported (and a
     // SEPA fallback of it waits under the same ref with another scheme).
     if (!(await this.#pending.take(p.ref, p.scheme))) return undefined
@@ -479,14 +487,21 @@ export class PaymentEngine {
    * booked and reported as an immediate outcome would have been. False for a ref that is
    * not waiting at the rails (unknown, or already final): a repeat changes nothing.
    */
-  async settle(ref: string, outcome: RailsOutcome): Promise<boolean> {
+  async settle(ref: string, outcome: RailsOutcome, scheme?: Scheme): Promise<boolean> {
     // Booked before the record goes (decision 998): a crash in between leaves the payment
     // waiting, and the outcome again (a bridge retrying) commits nothing twice (the ref is
     // the commit's key). Settled: the pain.002 is one of the commit's items (decision 999),
     // delivered by whoever booked it (or recovered), never by a repeat. Otherwise, of two
     // outcomes at once, the one that takes the record reports.
-    const r = await this.#pending.get(ref)
+    // The first outcome stored wins (decision 1003); an outcome for another attempt (scheme) is not this one's.
+    const waiting = await this.#pending.get(ref)
+    if (!waiting || (scheme !== undefined && waiting.scheme !== scheme)) return false
+    const r = await this.#pending.decide(ref, outcome, waiting.scheme)
     if (!r) return false
+    if (r.outcome && !sameOutcome(r.outcome, outcome)) {
+      console.warn(`rails: payment ${ref} (${r.scheme}) got ${JSON.stringify(outcome)} after ${JSON.stringify(r.outcome)} was stored; ignored`)
+      return false
+    }
     const w = await this.#decode(r)
     if (!w) { await this.#pending.take(ref, r.scheme); return false }
     if (outcome.status === 'settled') {
@@ -506,9 +521,33 @@ export class PaymentEngine {
   /** Payments sent to the rails without a final outcome yet (refs). */
   atRails(): Promise<string[]> { return this.#pending.refs() }
 
+  /**
+   * Reconciliation (decision 1002): every payment waiting longer than minAgeMs is settled
+   * from its stored outcome (a crash after it was decided), else from what the rails tell
+   * (`status`): a final answer through settle, `absent` as unavailable (never taken);
+   * accepted and unknown wait. How many it settled.
+   */
+  async reconcile(o: { minAgeMs?: number } = {}): Promise<number> {
+    const minAge = o.minAgeMs ?? 60_000
+    const now = this.clock.now().getTime()
+    let n = 0
+    for (const ref of await this.#pending.refs()) {
+      const r = await this.#pending.get(ref)
+      if (!r) continue
+      let outcome: RailsOutcome | undefined = r.outcome
+      if (!outcome) {
+        if (!this.rails.status || (r.sentAt !== undefined && now - r.sentAt < minAge)) continue
+        const a = await this.rails.status(ref, r.scheme)
+        outcome = a.status === 'absent' ? { status: 'unavailable' } : a.status === 'accepted' || a.status === 'unknown' ? undefined : a
+      }
+      if (outcome && (await this.settle(ref, outcome, r.scheme))) n++
+    }
+    return n
+  }
+
   /** A waiting payment as JSON (encodePlan). */
   #encode(file: FileRef, p: Plan, accepted: TxStatus): PendingRecord {
-    return { ref: p.ref, scheme: p.scheme!, file: fileKey(file), plan: encodePlan(p), accepted: { ...accepted } }
+    return { ref: p.ref, scheme: p.scheme!, file: fileKey(file), plan: encodePlan(p), accepted: { ...accepted }, sentAt: this.clock.now().getTime() }
   }
 
   /** Undefined when the customer is gone from the directory (nothing to report to). */

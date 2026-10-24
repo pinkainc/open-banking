@@ -4,7 +4,7 @@
 import { randomUUID } from 'node:crypto'
 import type { PgDb } from './db.js'
 import type { PendingRecord, RailsPending } from '../payments/pending.js'
-import type { Scheme } from '../rails.js'
+import type { RailsOutcome, Scheme } from '../rails.js'
 
 export class PgRailsPending implements RailsPending {
   readonly namespace: string
@@ -26,6 +26,15 @@ export class PgRailsPending implements RailsPending {
     const r = await this.db.pool.query(
       `delete from rails_pending where ns = $1 and ref = $2 ${scheme !== undefined ? 'and scheme = $3' : ''} returning record`,
       scheme !== undefined ? [this.namespace, ref, scheme] : [this.namespace, ref])
+    return r.rows[0]?.record as PendingRecord | undefined
+  }
+
+  /** One statement: the row lock orders two outcomes at once, the first stays (decision 1003). */
+  async decide(ref: string, outcome: RailsOutcome, scheme: Scheme) {
+    const r = await this.db.pool.query(
+      `update rails_pending set record = case when record ? 'outcome' then record else record || jsonb_build_object('outcome', $4::jsonb) end
+       where ns = $1 and ref = $2 and scheme = $3 returning record`,
+      [this.namespace, ref, scheme, JSON.stringify(outcome)])
     return r.rows[0]?.record as PendingRecord | undefined
   }
 

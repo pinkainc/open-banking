@@ -161,7 +161,7 @@ export class Emulator {
     })
     // Outcomes the rails deliver later and credits from the scheme come in here (decision 930).
     this.rails.listen({
-      outcome: (ref, o) => this.engine.settle(ref, o), credit: (c) => this.engine.received(c),
+      outcome: (ref, o, scheme) => this.engine.settle(ref, o, scheme), credit: (c) => this.engine.received(c),
       // R-transactions after settlement (decision 1000) and recalls (1001).
       collectionReturned: (ref, code) => this.directDebit.returned(ref, code), recall: (r) => this.engine.recalled(r),
     })

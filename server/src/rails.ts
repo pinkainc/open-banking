@@ -28,8 +28,18 @@ export interface OutgoingPayment {
  * after being attempted); the bank may retry it on another scheme.
  */
 export type RailsOutcome = { status: 'settled' } | { status: 'rejected'; reason: string } | { status: 'unavailable' }
-/** What `send` answers: the final outcome, or `accepted` with the outcome to follow through RailsEvents.outcome. */
-export type RailsAnswer = RailsOutcome | { status: 'accepted' }
+/**
+ * What `send` answers: the final outcome, or `accepted` with the outcome to follow through
+ * RailsEvents.outcome, or `unknown` when the rails cannot tell whether they took it (a
+ * bridge timeout): it waits as `accepted` and is reconciled (decision 1002).
+ */
+export type RailsAnswer = RailsOutcome | { status: 'accepted' } | { status: 'unknown' }
+/** What `status` answers: as `send`, or `absent` when the rails never took ref + scheme. */
+export type RailsStatus = RailsAnswer | { status: 'absent' }
+
+/** Two outcomes are the same: status and, for a rejection, the reason. */
+export const sameOutcome = (a: RailsOutcome, b: RailsOutcome) =>
+  a.status === b.status && (a.status !== 'rejected' || a.reason === (b as { reason?: string }).reason)
 
 /** A credit from the scheme to an account here (SEPA, SEPA Instant, Faster Payments …). */
 export interface IncomingCredit {
@@ -66,8 +76,11 @@ export class RailsRetryLater extends Error {}
 
 /** Where the rails deliver what happens later; the engine registers it (Rails.listen). */
 export interface RailsEvents {
-  /** The final outcome of a payment `send` answered `accepted`. False: unknown ref or already final (ignored). */
-  outcome(ref: string, outcome: RailsOutcome): Promise<boolean>
+  /**
+   * The final outcome of a payment `send` answered `accepted`. False: unknown ref, already
+   * final, another outcome stored first (decision 1003) or another scheme's attempt (ignored).
+   */
+  outcome(ref: string, outcome: RailsOutcome, scheme?: Scheme): Promise<boolean>
   /** A credit from the scheme; the same ref again answers the first result. */
   credit(c: IncomingCredit): Promise<CreditResult>
   /**
@@ -97,6 +110,8 @@ export type CollectionOutcome = { status: 'settled' } | { status: 'rejected'; co
 
 export interface Rails {
   send(p: OutgoingPayment): Promise<RailsAnswer>
+  /** What the rails know of ref + scheme (reconciliation, decision 1002); optional for test doubles. */
+  status?(ref: string, scheme: Scheme): Promise<RailsStatus>
   /** Registers the engine's sink for later outcomes and incoming credits (one sink; a second replaces it). */
   listen(events: RailsEvents): void
   /** Is SEPA Instant available to this account? Decides automatic scheme selection. */
@@ -123,8 +138,10 @@ export class SimulatorRails implements Rails {
   #collectionRejects = new Map<string, string>()
   #events?: RailsEvents
   #deferred = false
+  #timeouts = false
   /** Deferred mode: payments answered `accepted` whose outcome is not delivered yet (ref → outcome). */
   readonly held = new Map<string, RailsOutcome>()
+  #heldScheme = new Map<string, Scheme>()
 
   listen(events: RailsEvents) { this.#events = events }
   /**
@@ -133,6 +150,17 @@ export class SimulatorRails implements Rails {
    */
   defer(on = true) { this.#deferred = on }
   get deferred() { return this.#deferred }
+  /**
+   * Timeouts (decision 1002): `send` takes the payment (decides or holds its outcome) and
+   * answers `unknown`, as a bridge whose answer was lost; `status` then tells the outcome.
+   */
+  timeouts(on = true) { this.#timeouts = on }
+  get timingOut() { return this.#timeouts }
+  async status(ref: string, scheme: Scheme): Promise<RailsStatus> {
+    if (this.held.has(ref) && this.#heldScheme.get(ref) === scheme) return { status: 'accepted' }
+    const sent = this.#lastSent(ref, scheme)
+    return sent ? sent.outcome : { status: 'absent' }
+  }
   /**
    * Delivers held outcomes through the engine's events: one ref (optionally with another
    * outcome, e.g. a reject after accept) or all of them, oldest first. Returns how many were applied.
@@ -143,10 +171,19 @@ export class SimulatorRails implements Rails {
     let n = 0
     for (const r of refs) {
       const o = outcome ?? this.held.get(r)!
+      const scheme = this.#heldScheme.get(r)
       this.held.delete(r)
+      this.#heldScheme.delete(r)
+      // What `status` tells from now on.
+      const sent = this.#lastSent(r, scheme)
+      if (sent) sent.outcome = o
       if (await this.#events.outcome(r, o)) n++
     }
     return n
+  }
+  #lastSent(ref: string, scheme: Scheme | undefined) {
+    for (let i = this.sent.length - 1; i >= 0; i--) if (this.sent[i].ref === ref && this.sent[i].scheme === scheme) return this.sent[i]
+    return undefined
   }
   /** A credit from the "scheme", through the same events as a bridge's. */
   async credit(c: IncomingCredit): Promise<CreditResult> {
@@ -175,7 +212,7 @@ export class SimulatorRails implements Rails {
   reset() {
     this.#rejects.clear(); this.#noInstant.clear(); this.#instantFails.clear(); this.#collectionRejects.clear()
     this.sent.length = 0; this.collections.length = 0
-    this.held.clear(); this.#deferred = false
+    this.held.clear(); this.#heldScheme.clear(); this.#deferred = false; this.#timeouts = false
   }
 
   async collect(c: OutgoingCollection): Promise<CollectionOutcome> {
@@ -195,9 +232,10 @@ export class SimulatorRails implements Rails {
     keepLast(this.sent, RAILS_LOG_MAX)
     if (this.#deferred) {
       this.held.set(p.ref, outcome)
-      return { status: 'accepted' }
+      this.#heldScheme.set(p.ref, p.scheme)
+      return { status: this.#timeouts ? 'unknown' : 'accepted' }
     }
-    return outcome
+    return this.#timeouts ? { status: 'unknown' } : outcome
   }
 
   async instantReachable(iban: string) { return !this.#noInstant.has(iban.toUpperCase()) }

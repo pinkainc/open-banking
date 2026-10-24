@@ -126,6 +126,16 @@ const port = Number(env.PORT ?? 8443)
 await app.listen({ port, host: env.HOST ?? '127.0.0.1' })
 console.error(`listening on https://${env.HOST ?? '127.0.0.1'}:${port} (mutual TLS)`)
 if (rails) {
+  // Payments a bridge timeout left in doubt, or whose callback never came: asked at the start
+  // and every minute, settled from the bridge's answer (decision 1002).
+  let reconciling = false // one run at a time: a slow bridge may take longer than the interval
+  const reconcile = async () => {
+    if (reconciling) return
+    reconciling = true
+    try { await emulator.engine.reconcile() } catch (e) { console.error('rails reconciliation failed:', e) } finally { reconciling = false }
+  }
+  void reconcile()
+  setInterval(reconcile, 60 * 1000).unref()
   // The bridge's callbacks (HMAC-signed), started after the engine listens to the rails.
   const callbacks = railsCallbackApp(rails)
   const cbHost = env.RAILS_CALLBACK_HOST ?? '127.0.0.1'

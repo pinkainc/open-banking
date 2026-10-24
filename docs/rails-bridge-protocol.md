@@ -30,7 +30,7 @@ TARGET2 i SEPA Direct Debit. JSON preko HTTP-a, potpisan dijeljenom tajnom. Odlu
 | `POST /payments` | `{ref, scheme, amount, currency, debtor: {name?, iban}, creditor: {name?, iban?, account?, sortCode?, accountNumber?, bic?}, endToEndId?, remittance?}` | `{"status":"accepted"}` (na čekanju u shemi), ili odmah `settled`, `{"status":"rejected","reason":"…"}`, `unavailable` |
 | `POST /collections` | `{ref, amount, currency, creditor: {name?, iban}, debtor: {name?, iban, bic?}, endToEndId, mandateId?, settlementDate}` | `{"status":"settled"}` ili `{"status":"rejected","code":"AM04"}` (SEPA R-kod) |
 | `GET /reachability/{iban}` | — | `{"instant": true\|false}` (je li račun dohvatljiv SEPA Instantom) |
-| `GET /payments/{ref}` | — | stanje plaćanja; za rekoncilijaciju nakon restarta (odluka 934), mi ga još ne zovemo |
+| `GET /payments/{ref}?scheme=SEPA` | — | stanje pokušaja `ref` + `scheme` kao što bi ga vratio `POST /payments` (`accepted`, `settled`, `rejected` s `reason`, `unavailable`); `404` ako ga bridge nikad nije primio (odluka 1002) |
 
 - `scheme`: `SEPA`, `INST`, `SWIFT`, `TARGET2`, `FAST`. Za Faster Payments na UK račun bez
   IBAN-a `creditor.account` je 14 znamenki, a dodajemo i `sortCode` (6) i `accountNumber` (8).
@@ -38,13 +38,18 @@ TARGET2 i SEPA Direct Debit. JSON preko HTTP-a, potpisan dijeljenom tajnom. Odlu
   obliku (`"Account closed."`).
 - `unavailable`: shema plaćanje nije mogla uzeti (Instant timeout, shema zatvorena).
   Automatski odabran INST tada ide kao SEPA (pain.002 ACWC), inače RJCT.
-- Ako bridge nije dohvatljiv ni nakon ponavljanja ili odgovori izvan protokola: plaćanje je
-  `unavailable` (RJCT `Technical problem. Try again`, sredstva oslobođena), reachability je
-  `false` (ide SEPA). Rizik: ako naš `POST` istekne nakon što ga je bridge primio, mi
-  plaćanje odbijamo, a bridge bi ga mogao izvršiti. Zato bridge odgovara odmah (unutar
-  `RAILS_TIMEOUT_MS`, zadano 10 s) i plaćanje šalje u shemu tek nakon odgovora; za ref koji
-  smo odbili kasniji `payment.outcome` dobiva `applied: false`, i to je signal za ručnu
-  rekoncilijaciju (odluka 936).
+- Ako bridge nije dohvatljiv (odbijena veza, `5xx` nakon ponavljanja) ili odgovori izvan
+  protokola: plaćanje je `unavailable` (RJCT `Technical problem. Try again`, sredstva
+  oslobođena), reachability je `false` (ide SEPA). **`5xx` znači da bridge plaćanje nije
+  primio**; ako ga je spremio, mora odgovoriti `200`.
+- **Timeout (odluka 1002).** Ako je neki pokušaj `POST /payments` istekao ili je veza pukla
+  nakon spajanja, ne pogađamo: odmah pitamo `GET /payments/{ref}?scheme=` i uzimamo
+  njegov odgovor. `404` čitamo kao `unavailable`, pa **bridge nakon `404` za `ref` + `scheme`
+  mora odbiti (`rejected`) `POST` tog plaćanja koji je možda još na putu**. Ako ni `GET` ne
+  odgovori, plaćanje čeka kao `accepted` (ACSP, sredstva rezervirana), a rekoncilijacija
+  (pri startu i svake minute za plaćanja koja čekaju dulje od 60 s) ponovno pita `GET` dok
+  ne dobije konačan odgovor. Isto pokriva callback koji nikad nije stigao. Bridge i dalje
+  treba odgovoriti unutar `RAILS_TIMEOUT_MS` (zadano 10 s).
 - `collections` odgovara pri prezentaciji (odluka 933); povrat ili refund nakon namire
   (R-transakcija do 13 mjeseci) stiže kasnije kao `collection.returned` (odluka 1000).
 
@@ -52,7 +57,7 @@ TARGET2 i SEPA Direct Debit. JSON preko HTTP-a, potpisan dijeljenom tajnom. Odlu
 
 | `type` | Tijelo | Odgovor `200` |
 | --- | --- | --- |
-| `payment.outcome` | `{type, ref, outcome: {status: "settled"\|"rejected"\|"unavailable", reason?}}` | `{"applied": true}`; `false` za nepoznat ili već završen ref (duplikat, ignoriran) |
+| `payment.outcome` | `{type, ref, scheme?, outcome: {status: "settled"\|"rejected"\|"unavailable", reason?}}` | `{"applied": true}`; `false` za nepoznat ili već završen ref (duplikat, ignoriran), za drugi `scheme` od pokušaja koji čeka, i za ishod različit od prvog spremljenog (odluka 1003) |
 | `credit` | `{type, credit: {ref, iban, amount, currency, scheme, debtor: {name?, iban?, bic?, account?}, creditorName?, remittance?, reference?, endToEndId?}}` | `{"status":"booked","servicerRef":"…"}` ili `{"status":"returned","code":"AC01","reason":"…"}` |
 | `collection.returned` | `{type, ref, code}`: `ref` kolekcije (kao u `POST /collections`), `code` SEPA R-kod (`MD06`, `MD01`, `AC04` …) | `{"applied": true}` (vraćeno vjerovniku na teret, camt.054 DBIT s `RtrInf`); `false` za nepoznatu, nenamirenu, stariju od 13 mjeseci ili već vraćenu (ponavljanje); `503` kad vjerovnik nema sredstava (ponavljaj) |
 | `credit.recall` | `{type, recall: {ref, recallRef, code}}`: `ref` je `credit.ref` primljene uplate, `recallRef` camt.056 `CxlId`, `code` razlog (`DUPL`, `TECH`, `FRAD`, `CUST`, `AC03`, `AM09` …) | `{"status":"returned","servicerRef":"…"}` (bridge šalje pacs.004) ili `{"status":"refused","code":"NOOR"\|"ARDT"\|"AM04"\|"NOAS"}` (bridge šalje camt.029) |
@@ -67,6 +72,10 @@ TARGET2 i SEPA Direct Debit. JSON preko HTTP-a, potpisan dijeljenom tajnom. Odlu
   pitati, pa je odgovor `NOAS`. `NOOR`: uplata s tim refom nije knjižena kod nas; `ARDT`:
   vraćena je već pri primitku. Ponovljen opoziv istog refa vraća prvi odgovor. Povrat našeg
   odlaznog plaćanja (pacs.004) bridge šalje kao običan `credit` na račun platitelja.
+- `payment.outcome`: prvi spremljeni ishod plaćanja vrijedi (odluka 1003). Drugačiji ishod
+  za isti pokušaj (npr. `rejected` nakon `settled`) dobiva `applied: false`, ne knjiži se i
+  zapisuje se u log; i odgovor na `POST /payments` se tako sprema. `scheme` (preporučeno)
+  veže ishod uz pokušaj: kasni INST ishod ne dira SEPA pokušaj istog `ref`.
 - Ostali odgovori: `401` loš HMAC, `400` tijelo izvan protokola, `503` server još ne sluša,
   `5xx` greška kod nas (bridge ponavlja).
 

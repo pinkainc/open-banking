@@ -19,6 +19,13 @@ class FakeBridge {
   readonly calls: { path: string; hmacOk: boolean }[] = []
   answer: any = { status: 'accepted' }
   down = false
+  /** The answer to POST /payments comes this late (ms); `lose` POSTs are not even stored (decision 1002). */
+  slowMs = 0
+  lose = 0
+  /** GET /payments/{ref} answers 503. */
+  statusDown = false
+  /** Refs + schemes answered 404: a late POST of them is refused (the protocol's rule). */
+  readonly refused = new Set<string>()
   noInstant = new Set<string>()
   url = ''
   constructor() {
@@ -33,9 +40,21 @@ class FakeBridge {
       if (!ok(req)) return reply.code(401).send({ error: 'bad HMAC' })
       if (this.down) return reply.code(503).send({ error: 'down' })
       const p = JSON.parse(req.body as string)
+      if (this.lose > 0) { this.lose--; await new Promise((r) => setTimeout(r, this.slowMs)); return { status: 'accepted' } }
+      if (this.refused.has(`${p.ref}|${p.scheme}`)) return { status: 'rejected', reason: 'Reconciled as not received.' }
       // Idempotent by ref: a repeat answers what the first got.
       if (!this.payments.has(p.ref)) this.payments.set(p.ref, { ...p, answer: this.answer })
+      if (this.slowMs) await new Promise((r) => setTimeout(r, this.slowMs))
       return this.payments.get(p.ref).answer
+    })
+    this.app.get('/v1/payments/:ref', async (req, reply) => {
+      if (!ok(req)) return reply.code(401).send({ error: 'bad HMAC' })
+      if (this.statusDown) return reply.code(503).send({ error: 'down' })
+      const { ref } = req.params as { ref: string }
+      const { scheme } = req.query as { scheme?: string }
+      const p = this.payments.get(ref)
+      if (!p || p.scheme !== scheme) { this.refused.add(`${ref}|${scheme}`); return reply.code(404).send({ error: 'no such payment' }) }
+      return p.answer
     })
     this.app.get('/v1/reachability/:iban', async (req, reply) => {
       if (!ok(req)) return reply.code(401).send({ error: 'bad HMAC' })
@@ -68,6 +87,7 @@ async function callback(event: object, secret = SECRET) {
 let ctx: Ctx
 beforeEach(async () => {
   bridge.payments.clear(); bridge.calls.length = 0; bridge.answer = { status: 'accepted' }; bridge.down = false; bridge.noInstant.clear()
+  bridge.slowMs = 0; bridge.lose = 0; bridge.statusDown = false; bridge.refused.clear()
   // A fresh emulator per test; it registers its engine with the shared HttpRails.
   ctx = await setup({ rails })
 })
@@ -258,6 +278,77 @@ describe('HttpRails: R-transactions after settlement and recalls (decisions 1000
     assert.deepEqual((await recall('SCT-NONE', 'TECH')).body, { status: 'refused', code: 'NOOR' })
     assert.equal((await callback({ type: 'credit.recall', recall: { ref: 'SCT-R2', code: 'DUPL' } })).status, 400)
     assert.equal(await balance(ctx, C2.iban), '105.00')
+  })
+})
+
+describe('HttpRails: a timeout and reconciliation (decisions 1002, 1003)', () => {
+  // Answers in 150 ms are too late for this one: every POST below times out.
+  const impatient = new HttpRails({ url: bridge.url, secret: SECRET, retries: 0, timeoutMs: 80 })
+  let c: Ctx
+  beforeEach(async () => { c = await setup({ rails: impatient }); bridge.slowMs = 150 })
+  const payC = async (txs: TxSpec[]) => assert.equal((await call(c, { method: 'POST', url: '/payment', body: pain001([{ txs }]) })).statusCode, 202)
+  const reports = async () => (await drain(c)).filter((m) => m.type === 'PAYMENT')
+    .map((m) => many(m.doc.Document.CstmrPmtStsRpt.OrgnlPmtInfAndSts).flatMap((b: any) => many(b.TxInfAndSts)).map((t: any) => [t.TxSts as string, t.StsRsnInf?.AddtlInf as string | undefined]))
+
+  test('the POST times out after the bridge took it: asked GET /payments/{ref}?scheme=, settled from its answer', async () => {
+    bridge.answer = { status: 'settled' }
+    await payC([{ amount: '7.00', creditorIban: DE_IBAN }])
+    const p = onlyPayment()
+    assert.ok(bridge.calls.some((x) => x.path === `/v1/payments/${p.ref}?scheme=INST` && x.hmacOk), 'asked, signed')
+    assert.deepEqual(await reports(), [[['ACSP', undefined]], [['ACSC', undefined]]])
+    assert.equal(await balance(c, C1.iban), '9993.00')
+    assert.deepEqual(await c.emulator.engine.atRails(), [])
+  })
+
+  test('nor does the GET answer: waits as accepted; reconciled later from the bridge, once', async () => {
+    bridge.statusDown = true
+    await payC([{ amount: '7.00', creditorIban: DE_IBAN }])
+    const p = onlyPayment()
+    assert.deepEqual(await reports(), [[['ACSP', undefined]]])
+    assert.deepEqual(await c.emulator.engine.atRails(), [p.ref])
+    assert.equal(await c.emulator.engine.reconcile({ minAgeMs: 0 }), 0, 'the bridge still does not answer')
+    bridge.statusDown = false
+    assert.equal(await c.emulator.engine.reconcile({ minAgeMs: 0 }), 0, 'accepted at the bridge: waits')
+    p.answer = { status: 'settled' } // the scheme settled it; the callback never came
+    assert.equal(await c.emulator.engine.reconcile({ minAgeMs: 0 }), 1)
+    assert.deepEqual(await reports(), [[['ACSC', undefined]]])
+    assert.equal(await c.emulator.engine.reconcile({ minAgeMs: 0 }), 0)
+    assert.equal(await balance(c, C1.iban), '9993.00')
+  })
+
+  test('the bridge never got it (404): unavailable, RJCT "Technical problem", released; its late POST is refused', async () => {
+    bridge.noInstant.add(DE_IBAN)
+    bridge.lose = 1
+    await payC([{ amount: '7.00', creditorIban: DE_IBAN }])
+    assert.equal(bridge.payments.size, 0)
+    assert.deepEqual(await reports(), [[['ACSP', undefined]], [['RJCT', 'Technical problem. Try again']]])
+    assert.equal(bridge.refused.size, 1, 'the bridge refuses the ref + scheme from now on')
+    assert.equal((await call(c, { url: `/_sim/accounts/${C1.iban}` })).json().balances.EUR.available, '10000.00')
+  })
+})
+
+describe('HttpRails: conflicting and scheme-bound callbacks (decision 1003)', () => {
+  test('settled and rejected at once: one applies, the other is applied false; reports and balance agree', async () => {
+    await pay([{ amount: '7.00', creditorIban: DE_IBAN }])
+    const p = onlyPayment()
+    await messages()
+    const [a, b] = await Promise.all([
+      callback({ type: 'payment.outcome', ref: p.ref, outcome: { status: 'settled' } }),
+      callback({ type: 'payment.outcome', ref: p.ref, outcome: { status: 'rejected', reason: 'Account closed.' } }),
+    ])
+    assert.deepEqual([a.status, b.status], [200, 200])
+    assert.equal([a.body.applied, b.body.applied].filter(Boolean).length, 1)
+    const m = await messages()
+    if (a.body.applied) assert.deepEqual([m.reports, m.notes.length, await balance(ctx, C1.iban)], [[[['ACSC', 'INST', undefined]]], 1, '9993.00'])
+    else assert.deepEqual([m.reports, m.notes.length, await available(C1.iban)], [[[['RJCT', 'INST', 'Account closed.']]], 0, '10000.00'])
+  })
+
+  test('an outcome with another scheme than the waiting attempt: applied false; an unknown scheme 400', async () => {
+    await pay([{ amount: '7.00', creditorIban: DE_IBAN }])
+    const p = onlyPayment()
+    assert.deepEqual(await callback({ type: 'payment.outcome', ref: p.ref, scheme: 'SEPA', outcome: { status: 'settled' } }), { status: 200, body: { applied: false } })
+    assert.equal((await callback({ type: 'payment.outcome', ref: p.ref, scheme: 'XXX', outcome: { status: 'settled' } })).status, 400)
+    assert.deepEqual(await callback({ type: 'payment.outcome', ref: p.ref, scheme: 'INST', outcome: { status: 'settled' } }), { status: 200, body: { applied: true } })
   })
 })
 
