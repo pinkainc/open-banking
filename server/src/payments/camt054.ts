@@ -25,7 +25,11 @@ export interface Booking {
    * The VIBAN the entry went through when `account` is its master account: shown as the
    * own party, Dbtr/DbtrAcct on a debit and Cdtr/CdtrAcct on a credit (P 06).
    */
-  virtual?: { iban: string; name?: string; country?: string; address?: string }
+  virtual?: {
+    iban?: string; /** A non-IBAN identifier (an agency account's Othr/Id). */ account?: string
+    name?: string; country?: string; address?: string
+    /** An agency account of an indirect scheme participant, not a VIBAN (decision 832). */ agency?: boolean
+  }
   /** Bank transaction domain, family and sub-family; default PMNT, ICDT / RCDT with OTHR (credit transfers). */
   bankTxCode?: { domain?: string; family: string; subFamily: string }
   /** Direct debits: the mandate (Refs/MndtId). */
@@ -46,7 +50,7 @@ export function camt054(b: Booking, version: '02' | '08', bank: { bic: string; n
   const vb = b.virtual
   const vAdr = vb?.country ? el('PstlAdr', el('Ctry', vb.country), opt('AdrLine', vb.address?.slice(0, 70))) : null
   const vParty = vb?.name ? (v8 ? el('Pty', el('Nm', vb.name.slice(0, 140)), vAdr) : [el('Nm', vb.name.slice(0, 140)), vAdr]) : null
-  const vAcct = vb ? el('Id', el('IBAN', vb.iban)) : null
+  const vAcct = vb ? (vb.iban ? el('Id', el('IBAN', vb.iban)) : el('Id', el('Othr', el('Id', vb.account ?? '')))) : null
   const [dbtr, dbtrAcct, cdtr, cdtrAcct] = b.direction === 'DBIT' ? [vParty, vAcct, cpParty, cpAcct] : [cpParty, cpAcct, vParty, vAcct]
   const ownAgent = el('FinInstnId', el(bicTag, bank.bic.slice(0, 8)), el('Nm', bank.name))
   const cpAgent = cp.bic ? el('FinInstnId', el(bicTag, cp.bic.slice(0, 8))) : null

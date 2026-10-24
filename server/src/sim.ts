@@ -104,22 +104,26 @@ export function simRoutes(emulator: Emulator) {
     app.post('/incoming', async (req) => {
       const b = (req.body ?? {}) as {
         iban?: string; amount?: string; currency?: string; scheme?: string
-        debtor?: { name?: string; iban?: string; bic?: string }; remittance?: string; reference?: string; endToEndId?: string
+        debtor?: { name?: string; iban?: string; bic?: string; account?: string }; remittance?: string; reference?: string; endToEndId?: string
+        creditorName?: string
       }
       if (!b.iban) throw bad('iban is required')
+      // `iban` may also be an agency account: an IBAN or a sort code and account number (decision 835).
       const iban = normalizeIban(b.iban)
       const viban = emulator.viban.registry.get(iban)
-      if (!emulator.directory.ownerOf(iban) && !viban) throw new ConnectError(404, 'NOT_FOUND', `no account ${iban}`)
+      const agency = !emulator.directory.ownerOf(iban) && !viban ? emulator.agency.accounts.find(iban)[0] : undefined
+      if (!emulator.directory.ownerOf(iban) && !viban && !agency) throw new ConnectError(404, 'NOT_FOUND', `no account ${iban}`)
       const scheme = b.scheme ?? 'SEPA'
       if (!['SEPA', 'INST', 'SWIFT', 'TARGET2'].includes(scheme)) throw bad(`unknown scheme ${scheme}`)
       const r = await emulator.engine.incoming({
         iban, amount: amount(b.amount), currency: b.currency ?? 'EUR', scheme,
         debtor: b.debtor ?? { name: 'Simulated Debtor' }, remittance: b.remittance, reference: b.reference, endToEndId: b.endToEndId,
+        creditorName: b.creditorName,
       })
-      const account = viban?.master ?? iban
+      const account = viban?.master ?? agency?.master ?? iban
       // A VIBAN that is not ACTIVE: the bank returns the payment (ISO reason AC04 / AC06).
       if (r.returned) return { iban, returned: true, reason: r.returned.code, description: r.returned.reason, balances: await balances(account) }
-      return { iban, ...(viban ? { masterAccount: account } : {}), accountServicerReference: r.servicerRef, balances: await balances(account) }
+      return { iban, ...(viban || agency ? { masterAccount: account } : {}), accountServicerReference: r.servicerRef, balances: await balances(account) }
     })
 
     // Account reports: automatic end-of-day statement and payment limits per customer.

@@ -6,6 +6,7 @@
 // an ACTIVE VIBAN with a holder (a person PERSONAL, a company BUSINESS), or an account the
 // simulator registered for another bank (`/_sim/payee/accounts`, which can also force an
 // answer). Nothing else is remembered.
+import type { AgencyStore } from '../agency/store.js'
 import { BoundedMap, type Bounds } from '../bounded.js'
 import type { Clock } from '../clock.js'
 import type { CustomerKey, Directory } from '../directory.js'
@@ -81,7 +82,11 @@ export function accountKey(s: string): string | undefined {
 interface Holder { name: string; category: Category }
 interface Found { holder?: Holder; answer?: string }
 
-export interface PayeeDeps { directory: Directory; viban: VibanRegistry; inbox: Inbox; clock: Clock }
+export interface PayeeDeps {
+  directory: Directory; viban: VibanRegistry; inbox: Inbox; clock: Clock
+  /** Synchronised agency accounts: LHV answers for them too (decision 836). */
+  agency?: () => AgencyStore | undefined
+}
 
 export const DEFAULT_PAYEE_ACCOUNTS: Bounds = { max: 10_000 }
 
@@ -112,7 +117,13 @@ export class PayeeService {
     const v = this.deps.viban.get(iban)
     const name = v?.user?.person?.Name ?? v?.user?.company?.Name
     if (v && v.status === 'ACTIVE' && name) return { name, category: v.user?.person ? 'PERSONAL' : 'BUSINESS' }
-    return undefined
+    return this.#agencyHolder(iban)
+  }
+
+  /** A synchronised agency account that is not CLOSED and has a name (decision 836). */
+  #agencyHolder(id: string): Holder | undefined {
+    const a = this.deps.agency?.()?.find(id).find((x) => x.status !== 'CLOSED' && x.name)
+    return a ? { name: a.name!, category: a.category ?? 'PERSONAL' } : undefined
   }
 
   /** Who holds an account given as an IBAN or a UK BBAN, and any forced answer. */
@@ -126,6 +137,7 @@ export class PayeeService {
       const match = (i: string) => gbBban(i) === bban
       const acct = this.deps.directory.all().flatMap((c) => c.accounts).find(match) ?? this.deps.viban.all().map((v) => v.iban).find(match)
       if (acct) own = this.#ownHolder(acct)
+      else own = this.#agencyHolder(bban)
     }
     const holder = sim?.name ? { name: sim.name, category: sim.category ?? own?.category ?? 'PERSONAL' } : own
     return { holder, answer: sim?.answer }

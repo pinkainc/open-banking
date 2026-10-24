@@ -84,7 +84,7 @@ export function camt053(p: StatementPage): string {
     const vAdr = v8 && vb?.country ? el('PstlAdr', el('Ctry', vb.country), opt('AdrLine', vb.address?.slice(0, 70))) : null
     const vParty = vb?.name ? (v8 ? el('Pty', el('Nm', vb.name.slice(0, 140)), vAdr) : [el('Nm', vb.name.slice(0, 140))]) : null
     const own = vb
-      ? { party: vParty, acct: account(vb.iban, undefined), agent: agent(p.bank.bic, p.bank.name) }
+      ? { party: vParty, acct: account(vb.iban, vb.account), agent: agent(p.bank.bic, p.bank.name) }
       : { party: party(p.owner.name, p.owner.code), acct: account(e.account, undefined), agent: agent(p.bank.bic, p.bank.name) }
     const other = { party: party(cp.name, cp.code), acct: account(cp.iban, cp.account), agent: agent(cp.bic) }
     const [dbtr, cdtr] = e.direction === 'DBIT' ? [own, other] : [other, own]

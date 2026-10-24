@@ -56,7 +56,7 @@ export function pain002(r: StatusReport, bankBic: string, now: Date): string {
       s.block.reqdExctnDt ? el('ReqdExctnDt', v10 ? el('Dt', s.block.reqdExctnDt) : s.block.reqdExctnDt) : null,
       s.scheme ? el('PmtTpInf', el('SvcLvl', el('Prtry', s.scheme))) : null,
       s.block.debtorName ? el('Dbtr', party(s.block.debtorName)) : null,
-      s.block.debtorIban ? el('DbtrAcct', account(s.block.debtorIban)) : null,
+      s.block.debtorIban ? el('DbtrAcct', s.block.debtorOther ? account(undefined, s.block.debtorIban) : account(s.block.debtorIban)) : null,
       el('DbtrAgt', agent(bankBic)),
       el('CdtrAgt', agent(s.creditorBic ?? s.tx.creditorBic)),
       s.tx.creditorName ? el('Cdtr', party(s.tx.creditorName)) : null,

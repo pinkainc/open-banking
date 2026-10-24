@@ -113,7 +113,7 @@ export class Emulator {
     this.engine = new PaymentEngine(this.directory, this.ledger, this.rails, this.inbox, this.clock, this.bank, {
       strictIban: opts.strictIban, pain00103Until: opts.pain00103Until ?? '2026-11-15', xsd, virtual: this.viban.registry, msgIds,
       onBooking: (_c, b) => { this.journal.record(b) }, limits: (c) => this.reports.paymentLimits(c),
-      onIncoming: (e) => this.accounts.onIncoming(e),
+      onIncoming: (e) => this.accounts.onIncoming(e), agency: () => this.agency?.accounts,
     })
     this.directDebit = new DirectDebitService({
       directory: this.directory, ledger: this.ledger, rails: this.rails, inbox: this.inbox, clock: this.clock, bank: this.bank,
@@ -124,7 +124,7 @@ export class Emulator {
       onBooking: (_c, b) => { this.journal.record(b) },
     })
     this.contracts = new Contracts(this.directory, this.clock)
-    this.payee = new PayeeService({ directory: this.directory, viban: this.viban.registry, inbox: this.inbox, clock: this.clock })
+    this.payee = new PayeeService({ directory: this.directory, viban: this.viban.registry, inbox: this.inbox, clock: this.clock, agency: () => this.agency?.accounts })
     this.bacs = new BacsService({
       directory: this.directory, ledger: this.ledger, rails: this.rails, inbox: this.inbox, clock: this.clock, bank: this.bank, virtual: this.viban.registry,
       onBooking: (_c, b) => { this.journal.record(b) }, onIncoming: (e) => this.accounts.onIncoming(e),

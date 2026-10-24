@@ -26,7 +26,11 @@ export interface Block {
   ctrlSum?: string
   reqdExctnDt?: string
   debtorName?: string
+  /** The debtor account: an IBAN, or with `debtorOther` the `Othr/Id` (an agency account, decision 830). */
   debtorIban?: string
+  debtorOther?: boolean
+  /** Dbtr/PstlAdr: country and town (mandatory for an indirect scheme participant, decision 831). */
+  debtorAddress?: { country?: string; town?: string }
   scheme?: string
   txs: Tx[]
 }
@@ -61,7 +65,9 @@ export function readPain001(doc: any, version: PainVersion): PaymentFile {
     blocks: many(root.PmtInf).map((p: any): Block => ({
       pmtInfId: text(p.PmtInfId), nbOfTxs: text(p.NbOfTxs), ctrlSum: text(p.CtrlSum),
       reqdExctnDt: v09 ? (text(p.ReqdExctnDt?.Dt) ?? text(p.ReqdExctnDt?.DtTm)?.slice(0, 10)) : text(p.ReqdExctnDt),
-      debtorName: text(p.Dbtr?.Nm), debtorIban: text(p.DbtrAcct?.Id?.IBAN),
+      debtorName: text(p.Dbtr?.Nm), debtorIban: text(p.DbtrAcct?.Id?.IBAN) ?? text(p.DbtrAcct?.Id?.Othr?.Id),
+      ...(p.DbtrAcct?.Id?.IBAN === undefined && p.DbtrAcct?.Id?.Othr?.Id !== undefined ? { debtorOther: true } : {}),
+      ...(p.Dbtr?.PstlAdr ? { debtorAddress: { country: text(p.Dbtr.PstlAdr.Ctry), town: text(p.Dbtr.PstlAdr.TwnNm) ?? many(p.Dbtr.PstlAdr.AdrLine).map((l) => text(l)).find(Boolean) } } : {}),
       scheme: scheme(p.PmtTpInf),
       txs: many(p.CdtTrfTxInf).map((t: any): Tx => ({
         instrId: text(t.PmtId?.InstrId), endToEndId: text(t.PmtId?.EndToEndId), uetr: text(t.PmtId?.UETR),
@@ -86,7 +92,7 @@ export function structuralProblem(f: PaymentFile): string | undefined {
   for (const b of f.blocks) {
     if (!b.pmtInfId) return 'PmtInf/PmtInfId is missing'
     if (!b.reqdExctnDt) return `PmtInf ${b.pmtInfId}: ReqdExctnDt is missing`
-    if (!b.debtorIban) return `PmtInf ${b.pmtInfId}: DbtrAcct/Id/IBAN is missing`
+    if (!b.debtorIban) return `PmtInf ${b.pmtInfId}: DbtrAcct/Id is missing`
     if (b.txs.length === 0) return `PmtInf ${b.pmtInfId}: CdtTrfTxInf is missing`
     for (const t of b.txs) {
       if (!t.endToEndId) return `PmtInf ${b.pmtInfId}: PmtId/EndToEndId is missing`

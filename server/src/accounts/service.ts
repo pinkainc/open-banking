@@ -174,7 +174,7 @@ export class AccountsService {
     const date = dateLondon(e.bookedAt)
     return {
       ...(e.endToEndId ? { EndToEndId: e.endToEndId } : {}),
-      IsVirtualAccountPayment: !!e.virtual || (!!e.counterparty.iban && !!this.deps.viban.resolve(e.counterparty.iban)),
+      IsVirtualAccountPayment: (!!e.virtual && !e.virtual.agency) || (!!e.counterparty.iban && !!this.deps.viban.resolve(e.counterparty.iban)),
       Amount: { Amount: fromMinor(e.amount), Currency: e.currency },
       CreditDebitIndicator: debit ? 'Debit' : 'Credit',
       Status: 'Booked',
