@@ -72,7 +72,7 @@ export function simRoutes(emulator: Emulator) {
     })
 
     // Payments waiting in the internet bank (SCA) or in the bank's manual review.
-    app.get('/payments/pending', async () => ({ payments: emulator.engine.parked() }))
+    app.get('/payments/pending', async () => ({ payments: await emulator.engine.parked() }))
     for (const action of ['approve', 'reject'] as const) {
       app.post(`/payments/pending/${action}`, async (req) => {
         const b = (req.body ?? {}) as { refs?: unknown; reason?: unknown }

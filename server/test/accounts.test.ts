@@ -64,7 +64,7 @@ async function pay(creditorIban: string, amount: string, creditorName = 'Katie B
   const r = await call(ctx, { method: 'POST', url: '/payment', as: U1.code, body })
   assert.equal(r.statusCode, 202, r.body)
   const e = (await ctx.emulator.journal.entries(A, 0, Infinity)).filter((x) => x.endToEndId === `E2E-${amount}`)
-  return e.length ? e[0].servicerRef : ctx.emulator.engine.parked().find((p) => p.endToEndId === `E2E-${amount}`)!.ref
+  return e.length ? e[0].servicerRef : (await ctx.emulator.engine.parked()).find((p) => p.endToEndId === `E2E-${amount}`)!.ref
 }
 
 function addViban(master: string, status: 'ACTIVE' | 'CLOSED', name: string) {

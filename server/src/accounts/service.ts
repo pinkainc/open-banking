@@ -141,7 +141,7 @@ export class AccountsService {
     const now = this.deps.clock.now().getTime()
     const booked = (await this.deps.journal.entries(iban, now - LOOKBACK_DAYS * DAY_MS, now + 1)).filter((e) => e.servicerRef === ref)
     if (booked.length) return this.#bookedView(booked[booked.length - 1])
-    const r = this.deps.engine().reserved(ref)
+    const r = await this.deps.engine().reserved(ref)
     if (r && r.account === iban) {
       const creditorId = r.creditor.iban ?? r.creditor.account
       return {

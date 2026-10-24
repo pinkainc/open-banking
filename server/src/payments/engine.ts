@@ -20,7 +20,8 @@
 // exists by the time POST /payment returns. Rails that answer `accepted` (a real scheme,
 // decision 930) leave the payment ACSP with its funds reserved; the outcome arrives later
 // through settle() and is reported then, the same reports and notifications as at once.
-import { BoundedMap, BoundedSet, DEFAULT_BOUNDS, type Bounds } from '../bounded.js'
+import { DEFAULT_BOUNDS, type Bounds } from '../bounded.js'
+import { memoryKeyed, UNBOUNDED, type KeyedFactory, type KeyedStore } from '../keyed.js'
 import type { Clock } from '../clock.js'
 import { codePage, fold } from '../cp1257.js'
 import { keyOf, type Customer, type Directory } from '../directory.js'
@@ -70,6 +71,8 @@ export interface EngineOptions {
   agency?: () => AgencyStore | undefined
   /** Payments waiting at the rails (decision 948); default in memory. */
   pending?: RailsPending
+  /** Where duplicate sets, parked payments, in-flight limit amounts and credit results are kept (decision 963); default in memory. */
+  keyed?: KeyedFactory
 }
 
 /**
@@ -155,6 +158,27 @@ interface Plan {
   instrKey?: string
 }
 type ParkedKind = 'SCA' | 'REVIEW'
+/** A parked payment as the keyed store keeps it (JSON: encodePlan, the customer by key). */
+interface ParkedRecord { kind: ParkedKind; file: PendingRecord['file']; plan: Record<string, unknown>; status: Record<string, unknown> }
+interface Parked { kind: ParkedKind; file: FileRef; plan: Plan; status: TxStatus }
+
+const fileKey = (file: FileRef): PendingRecord['file'] =>
+  ({ customer: { code: file.customer.code, country: file.customer.country }, requestId: file.requestId, version: file.version, msgId: file.msgId })
+const agencyToJson = (a: AgencyAccount) => ({ ...a, createdAt: a.createdAt.getTime(), updatedAt: a.updatedAt.getTime() })
+const agencyFromJson = (a: any): AgencyAccount => ({ ...a, createdAt: new Date(a.createdAt), updatedAt: new Date(a.updatedAt) })
+/**
+ * A plan as JSON: the amount as a decimal string, the creditor customer by key, agency
+ * account times in ms (the VIBAN, block and transaction are JSON already). Undefined
+ * fields drop out, as JSON in Postgres would drop them.
+ */
+const encodePlan = (p: Plan): Record<string, unknown> => {
+  const { amount, debtorA, creditorA, creditorOwner, ...plan } = p
+  return JSON.parse(JSON.stringify({
+    ...plan, amount: amount.toString(),
+    ...(creditorOwner ? { creditorOwner: { code: creditorOwner.code, country: creditorOwner.country } } : {}),
+    ...(debtorA ? { debtorA: agencyToJson(debtorA) } : {}), ...(creditorA ? { creditorA: agencyToJson(creditorA) } : {}),
+  }))
+}
 export interface ParkedPayment {
   ref: string; kind: ParkedKind; customer: { code: string; country: string }; msgId: string
   pmtInfId?: string; instrId?: string; endToEndId?: string; amount: string; currency: string; creditor: { name?: string; iban?: string }
@@ -165,24 +189,31 @@ const sameName = (a: string | undefined, b: string | undefined) =>
 
 
 export class PaymentEngine {
-  #seenMsgIds: BoundedSet<string>
-  /** Payments with an InstrId that are not (yet) rejected: customer, InstrId, accounts, currency, amount (decision 525). */
-  #instrIds: BoundedMap<string, string>
-  /** EUR debits accepted but not yet in the journal, counted against the limits. */
-  #inflight = new Map<string, { customer: string; amount: bigint }>()
-  #parked = new Map<string, { kind: ParkedKind; file: FileRef; plan: Plan; status: TxStatus }>()
-  /** External payments sent to the rails whose outcome has not arrived (decision 930; in memory, decision 934). */
+  // Kept in the keyed store (decision 963), so a restarted engine on a persistent one goes on.
+  #seenMsgIds: KeyedStore<true>
+  /** Payments with an InstrId that are not (yet) rejected: customer, InstrId, accounts, currency, amount (decision 525) → ref. */
+  #instrIds: KeyedStore<string>
+  /** EUR debits accepted but not yet in the journal, counted against the limits (amount as a decimal string). */
+  #inflight: KeyedStore<{ customer: string; amount: string }>
+  /** Payments waiting for SCA or in manual review, by ref. */
+  #parked: KeyedStore<ParkedRecord>
   /** Payments waiting at the rails (decision 948); in memory unless the emulator gives a persistent store. */
   #pending: RailsPending
   /** Credits from the rails by their ref: the result a repeat answers (decision 932). */
-  #credits: BoundedMap<string, Promise<CreditResult>>
+  #credits: KeyedStore<CreditResult>
+  /** Credits being booked in this process: a concurrent repeat waits for the same result. */
+  #crediting = new Map<string, Promise<CreditResult>>()
   constructor(
     private directory: Directory, private ledger: Ledger, private rails: Rails, private inbox: InboxStore,
     private clock: Clock, private bank: Bank, private opts: EngineOptions = {},
   ) {
-    this.#seenMsgIds = new BoundedSet(clock, opts.msgIds ?? DEFAULT_BOUNDS.msgIds)
-    this.#instrIds = new BoundedMap(clock, opts.msgIds ?? DEFAULT_BOUNDS.msgIds)
-    this.#credits = new BoundedMap(clock, opts.msgIds ?? DEFAULT_BOUNDS.msgIds)
+    const keyed = opts.keyed ?? memoryKeyed(clock)
+    const msgIds = opts.msgIds ?? DEFAULT_BOUNDS.msgIds
+    this.#seenMsgIds = keyed('payment-msgids', msgIds)
+    this.#instrIds = keyed('payment-instrids', msgIds)
+    this.#credits = keyed('payment-credits', msgIds)
+    this.#inflight = keyed('payment-inflight', UNBOUNDED)
+    this.#parked = keyed('payment-parked', UNBOUNDED)
     this.#pending = opts.pending ?? new MemoryRailsPending()
   }
 
@@ -207,12 +238,12 @@ export class PaymentEngine {
     if (problem) return reject(R.corrupted(problem), version)
     const groupReason = await this.#fileProblem(file, customer)
     if (groupReason) return reject(groupReason, version)
-    this.#seenMsgIds.add(`${keyOf(customer)}|${file.msgId}`)
+    await this.#seenMsgIds.set(`${keyOf(customer)}|${file.msgId}`, true)
     await this.#process(file, customer, requestId)
   }
 
   async #fileProblem(f: PaymentFile, customer: Customer): Promise<string | undefined> {
-    if (this.#seenMsgIds.has(`${keyOf(customer)}|${f.msgId}`)) return R.duplicateMessage
+    if (await this.#seenMsgIds.has(`${keyOf(customer)}|${f.msgId}`)) return R.duplicateMessage
     const ids = f.blocks.map((b) => b.pmtInfId)
     if (new Set(ids).size !== ids.length) return R.duplicateBlock
     for (const b of f.blocks) {
@@ -248,7 +279,7 @@ export class PaymentEngine {
       for (const tx of block.txs) {
         const c = await this.#check(block, tx, customer)
         if ('status' in c) steps.push({ status: c.status })
-        else if (pending) steps.push({ status: this.#park('SCA', file, c.plan) })
+        else if (pending) steps.push({ status: await this.#park('SCA', file, c.plan) })
         else steps.push(await this.#execute(file, c.plan))
       }
     }
@@ -304,7 +335,7 @@ export class PaymentEngine {
     // same payment again is (decision 525).
     const instrKey = tx.instrId
       ? [keyOf(customer), tx.instrId, debtorIban, creditorIban ?? tx.creditorOther ?? '', tx.currency, amount].join('|') : undefined
-    if (instrKey && this.#instrIds.has(instrKey)) return rj(R.duplicatePayment)
+    if (instrKey && (await this.#instrIds.has(instrKey))) return rj(R.duplicatePayment)
     // A VIBAN debtor must be ACTIVE and named as its holder; the master account pays.
     const debtorV = block.debtorOther ? undefined : this.opts.virtual?.resolve(debtorIban)
     if (debtorV && debtorV.status !== 'ACTIVE') return rj(R.debtorInactive)
@@ -338,8 +369,8 @@ export class PaymentEngine {
     const creditorAccount = creditorV?.master ?? creditorA?.master ?? creditorIban
     const creditorOwner = creditorAccount ? this.directory.ownerOf(creditorAccount) : undefined
     const base = { block, tx, amount, currency: tx.currency!, debtorIban, debtorAccount, creditorIban, creditorAccount, creditorV, creditorA, debtorA, ref: servicerRef(), instrKey }
-    const planned = (plan: Plan) => {
-      if (instrKey) this.#instrIds.set(instrKey, plan.ref)
+    const planned = async (plan: Plan) => {
+      if (instrKey) await this.#instrIds.set(instrKey, plan.ref)
       return { plan }
     }
     if (creditorOwner) return planned({ ...base, creditorOwner })
@@ -357,8 +388,8 @@ export class PaymentEngine {
   /** A checked payment goes ahead: funds, then booking (internal) or the rails (external). */
   async #execute(file: FileRef, p: Plan): Promise<Step> {
     const { block, tx } = p
-    const rj = (reason: string, scheme?: string): Step => {
-      this.#forget(p)
+    const rj = async (reason: string, scheme?: string): Promise<Step> => {
+      await this.#forget(p)
       return { status: { block, tx, status: 'RJCT', reason, scheme } }
     }
     const scheme = p.scheme ?? 'INTERNAL'
@@ -366,7 +397,7 @@ export class PaymentEngine {
     if ((await this.ledger.available(p.debtorAccount, p.currency)) < p.amount) return rj(R.funds, scheme)
     if (p.currency === 'EUR' && this.opts.limits) {
       const l = await this.opts.limits(file.customer)
-      const inflight = this.#inflightOf(file.customer)
+      const inflight = await this.#inflightOf(file.customer)
       if (p.amount > l.dailyFree - inflight) return rj(R.dailyLimit, scheme)
       if (p.amount > l.monthlyFree - inflight) return rj(R.monthlyLimit, scheme)
     }
@@ -378,7 +409,7 @@ export class PaymentEngine {
         if (e instanceof InsufficientFunds) return rj(R.funds, scheme)
         throw e
       }
-      this.#hold(file.customer, p)
+      await this.#hold(file.customer, p)
       return this.#internalBooked(file, p)
     }
     try {
@@ -387,13 +418,13 @@ export class PaymentEngine {
       if (e instanceof InsufficientFunds) return rj(R.funds, scheme)
       throw e
     }
-    this.#hold(file.customer, p)
+    await this.#hold(file.customer, p)
     const accepted: TxStatus = { block, tx, status: 'ACSP', servicerRef: p.ref, scheme, ...(p.creditorOwner ? { creditorBic: this.bank.bic } : {}) }
     // Manual review (sanctions screening): accepted first, then PDNG until /_sim decides.
     if (review) {
       return { status: accepted, next: async () => {
         this.#incomingOf(file, p, 'Pending')
-        return { status: this.#park('REVIEW', file, p, { ...accepted, status: 'PDNG', reason: R.manualReview }) }
+        return { status: await this.#park('REVIEW', file, p, { ...accepted, status: 'PDNG', reason: R.manualReview }) }
       } }
     }
     return { status: accepted, next: () => this.#rails(file, p, accepted) }
@@ -452,28 +483,25 @@ export class PaymentEngine {
   /** Payments sent to the rails without a final outcome yet (refs). */
   atRails(): Promise<string[]> { return this.#pending.refs() }
 
-  /** A waiting payment as JSON: the customer by key, the amount as a string, agency times in ms. */
+  /** A waiting payment as JSON (encodePlan). */
   #encode(file: FileRef, p: Plan, accepted: TxStatus): PendingRecord {
-    // An external payment has no creditor here (VIBAN, owner or agency account): nothing else to keep.
-    const { amount, debtorA, creditorV: _v, creditorOwner: _o, creditorA: _a, ...plan } = p
-    return {
-      ref: p.ref, scheme: p.scheme!,
-      file: { customer: { code: file.customer.code, country: file.customer.country }, requestId: file.requestId, version: file.version, msgId: file.msgId },
-      plan: { ...plan, amount: amount.toString(), ...(debtorA ? { debtorA: { ...debtorA, createdAt: debtorA.createdAt.getTime(), updatedAt: debtorA.updatedAt.getTime() } } : {}) },
-      accepted: { ...accepted },
-    }
+    return { ref: p.ref, scheme: p.scheme!, file: fileKey(file), plan: encodePlan(p), accepted: { ...accepted } }
   }
 
   /** Undefined when the customer is gone from the directory (nothing to report to). */
   #decode(r: PendingRecord): { file: FileRef; plan: Plan; accepted: TxStatus } | undefined {
     const customer = this.directory.get(r.file.customer)
-    if (!customer) return undefined
-    const { amount, debtorA, ...plan } = r.plan as any
-    return {
-      file: { customer, requestId: r.file.requestId, version: r.file.version as PainVersion, msgId: r.file.msgId },
-      plan: { ...plan, amount: BigInt(amount), ...(debtorA ? { debtorA: { ...debtorA, createdAt: new Date(debtorA.createdAt), updatedAt: new Date(debtorA.updatedAt) } } : {}) },
-      accepted: r.accepted as unknown as TxStatus,
-    }
+    const plan = this.#decodePlan(r.plan)
+    if (!customer || !plan) return undefined
+    return { file: { ...r.file, customer, version: r.file.version as PainVersion }, plan, accepted: r.accepted as unknown as TxStatus }
+  }
+
+  /** The plan encodePlan made, with the creditor customer from the directory; undefined when it is gone. */
+  #decodePlan(o: Record<string, unknown>): Plan | undefined {
+    const { amount, debtorA, creditorA, creditorOwner, ...plan } = o as any
+    const owner = creditorOwner ? this.directory.get(creditorOwner) : undefined
+    if (creditorOwner && !owner) return undefined
+    return { ...plan, amount: BigInt(amount), creditorOwner: owner, debtorA: debtorA && agencyFromJson(debtorA), creditorA: creditorA && agencyFromJson(creditorA) }
   }
 
   /** The rails' outcome of a reserved external payment: booked, rejected, or on to SEPA. */
@@ -499,31 +527,39 @@ export class PaymentEngine {
   }
 
   /** A rejected payment no longer blocks its InstrId. */
-  #forget(p: Plan) {
-    if (p.instrKey && this.#instrIds.get(p.instrKey) === p.ref) this.#instrIds.delete(p.instrKey)
+  async #forget(p: Plan) {
+    if (p.instrKey && (await this.#instrIds.get(p.instrKey)) === p.ref) await this.#instrIds.take(p.instrKey)
   }
 
   /** Counts an accepted EUR debit against the limits until its camt.054 is booked in the journal. */
-  #hold(customer: Customer, p: Plan) {
-    if (p.currency === 'EUR') this.#inflight.set(p.ref, { customer: keyOf(customer), amount: p.amount })
+  async #hold(customer: Customer, p: Plan) {
+    if (p.currency === 'EUR') await this.#inflight.set(p.ref, { customer: keyOf(customer), amount: p.amount.toString() })
   }
 
   async #release(p: Plan) {
     await this.ledger.release(p.ref)
-    this.#inflight.delete(p.ref)
-    this.#forget(p)
+    await this.#inflight.take(p.ref)
+    await this.#forget(p)
   }
 
-  #inflightOf(customer: Customer) {
+  async #inflightOf(customer: Customer) {
     let sum = 0n
-    for (const h of this.#inflight.values()) if (h.customer === keyOf(customer)) sum += h.amount
+    for (const [, h] of await this.#inflight.entries()) if (h.customer === keyOf(customer)) sum += BigInt(h.amount)
     return sum
   }
 
   /** Parks a payment until /_sim decides: waiting for SCA in the internet bank, or in manual review. */
-  #park(kind: ParkedKind, file: FileRef, plan: Plan, status: TxStatus = { block: plan.block, tx: plan.tx, status: 'PDNG', servicerRef: plan.ref, scheme: plan.scheme ?? 'INTERNAL' }): TxStatus {
-    this.#parked.set(plan.ref, { kind, file, plan, status })
+  async #park(kind: ParkedKind, file: FileRef, plan: Plan, status: TxStatus = { block: plan.block, tx: plan.tx, status: 'PDNG', servicerRef: plan.ref, scheme: plan.scheme ?? 'INTERNAL' }): Promise<TxStatus> {
+    await this.#parked.set(plan.ref, { kind, file: fileKey(file), plan: encodePlan(plan), status: { ...status } as unknown as Record<string, unknown> })
     return status
+  }
+
+  /** A parked payment as the engine works with it; undefined when its customers are gone from the directory. */
+  #unpark(r: ParkedRecord): Parked | undefined {
+    const customer = this.directory.get(r.file.customer)
+    const plan = this.#decodePlan(r.plan)
+    if (!customer || !plan) return undefined
+    return { kind: r.kind, file: { ...r.file, customer, version: r.file.version as PainVersion }, plan, status: r.status as unknown as TxStatus }
   }
 
   /** An internal payment as its creditor sees it (decision 711); nothing for an external creditor. */
@@ -534,9 +570,10 @@ export class PaymentEngine {
   }
 
   /** A payment in manual review: funds reserved, not booked (GET /accounts/{acc}/transactions/{ref}, decision 710). */
-  reserved(ref: string): ReservedPayment | undefined {
-    const p = this.#parked.get(ref)
-    if (!p || p.kind !== 'REVIEW') return undefined
+  async reserved(ref: string): Promise<ReservedPayment | undefined> {
+    const r = await this.#parked.get(ref)
+    const p = r && r.kind === 'REVIEW' ? this.#unpark(r) : undefined
+    if (!p) return undefined
     const { plan } = p
     return {
       ref, account: plan.debtorAccount, debtorIban: plan.debtorIban, amount: plan.amount, currency: plan.currency, endToEndId: plan.tx.endToEndId,
@@ -545,8 +582,9 @@ export class PaymentEngine {
   }
 
   /** Payments waiting for a decision (the internet bank's pending list, manual review). */
-  parked(): ParkedPayment[] {
-    return [...this.#parked.entries()].map(([ref, p]) => ({
+  async parked(): Promise<ParkedPayment[]> {
+    const all = (await this.#parked.entries()).map(([ref, r]) => [ref, this.#unpark(r)] as const)
+    return all.filter((x): x is [string, Parked] => x[1] !== undefined).map(([ref, p]) => ({
       ref, kind: p.kind, customer: { code: p.file.customer.code, country: p.file.customer.country }, msgId: p.file.msgId,
       pmtInfId: p.plan.block.pmtInfId, instrId: p.plan.tx.instrId, endToEndId: p.plan.tx.endToEndId,
       amount: p.plan.tx.amount!, currency: p.plan.currency, creditor: { name: p.plan.tx.creditorName, iban: p.plan.creditorIban },
@@ -561,18 +599,22 @@ export class PaymentEngine {
    * One report per original file. Returns the refs that were not parked.
    */
   async decide(refs: string[], approve: boolean, reason?: string): Promise<string[]> {
-    const unknown = refs.filter((r) => !this.#parked.has(r))
+    const unknown: string[] = []
+    for (const r of refs) if (!(await this.#parked.has(r))) unknown.push(r)
     if (unknown.length) return unknown
-    const byFile = new Map<FileRef, Step[]>()
+    // One report per original file: grouped by its key (a parked payment comes back from the store as a new object).
+    const byFile = new Map<string, { file: FileRef; steps: Step[] }>()
     for (const ref of refs) {
-      const p = this.#parked.get(ref)
-      if (!p) continue // listed twice
-      this.#parked.delete(ref)
-      const steps = byFile.get(p.file) ?? []
-      byFile.set(p.file, steps)
+      const r = await this.#parked.take(ref) // at most once: listed twice, or decided by another process
+      const p = r && this.#unpark(r)
+      if (!p) continue
+      const fk = `${keyOf(p.file.customer)}|${p.file.requestId}|${p.file.msgId}`
+      const group = byFile.get(fk) ?? { file: p.file, steps: [] }
+      byFile.set(fk, group)
+      const steps = group.steps
       const { block, tx } = p.plan
       if (p.kind === 'SCA') {
-        if (!approve) this.#forget(p.plan)
+        if (!approve) await this.#forget(p.plan)
         steps.push(approve ? await this.#execute(p.file, p.plan) : { status: { block, tx, status: 'RJCT', reason: reason ?? R.requestedByCustomer, scheme: p.status.scheme } })
       } else if (!approve) {
         await this.#release(p.plan)
@@ -587,7 +629,7 @@ export class PaymentEngine {
         if (s) steps.push(s)
       }
     }
-    for (const [file, steps] of byFile) await this.#flow(file, steps, false)
+    for (const { file, steps } of byFile.values()) await this.#flow(file, steps, false)
     return []
   }
 
@@ -672,8 +714,9 @@ export class PaymentEngine {
   }
 
   async #notify(customer: Customer, b: Booking) {
-    if (b.direction === 'DBIT') this.#inflight.delete(b.servicerRef)
+    // In the journal first, then out of the in-flight amounts: never counted by neither.
     await this.opts.onBooking?.(customer, b)
+    if (b.direction === 'DBIT') await this.#inflight.take(b.servicerRef)
     // Notifications carry no Message-Request-Id.
     await this.inbox.add({ customer, type: 'CREDIT_DEBIT_NOTIFICATION', body: camt054(b, customer.camt054, this.bank) })
   }
@@ -683,12 +726,19 @@ export class PaymentEngine {
    * the first result; an account not here is returned AC01 (decision 932).
    */
   received(c: IncomingCredit): Promise<CreditResult> {
-    const seen = this.#credits.get(c.ref)
-    if (seen) return seen
-    const r = this.#receive(c)
-    this.#credits.set(c.ref, r)
-    // A failure (not a return) may be retried with the same ref.
-    r.catch(() => { if (this.#credits.get(c.ref) === r) this.#credits.delete(c.ref) })
+    const busy = this.#crediting.get(c.ref)
+    if (busy) return busy
+    const r = (async () => {
+      const seen = await this.#credits.get(c.ref)
+      if (seen) return seen
+      const result = await this.#receive(c)
+      await this.#credits.set(c.ref, result)
+      return result
+    })()
+    this.#crediting.set(c.ref, r)
+    // A failure (not a return) may be retried with the same ref: nothing is remembered.
+    const done = () => { if (this.#crediting.get(c.ref) === r) this.#crediting.delete(c.ref) }
+    r.then(done, done)
     return r
   }
 

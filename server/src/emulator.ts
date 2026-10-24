@@ -139,7 +139,7 @@ export class Emulator {
     this.engine = new PaymentEngine(this.directory, this.ledger, this.rails, this.inbox, this.clock, this.bank, {
       strictIban: opts.strictIban, pain00103Until: opts.pain00103Until ?? '2026-11-15', xsd, virtual: this.viban.registry, msgIds,
       onBooking: async (_c, b) => { await this.journal.record(b) }, limits: (c) => this.reports.paymentLimits(c),
-      onIncoming: (e) => this.accounts.onIncoming(e), agency: () => this.agency?.accounts, pending: opts.railsPending?.(),
+      onIncoming: (e) => this.accounts.onIncoming(e), agency: () => this.agency?.accounts, pending: opts.railsPending?.(), keyed,
     })
     // Outcomes the rails deliver later and credits from the scheme come in here (decision 930).
     this.rails.listen({ outcome: (ref, o) => this.engine.settle(ref, o), credit: (c) => this.engine.received(c) })
