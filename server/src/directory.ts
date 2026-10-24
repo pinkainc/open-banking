@@ -2,6 +2,7 @@
 // country), their accounts, and which of them hold a connection certificate. A
 // customer that is a service provider reaches its connected customers through its
 // own certificate, selecting one with the Client-Code / Client-Country headers.
+import { checkSetup, type AgencySetup } from './agency/store.js'
 import { normalizeIban } from './iban.js'
 
 export interface CustomerKey { code: string; country: string }
@@ -35,6 +36,11 @@ export interface Customer extends CustomerKey {
    * collection notifications. Both off when absent.
    */
   directDebit?: { agreement?: boolean; debtorNotification?: boolean }
+  /**
+   * Indirect scheme access set-up by the account manager (P 11, decision 801): the
+   * agreement, its ranges with master accounts, the CoP/VoP responder, notifications, RTF.
+   */
+  agency?: AgencySetup
 }
 
 export interface CustomerInput {
@@ -54,6 +60,7 @@ export interface CustomerInput {
   /** Connect payment limits in EUR (decisions 109, 524); kept by the account reports. */
   limits?: { daily?: string; monthly?: string; instant?: string }
   directDebit?: { agreement?: boolean; debtorNotification?: boolean }
+  agency?: AgencySetup
 }
 
 export class Directory {
@@ -77,6 +84,7 @@ export class Directory {
     }
     this.#customers.set(keyOf(c), c)
     for (const a of input.accounts ?? []) this.addAccount(c, typeof a === 'string' ? a : a.iban)
+    if (input.agency !== undefined) c.agency = checkSetup(input.agency, c.accounts)
     return c
   }
 

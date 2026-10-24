@@ -73,16 +73,18 @@ function viban(r: any): Fields | undefined {
 function json(m: Message): Fields | undefined {
   if (m.type !== 'CONFIRMATION_OF_PAYEE') return undefined
   let b: any
-  try { b = JSON.parse(m.body) } catch { return undefined }
+  try { b = JSON.parse(String(m.body)) } catch { return undefined }
   const s = (v: unknown) => (typeof v === 'string' ? v : undefined)
   return nonEmpty(pick([['OriginalMessageId', s(b?.OriginalMessageId)], ['ReasonCode', s(b?.Data?.ReasonCode)], ['Description', s(b?.Data?.Description)]]))
 }
 
 /** The documented metadata of a message, or undefined when it has none. */
 export function messageMetadata(m: Message): Fields | undefined {
+  // A binary body (an RTF file, decision 806) has no documented fields.
+  if (typeof m.body !== 'string') return undefined
   if (m.contentType.includes('json')) return json(m)
   let doc: any
-  try { doc = parseXml(m.body) } catch { return undefined }
+  try { doc = parseXml(String(m.body)) } catch { return undefined }
   const d = doc.Document
   if (d?.BkToCstmrAcctRpt) return camt052(d.BkToCstmrAcctRpt)
   if (d?.BkToCstmrStmt) return camt053(d.BkToCstmrStmt)

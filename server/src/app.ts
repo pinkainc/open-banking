@@ -29,6 +29,7 @@ import { registerMessagesProcessed, registerMessagesV2 } from './messages-v2.js'
 import { registerRequestsV2 } from './requests-v2.js'
 import { accountsSimRoutes, registerAccounts } from './accounts/routes.js'
 import { bacsSimRoutes, registerBacs } from './bacs/routes.js'
+import { agencySimRoutes, registerAgency } from './agency/routes.js'
 
 export interface AppOptions {
   emulator: Emulator
@@ -114,7 +115,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     if (!encoding) throw jsonError(500, 'TECHNICAL_ERROR', 'The message body is 10 MB or more: the request must accept gzip or deflate (Accept-Encoding)')
     return encoding
   }
-  const sendBody = (req: FastifyRequest, reply: FastifyReply, contentType: string, body: string) => {
+  const sendBody = (req: FastifyRequest, reply: FastifyReply, contentType: string, body: string | Buffer) => {
     if (flavour !== 'UK' || Buffer.byteLength(body) < threshold) return reply.code(200).type(contentType).send(body)
     const encoding = negotiateOrFail(req)
     return reply.code(200).type(contentType).header('Content-Encoding', encoding).header('Vary', 'Accept-Encoding').send(compress(body, encoding))
@@ -325,6 +326,9 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   // --- Payee verification (EE VoP XML on both hosts; UK VoP and CoP JSON) -----------------
   registerPayee(app, emulator, caller, flavour)
 
+  // --- Indirect scheme access: agency account sync (v1 XML both hosts, v2 JSON UK) ----------
+  registerAgency(app, emulator, caller, flavour, bankCode)
+
   if (opts.sim !== false) {
     app.register(simRoutes(emulator), { prefix: '/_sim' })
     app.register(vibanSimRoutes(emulator), { prefix: '/_sim/viban' })
@@ -336,6 +340,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     app.register(payeeSimRoutes(emulator), { prefix: '/_sim/payee' })
     app.register(accountsSimRoutes(emulator), { prefix: '/_sim/accounts' })
     if (flavour === 'UK') app.register(bacsSimRoutes(emulator), { prefix: '/_sim/bacs' })
+    app.register(agencySimRoutes(emulator, flavour), { prefix: '/_sim/agency' })
   }
   return app
 }

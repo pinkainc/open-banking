@@ -25,6 +25,7 @@ import { VibanService, type ErrorDelivery } from './viban/service.js'
 import { PayeeService } from './payee/service.js'
 import { AccountsService, DEFAULT_INCOMING } from './accounts/service.js'
 import { BACS_BOUNDS, BacsService } from './bacs/service.js'
+import { Agency } from './agency/service.js'
 
 export interface Seed {
   bank?: Partial<Bank>
@@ -48,7 +49,7 @@ export interface EmulatorOptions {
   /** How UK webhooks are sent (default HTTP POST); tests record them instead. */
   ukWebhookDeliver?: UkDeliver
   /** Limits of what is remembered (decision 504); each part overrides DEFAULT_BOUNDS. */
-  memory?: { tombstones?: Partial<Bounds>; msgIds?: Partial<Bounds>; processed?: Partial<Bounds>; requests?: Partial<Bounds>; incoming?: Partial<Bounds>; webhookEvents?: Partial<Bounds>; bacs?: Partial<typeof BACS_BOUNDS> }
+  memory?: { tombstones?: Partial<Bounds>; msgIds?: Partial<Bounds>; processed?: Partial<Bounds>; requests?: Partial<Bounds>; incoming?: Partial<Bounds>; webhookEvents?: Partial<Bounds>; bacs?: Partial<typeof BACS_BOUNDS>; agency?: Partial<Bounds> }
 }
 
 export const DEFAULT_BANK: Bank = { bic: 'LHVBEE22', name: 'open-banking emulator' }
@@ -79,6 +80,8 @@ export class Emulator {
   readonly accounts: AccountsService
   /** Bacs on the UK host: incoming credits, mandates and collections (LHV as the paying bank). */
   readonly bacs: BacsService
+  /** Indirect scheme access: agency accounts, their synchronisation, the CoP/VoP responder, RTFs. */
+  readonly agency: Agency
 
   constructor(opts: EmulatorOptions & { bank?: Partial<Bank> } = {}) {
     this.clock = opts.clock ?? systemClock
@@ -124,6 +127,7 @@ export class Emulator {
       onBooking: (_c, b) => { this.journal.record(b) }, onIncoming: (e) => this.accounts.onIncoming(e),
       credit: (p) => this.engine.incoming(p),
     }, opts.memory?.bacs)
+    this.agency = new Agency({ directory: this.directory, inbox: this.inbox, clock: this.clock, bank: this.bank }, opts.memory?.agency)
     this.reports = new AccountReports({
       directory: this.directory, ledger: this.ledger, journal: this.journal, inbox: this.inbox, clock: this.clock, bank: this.bank, xsd, msgIds,
     }, opts.reports)

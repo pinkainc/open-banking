@@ -16,7 +16,7 @@ export interface Message {
   clientCode: string
   clientCountry: string
   createdAt: Date
-  body: string
+  body: string | Buffer
   contentType: string
   seq: number
   /** When it was undeleted (v2 messageProcessed=false): its five days run again from then. */
@@ -60,7 +60,7 @@ export class Inbox {
   /** Called with every new message, after it is stored (EE webhook delivery). */
   onAdd(listener: (m: Message) => void) { this.#listeners.push(listener) }
 
-  add(m: { customer: CustomerKey; type: string; body: string; requestId?: string; contentType?: string }): Message {
+  add(m: { customer: CustomerKey; type: string; body: string | Buffer; requestId?: string; contentType?: string }): Message {
     const msg: Message = {
       id: responseId(), requestId: m.requestId, type: m.type,
       clientCode: m.customer.code, clientCountry: m.customer.country,

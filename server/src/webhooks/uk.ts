@@ -284,7 +284,7 @@ export class UkWebhooks {
         messageResponseId: m.id, messageRequestId: m.requestId, messageType: m.type, messageCreatedTime: isoLondon(m.createdAt),
         code: m.clientCode, country: m.clientCountry, bankCode: replayOf?.fields.bankCode ?? '',
         metadata: c.attachMetadata ? messageMetadata(m) : undefined,
-        messageBase64: c.attachFullBody ? Buffer.from(m.body, 'utf8').toString('base64') : undefined,
+        messageBase64: c.attachFullBody ? (typeof m.body === 'string' ? Buffer.from(m.body, 'utf8') : m.body).toString('base64') : undefined,
       },
       status: 'RETRY_PENDING', attempts: [], nextAt: now.getTime(),
       ...(replayOf ? { replayOf: replayOf.eventId } : {}),

@@ -6,7 +6,8 @@
 # pain.009/.012/.011/.008.001.11/.002.001.14/.007.001.11 of G "LHV uses the standard version",
 # decision 748).
 # The server validates pain.001, pain.008, pain.007, camt.060 and the VIBAN requests against these schemas when
-# they are present, and the tests run the sample payments through the server. Checksums are pinned in
+# they are present, and the tests run the sample payments through the server (and check every
+# AGENT_ACCOUNT_SYNC answer against account.agent.sync.xsd). Checksums are pinned in
 # scripts/reference.sha256; a changed file is reported, not silently used.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -19,7 +20,8 @@ xsd="pain.001.001.03 pain.001.001.09 pain.002.001.10 supl.001.001.01 pain.008.00
 camt.060.001.03 camt.060.001.05 camt.053.001.08 camt.052.001.08
 viban.common viban.open.request viban.open.response viban.bulk.request viban.bulk.response
 viban.modify.request viban.modify.response viban.info.request viban.info.response
-viban.close.request viban.close.response viban.status.notification"
+viban.close.request viban.close.response viban.status.notification
+account.agent.sync"
 samples="PAYMENT_INTERNAL/PAYMENT_PAIN.001.xml PAYMENT_INTERNAL/PAYMENT_PAIN.002A.xml
 PAYMENT_INTERNAL/CREDIT_DEBIT_NOTIFICATION_CAMT.054A.xml PAYMENT_INTERNAL/CREDIT_DEBIT_NOTIFICATION_CAMT.054B.xml
 PAYMENT_SEPA/PAYMENT_PAIN.001.xml PAYMENT_SEPA/PAYMENT_PAIN.002A.xml PAYMENT_SEPA/PAYMENT_PAIN.002B.xml
