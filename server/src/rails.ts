@@ -49,12 +49,35 @@ export interface IncomingCredit {
 /** Booked (with our AcctSvcrRef) or returned to the sender with an ISO reason code. */
 export type CreditResult = { status: 'booked'; servicerRef: string } | { status: 'returned'; code: string; reason: string }
 
+/** The payer's bank asks a credit back (camt.056, decision 1001). */
+export interface CreditRecall {
+  /** The credit's scheme ref, as RailsEvents.credit got it. */
+  ref: string
+  /** The recall's own reference (camt.056 CxlId). */
+  recallRef: string
+  /** The recall reason: DUPL, TECH, FRAD (returned at once) or another (needs the customer's consent). */
+  code: string
+}
+/** Returned (pacs.004, our AcctSvcrRef of the debit) or refused (camt.029) with its reason code. */
+export type RecallResult = { status: 'returned'; servicerRef: string } | { status: 'refused'; code: string }
+
+/** The event cannot be applied now but must be later (e.g. the funds are not there yet): the bridge retries it. */
+export class RailsRetryLater extends Error {}
+
 /** Where the rails deliver what happens later; the engine registers it (Rails.listen). */
 export interface RailsEvents {
   /** The final outcome of a payment `send` answered `accepted`. False: unknown ref or already final (ignored). */
   outcome(ref: string, outcome: RailsOutcome): Promise<boolean>
   /** A credit from the scheme; the same ref again answers the first result. */
   credit(c: IncomingCredit): Promise<CreditResult>
+  /**
+   * A collection the rails settled was returned or refunded by the debtor's bank (an
+   * R-transaction after settlement, decision 1000). True when booked back; false for an
+   * unknown or not settled collection, or a repeat. Throws RailsRetryLater when it must wait.
+   */
+  collectionReturned(ref: string, code: string): Promise<boolean>
+  /** A recall of a credit received (camt.056, decision 1001); a repeat answers the first result. */
+  recall(r: CreditRecall): Promise<RecallResult>
 }
 
 /** A SEPA Direct Debit our creditor sends to a debtor at another bank (L4). */
@@ -82,7 +105,8 @@ export interface Rails {
   settlementAccount(scheme: Scheme | string): string
   /**
    * Presents a direct debit to the debtor's bank on the settlement date and answers at
-   * presentation (decision 933: R-transactions after settlement are not modelled yet).
+   * presentation (decision 933); R-transactions after settlement come later through
+   * RailsEvents.collectionReturned (decision 1000).
    */
   collect(c: OutgoingCollection): Promise<CollectionOutcome>
 }
@@ -128,6 +152,16 @@ export class SimulatorRails implements Rails {
   async credit(c: IncomingCredit): Promise<CreditResult> {
     if (!this.#events) throw new Error('no RailsEvents registered')
     return this.#events.credit(c)
+  }
+  /** The debtor's bank returns or refunds a collection after settlement (decision 1000). */
+  async returnCollection(ref: string, code: string): Promise<boolean> {
+    if (!this.#events) throw new Error('no RailsEvents registered')
+    return this.#events.collectionReturned(ref, code)
+  }
+  /** The payer's bank recalls a credit (decision 1001). */
+  async recall(r: CreditRecall): Promise<RecallResult> {
+    if (!this.#events) throw new Error('no RailsEvents registered')
+    return this.#events.recall(r)
   }
 
   /** Payments to this account are rejected by the "scheme" with this reason. */

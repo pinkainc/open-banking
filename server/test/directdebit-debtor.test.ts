@@ -340,6 +340,62 @@ describe('R-transactions from the debtor bank (/_sim/direct-debit/return)', () =
   })
 })
 
+describe('R-transactions after settlement from the rails (decision 1000)', () => {
+  const rret = (ref: string, code = 'MD06') => call(ctx, { method: 'POST', url: '/_sim/rails/collection-return', body: { ref, code } })
+  const presented = () => (ctx.emulator.rails as any).collections.map((c: any) => c.ref) as string[]
+
+  test('a collection the rails settled, returned by the debtor bank: debited from the creditor with RtrInf, once', async () => {
+    const c = await collection({ debtorIban: FR_IBAN, amount: '40.00' })
+    await settle()
+    await ddDrain(ctx)
+    assert.equal(await balance(ctx, C1.iban), '10040.00')
+    const [ref] = presented()
+    ctx.clock.set(new Date(Date.parse(SETTLEMENT) + 20 * DAY_MS))
+    const res = await rret(ref)
+    assert.equal(res.statusCode, 200, res.body)
+    assert.deepEqual(json(res), { applied: true })
+    const [m, ...more] = await ddDrain(ctx)
+    assert.equal(more.length, 0)
+    const e = ddEntry(m)
+    assert.deepEqual([e.ind, e.amount, e.returnCode, e.returnInfo], ['DBIT', '40.00', 'NARR', [c.instrId, 'CD:MD06']])
+    assert.equal(await balance(ctx, C1.iban), '10000.00')
+    assert.equal((await ctx.emulator.directDebit.collections()).find((x) => x.id === ref)!.status, 'REFUNDED')
+    assert.deepEqual(json(await rret(ref)), { applied: false }, 'a repeat books nothing')
+    assert.deepEqual(await ddDrain(ctx), [])
+    assert.equal(await balance(ctx, C1.iban), '10000.00')
+  })
+
+  test('nothing to return: unknown ref, not presented yet, a debtor here, over 13 months', async () => {
+    assert.deepEqual(json(await rret('NO-SUCH')), { applied: false })
+    await collection({ debtorIban: FR_IBAN })
+    const pending = (await ctx.emulator.directDebit.collections())[0].id
+    assert.deepEqual(json(await rret(pending)), { applied: false }, 'PENDING: not at the rails yet')
+    await collection()
+    await settle()
+    const [ref] = presented()
+    const here = (await ctx.emulator.directDebit.collections()).find((x) => x.id !== ref)!
+    assert.equal(here.status, 'SETTLED')
+    assert.deepEqual(json(await rret(here.id)), { applied: false }, 'a debtor here refunds through pain.007')
+    ctx.clock.set(new Date(Date.parse(SETTLEMENT) + 396 * DAY_MS))
+    assert.deepEqual(json(await rret(ref)), { applied: false })
+  })
+
+  test('the creditor without the funds: retried later (409 here, 503 to a bridge), then booked', async () => {
+    await collection({ debtorIban: FR_IBAN, amount: '40.00' })
+    await settle()
+    await ddDrain(ctx)
+    const [ref] = presented()
+    await ctx.emulator.ledger.transfer({ ref: 'drain', from: C1.iban, to: FUNDING, amount: 1000040n, currency: 'EUR' })
+    const res = await rret(ref, 'MD01')
+    assert.equal(res.statusCode, 409, res.body)
+    assert.equal(json(res).retry, true)
+    assert.equal((await ctx.emulator.directDebit.collections())[0].status, 'SETTLED', 'nothing booked')
+    await ctx.emulator.ledger.transfer({ ref: 'refill', from: FUNDING, to: C1.iban, amount: 4000n, currency: 'EUR' })
+    assert.deepEqual(json(await rret(ref, 'MD01')), { applied: true })
+    assert.equal(await balance(ctx, C1.iban), '39.60')
+  })
+})
+
 describe('a VIBAN as the debtor account', () => {
   test('rejected with AG01 (docs/decisions.md 312)', async () => {
     const VIBAN = 'EE467777000010897825'

@@ -7,7 +7,7 @@ import { ConnectError } from './errors.js'
 import type { Emulator } from './emulator.js'
 import { fromMinor, toMinor } from './ledger.js'
 import { normalizeIban } from './iban.js'
-import { SimulatorRails } from './rails.js'
+import { RailsRetryLater, SimulatorRails } from './rails.js'
 import { isDate } from './statements/camt060.js'
 import { DEFAULT_LIMITS, type Limits, type ReportSettings } from './statements/reports.js'
 import { dateTallinn } from './time.js'
@@ -205,6 +205,21 @@ export function simRoutes(emulator: Emulator) {
       const b = (req.body ?? {}) as { on?: boolean }
       simRails().defer(b.on !== false)
       return { deferred: simRails().deferred }
+    })
+    // The debtor's bank returns a collection the rails settled (decision 1000): 409 while it must wait.
+    app.post('/rails/collection-return', async (req, reply) => {
+      const b = (req.body ?? {}) as { ref?: unknown; code?: unknown }
+      if (typeof b.ref !== 'string' || !b.ref || typeof b.code !== 'string' || !/^[A-Z0-9]{4}$/.test(b.code)) throw bad('ref and a four-character code are required')
+      try { return { applied: await simRails().returnCollection(b.ref, b.code) } } catch (e) {
+        if (e instanceof RailsRetryLater) return reply.code(409).send({ error: e.message, retry: true })
+        throw e
+      }
+    })
+    // The payer's bank recalls a credit (camt.056, decision 1001).
+    app.post('/rails/recall', async (req) => {
+      const b = (req.body ?? {}) as { ref?: unknown; code?: unknown; recallRef?: unknown }
+      if (typeof b.ref !== 'string' || !b.ref || typeof b.code !== 'string' || !/^[A-Z0-9]{4}$/.test(b.code)) throw bad('ref and a four-character code are required')
+      return simRails().recall({ ref: b.ref, code: b.code, recallRef: typeof b.recallRef === 'string' && b.recallRef ? b.recallRef : `RCL-${b.ref}` })
     })
     app.get('/rails/held', async () => ({ payments: [...simRails().held].map(([ref, outcome]) => ({ ref, outcome })) }))
     // Delivers the held outcomes (all, or `ref`); `reject` (a reason) or `unavailable` overrides the outcome.

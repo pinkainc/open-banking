@@ -31,7 +31,7 @@ import type { Booking } from '../payments/camt054.js'
 import type { Outbox, OutboxItem } from '../outbox.js'
 import { decimalEq, decimalSum } from '../payments/pain001.js'
 import type { XsdValidator } from '../payments/xsd.js'
-import type { Rails } from '../rails.js'
+import { RailsRetryLater, type Rails } from '../rails.js'
 import { addDays } from '../statements/camt060.js'
 import { dateTallinn } from '../time.js'
 import type { VirtualAccounts } from '../viban/registry.js'
@@ -553,6 +553,32 @@ export class DirectDebitService {
     if (this.d.clock.now().getTime() > c.settledAt!.getTime() + 395 * DAY_MS) throw new DirectDebitError(409, 'more than 13 months since settlement')
     if ((await this.#refund(c, code)) === 'funds') throw new DirectDebitError(409, 'the creditor account has insufficient funds')
     return c
+  }
+
+  /**
+   * An R-transaction after settlement from the rails (RailsEvents.collectionReturned,
+   * decision 1000): `ref` is the collection's id, the ref the rails were given. Refunded as
+   * `externalReturn` does; false when there is nothing to refund (unknown, a debtor here,
+   * not SETTLED, over 13 months, or already REFUNDED). RailsRetryLater when the creditor lacks
+   * the funds or another emulator holds the collection.
+   */
+  returned(ref: string, code: string): Promise<boolean> {
+    return this.#serial(async () => {
+      const stored = await this.#collections.get(ref)
+      if (!stored) return false
+      let r = 'none' as 'ok' | 'funds' | 'none'
+      const c = await this.#claimed(ref, async (c) => {
+        if (c.status !== 'SETTLED' || !c.creditorCustomer || c.debtorCustomer) return
+        if (this.d.clock.now().getTime() > c.settledAt!.getTime() + 395 * DAY_MS) return
+        r = await this.#refund(c, code)
+      })
+      if (!c) {
+        if (!(await this.#collections.get(ref))) return false
+        throw new RailsRetryLater(`collection ${ref} is being settled or refunded`)
+      }
+      if (r === 'funds') throw new RailsRetryLater(`collection ${ref}: the creditor account has insufficient funds`)
+      return r === 'ok'
+    })
   }
 
   // --- helpers ------------------------------------------------------------------------

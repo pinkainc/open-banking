@@ -5,6 +5,7 @@
 import assert from 'node:assert/strict'
 import { beforeEach, describe, test } from 'node:test'
 import { many } from '../src/xml.js'
+import { FUNDING } from '../src/emulator.js'
 import { SimulatorRails, type OutgoingPayment, type RailsAnswer, type RailsEvents } from '../src/rails.js'
 import { C1, C2, DE_IBAN, balance, call, drain, pain001, postgresStore, setup, type Ctx, type TxSpec } from './helpers.js'
 
@@ -205,6 +206,53 @@ describe('credits from the scheme through the rails events (decision 932)', () =
   test('an account not here: returned AC01, nothing booked', async () => {
     assert.deepEqual(await credit('BRIDGE-3', 'EE127700771001260999'), { status: 'returned', code: 'AC01', reason: 'Incorrect account number.' })
     assert.deepEqual((await messages(ctx, C2.code)).notes, [])
+  })
+})
+
+describe('recalls of credits received (camt.056, decision 1001)', () => {
+  const rails = () => ctx.emulator.rails as SimulatorRails
+  const credit = (ref: string, iban = C2.iban, amount = 1234n) => rails().credit({
+    ref, iban, amount, currency: 'EUR', scheme: 'SEPA', debtor: { name: 'Hans Muster', iban: DE_IBAN, bic: 'COBADEFFXXX' }, endToEndId: `E2E-${ref}`,
+  })
+  const recall = (ref: string, code = 'DUPL', recallRef = `RCL-${ref}`) => sim('recall', { ref, code, recallRef })
+
+  test('DUPL, TECH, FRAD: returned at once, camt.054 DBIT with RtrInf; a repeat answers the first', async () => {
+    const r = await credit('RC-1')
+    assert.equal(r.status, 'booked')
+    await drain(ctx, C2.code)
+    const res = await recall('RC-1', 'FRAD', 'CXL-1')
+    assert.equal(res.statusCode, 200, res.body)
+    const a = res.json()
+    assert.equal(a.status, 'returned')
+    const msgs = await drain(ctx, C2.code)
+    assert.equal(msgs.length, 1)
+    const n = msgs[0].doc.Document.BkToCstmrDbtCdtNtfctn.Ntfctn.Ntry
+    assert.deepEqual([n.CdtDbtInd, String(n.Amt['#text'] ?? n.Amt), n.AcctSvcrRef], ['DBIT', '12.34', a.servicerRef])
+    assert.match(msgs[0].body, /<Fmly><Cd>RCDT<\/Cd><SubFmlyCd>RRTN<\/SubFmlyCd>/)
+    assert.match(msgs[0].body, /<RtrInf><Rsn><Cd>FRAD<\/Cd><\/Rsn><AddtlInf>CXL-1<\/AddtlInf><AddtlInf>[^<]+<\/AddtlInf><\/RtrInf>/)
+    assert.equal(await balance(ctx, C2.iban), '100.00')
+    assert.deepEqual((await recall('RC-1', 'FRAD', 'CXL-1')).json(), a, 'the same answer')
+    assert.deepEqual((await recall('RC-1', 'DUPL', 'CXL-2')).json(), a, 'returned once')
+    assert.deepEqual(await drain(ctx, C2.code), [])
+    assert.equal(await balance(ctx, C2.iban), '100.00')
+    assert.deepEqual((await credit('RC-1')), r, 'the credit itself still answers its first result')
+  })
+
+  test('refused: NOOR unknown, ARDT returned on arrival, NOAS needs consent, AM04 without the funds (then returned)', async () => {
+    assert.deepEqual((await recall('RC-NONE')).json(), { status: 'refused', code: 'NOOR' })
+    await credit('RC-2', 'EE127700771001260999')
+    assert.deepEqual((await recall('RC-2')).json(), { status: 'refused', code: 'ARDT' })
+    await credit('RC-3')
+    assert.deepEqual((await recall('RC-3', 'CUST')).json(), { status: 'refused', code: 'NOAS' })
+    assert.deepEqual((await recall('RC-3', 'DUPL')).json(), { status: 'refused', code: 'NOAS' }, 'the first answer stays')
+    await credit('RC-4', C2.iban, 50000n)
+    await drain(ctx, C2.code)
+    await ctx.emulator.ledger.transfer({ ref: 'spend', from: C2.iban, to: FUNDING, amount: 60000n, currency: 'EUR' })
+    assert.deepEqual((await recall('RC-4', 'TECH')).json(), { status: 'refused', code: 'AM04' })
+    assert.deepEqual(await drain(ctx, C2.code), [])
+    await ctx.emulator.ledger.transfer({ ref: 'back', from: FUNDING, to: C2.iban, amount: 60000n, currency: 'EUR' })
+    assert.equal((await recall('RC-4', 'TECH')).json().status, 'returned', 'not remembered: returned once the funds are there')
+    assert.equal((await recall('RC-4', 'zz')).statusCode, 400)
   })
 })
 

@@ -3,7 +3,8 @@
 // docs/rails-bridge-protocol.md (decisions 935–938):
 //
 //   us → bridge   POST /payments, POST /collections, GET /reachability/{iban}
-//   bridge → us   POST /rails/events (payment outcomes, credits), railsCallbackApp()
+//   bridge → us   POST /rails/events (payment outcomes, credits, collection returns,
+//                 recalls of credits), railsCallbackApp()
 //
 // Every request both ways carries X-Rails-HMAC: hex(HMAC-SHA256(key = UTF-8 shared secret,
 // message = raw body bytes)), as LHV's X-LHV-HMAC; a GET signs the empty body. A request
@@ -12,11 +13,14 @@
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import Fastify, { type FastifyInstance } from 'fastify'
 import { fromMinor, toMinor } from './ledger.js'
-import type {
-  CollectionOutcome, CreditResult, IncomingCredit, OutgoingCollection, OutgoingPayment, Rails, RailsAnswer, RailsEvents, RailsOutcome, Scheme,
+import {
+  RailsRetryLater, type CollectionOutcome, type CreditRecall, type CreditResult, type IncomingCredit, type OutgoingCollection, type OutgoingPayment, type Rails,
+  type RailsAnswer, type RailsEvents, type RailsOutcome, type Scheme,
 } from './rails.js'
 
 export const HMAC_HEADER = 'x-rails-hmac'
+/** A SEPA reason code (R-transactions, recall reasons). */
+const R_CODE = /^[A-Z0-9]{4}$/
 const SCHEMES: readonly Scheme[] = ['SEPA', 'INST', 'SWIFT', 'TARGET2', 'FAST']
 
 export function railsHmac(secret: string, body: string | Buffer): string {
@@ -129,7 +133,27 @@ export class HttpRails implements Rails {
       const r: CreditResult = await this.#events.credit(credit)
       return { status: 200, body: r }
     }
+    if (e?.type === 'collection.returned') {
+      if (typeof e.ref !== 'string' || !e.ref || typeof e.code !== 'string' || !R_CODE.test(e.code)) return { status: 400, body: { error: 'collection.returned needs ref and a four-character code' } }
+      return this.#retryLater(async () => ({ applied: await this.#events!.collectionReturned(e.ref, e.code) }))
+    }
+    if (e?.type === 'credit.recall') {
+      const r = e.recall
+      if (!r || typeof r !== 'object') return { status: 400, body: { error: 'recall is required' } }
+      for (const k of ['ref', 'recallRef', 'code'] as const) if (typeof r[k] !== 'string' || !r[k]) return { status: 400, body: { error: `recall.${k} is required` } }
+      if (!R_CODE.test(r.code)) return { status: 400, body: { error: `bad recall code ${r.code}` } }
+      const recall: CreditRecall = { ref: r.ref, recallRef: r.recallRef, code: r.code }
+      return { status: 200, body: await this.#events.recall(recall) }
+    }
     return { status: 400, body: { error: `unknown event type ${String(e?.type)}` } }
+  }
+
+  /** 503 (the bridge retries) when the event has to wait (decision 1000). */
+  async #retryLater(f: () => Promise<unknown>): Promise<{ status: number; body: unknown }> {
+    try { return { status: 200, body: await f() } } catch (e) {
+      if (e instanceof RailsRetryLater) return { status: 503, body: { error: e.message, retry: true } }
+      throw e
+    }
   }
 
   async #request(base: string, method: 'GET' | 'POST', path: string, body?: unknown): Promise<unknown> {

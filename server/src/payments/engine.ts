@@ -29,7 +29,7 @@ import { ibanChecksumOk, ibanCountry, isSepaCountry, normalizeIban } from '../ib
 import { servicerRef } from '../ids.js'
 import type { InboxStore } from '../inbox.js'
 import { InsufficientFunds, toMinor, type Ledger } from '../ledger.js'
-import type { CreditResult, IncomingCredit, Rails, RailsOutcome, Scheme } from '../rails.js'
+import type { CreditRecall, CreditResult, IncomingCredit, Rails, RailsOutcome, RecallResult, Scheme } from '../rails.js'
 import { parseXml, XmlSyntaxError } from '../xml.js'
 import { isUkAccount } from '../routing.js'
 import type { Booking } from './camt054.js'
@@ -203,8 +203,8 @@ export class PaymentEngine {
   #parked: KeyedStore<ParkedRecord>
   /** Payments waiting at the rails (decision 948); in memory unless the emulator gives a persistent store. */
   #pending: RailsPending
-  /** Credits from the rails by their ref: the result a repeat answers (decision 932). */
-  #credits: KeyedStore<CreditResult>
+  /** Credits from the rails by their ref: the result a repeat answers (decision 932), what was booked and a recall's answer (1001). */
+  #credits: KeyedStore<CreditRecord>
   /** Credits being booked in this process: a concurrent repeat waits for the same result. */
   #crediting = new Map<string, Promise<CreditResult>>()
   constructor(
@@ -764,10 +764,10 @@ export class PaymentEngine {
     if (busy) return busy
     const r = (async () => {
       const seen = await this.#credits.get(c.ref)
-      if (seen) return seen
+      if (seen) return creditResult(seen)
       const result = await this.#receive(c)
       await this.#credits.set(c.ref, result)
-      return result
+      return creditResult(result)
     })()
     this.#crediting.set(c.ref, r)
     // A failure (not a return) may be retried with the same ref: nothing is remembered.
@@ -776,7 +776,7 @@ export class PaymentEngine {
     return r
   }
 
-  async #receive(c: IncomingCredit): Promise<CreditResult> {
+  async #receive(c: IncomingCredit): Promise<CreditRecord> {
     const iban = normalizeIban(c.iban)
     if (!(await this.opts.virtual?.resolve(iban)) && !await this.directory.ownerOf(iban) && !(await this.#agency(iban)).length) {
       return { status: 'returned', code: 'AC01', reason: R.accountNumber }
@@ -787,7 +787,50 @@ export class PaymentEngine {
       key: `credit:${c.ref}`, iban, amount: c.amount, currency: c.currency, scheme: c.scheme, debtor: c.debtor, remittance: c.remittance,
       reference: c.reference, endToEndId: c.endToEndId, creditorName: c.creditorName,
     })
-    return r.returned ? { status: 'returned', code: r.returned.code, reason: r.returned.reason } : { status: 'booked', servicerRef: r.servicerRef! }
+    if (r.returned) return { status: 'returned', code: r.returned.code, reason: r.returned.reason }
+    return {
+      status: 'booked', servicerRef: r.servicerRef!,
+      booked: { account: r.account!, amount: String(c.amount), currency: c.currency, scheme: c.scheme, debtor: c.debtor, endToEndId: c.endToEndId },
+    }
+  }
+
+  /**
+   * A recall of a credit from the rails (camt.056, decision 1001): DUPL, TECH and FRAD are
+   * returned at once when the funds are there (the account debited, camt.054 DBIT with
+   * RtrInf); others need the customer's consent, which Connect cannot ask (NOAS). A repeat
+   * answers the first result; a credit is returned once (key `recall:<ref>`).
+   */
+  async recalled(r: CreditRecall): Promise<RecallResult> {
+    const seen = await this.#credits.get(r.ref)
+    if (!seen) return { status: 'refused', code: 'NOOR' }
+    if (seen.recall) return seen.recall
+    if (seen.status === 'returned') return { status: 'refused', code: 'ARDT' }
+    const b = seen.booked
+    const owner = b && await this.directory.ownerOf(b.account)
+    if (!b || !owner) return { status: 'refused', code: 'NOOR' }
+    let answer: RecallResult
+    if (!AUTOMATIC_RECALLS.has(r.code)) answer = { status: 'refused', code: 'NOAS' }
+    else {
+      const ref = servicerRef()
+      const amount = BigInt(b.amount)
+      const notices = [this.#notice(owner, {
+        account: b.account, owner: { name: owner.name, code: owner.code }, direction: 'DBIT', amount, currency: b.currency,
+        servicerRef: ref, scheme: b.scheme, bookedAt: this.clock.now(), endToEndId: b.endToEndId,
+        counterparty: { name: codePage(b.debtor.name), iban: b.debtor.iban ? normalizeIban(b.debtor.iban) : undefined, account: b.debtor.account, bic: b.debtor.bic },
+        bankTxCode: { family: 'RCDT', subFamily: 'RRTN' }, returnInfo: { code: r.code, additional: [r.recallRef, seen.servicerRef] },
+      })]
+      try {
+        const t = await this.ledger.transfer({ ref, key: `recall:${r.ref}`, from: b.account, to: this.rails.settlementAccount(b.scheme), amount, currency: b.currency }, notices)
+        if (!t.repeat) await this.opts.outbox.deliver(notices)
+        answer = { status: 'returned', servicerRef: t.ref }
+      } catch (e) {
+        if (!(e instanceof InsufficientFunds)) throw e
+        // Not remembered: the funds may come, and the recall again.
+        return { status: 'refused', code: 'AM04' }
+      }
+    }
+    await this.#credits.replace(r.ref, { ...seen, recall: answer })
+    return answer
   }
 
   /** An incoming credit from outside (the simulator's SEPA / SEPA Instant credit). */
@@ -820,9 +863,21 @@ export class PaymentEngine {
     })]
     const b = await this.ledger.transfer({ ref, key: p.key, from: this.rails.settlementAccount(p.scheme), to: account, amount: p.amount, currency: p.currency }, notices)
     if (!b.repeat) await this.opts.outbox.deliver(notices)
-    return { servicerRef: b.ref }
+    return { servicerRef: b.ref, account }
   }
 }
+
+/** Recall reasons the bank returns without asking the customer (decision 1001). */
+const AUTOMATIC_RECALLS = new Set(['DUPL', 'TECH', 'FRAD'])
+
+/** What the credits' store keeps of a credit from the rails (JSON: the amount a decimal string of minor units). */
+type CreditRecord = CreditResult & {
+  booked?: { account: string; amount: string; currency: string; scheme: Scheme; debtor: IncomingCredit['debtor']; endToEndId?: string }
+  recall?: RecallResult
+}
+/** The answer to the scheme: the result without what is kept for a recall. */
+const creditResult = (r: CreditRecord): CreditResult =>
+  r.status === 'booked' ? { status: 'booked', servicerRef: r.servicerRef } : { status: 'returned', code: r.code, reason: r.reason }
 
 /** The VIBAN as the own party of a master account entry (camt.054 Dbtr / Cdtr). */
 const virtualParty = (v: VirtualAccount) => ({ iban: v.iban, name: v.holder?.name, country: v.holder?.country, address: v.holder?.address })

@@ -3,7 +3,7 @@
 Ugovor između open-banking servera (`server/src/rails-http.ts`, `RAILS=http`) i vanjskog
 procesa koji govori sa stvarnim shemama: SEPA SCT, SEPA Instant, Faster Payments, SWIFT,
 TARGET2 i SEPA Direct Debit. JSON preko HTTP-a, potpisan dijeljenom tajnom. Odluke
-930–938 u `docs/decisions.md`.
+930–938 i 1000–1003 u `docs/decisions.md`.
 
 ## Osnovno
 
@@ -45,8 +45,8 @@ TARGET2 i SEPA Direct Debit. JSON preko HTTP-a, potpisan dijeljenom tajnom. Odlu
   `RAILS_TIMEOUT_MS`, zadano 10 s) i plaćanje šalje u shemu tek nakon odgovora; za ref koji
   smo odbili kasniji `payment.outcome` dobiva `applied: false`, i to je signal za ručnu
   rekoncilijaciju (odluka 936).
-- `collections` odgovara pri prezentaciji; povrati nakon namire (R-transakcije do 8 tjedana)
-  i opozivi (camt.056) još nisu u protokolu (odluka 933).
+- `collections` odgovara pri prezentaciji (odluka 933); povrat ili refund nakon namire
+  (R-transakcija do 13 mjeseci) stiže kasnije kao `collection.returned` (odluka 1000).
 
 ## Bridge → mi: `POST /rails/events`
 
@@ -54,10 +54,19 @@ TARGET2 i SEPA Direct Debit. JSON preko HTTP-a, potpisan dijeljenom tajnom. Odlu
 | --- | --- | --- |
 | `payment.outcome` | `{type, ref, outcome: {status: "settled"\|"rejected"\|"unavailable", reason?}}` | `{"applied": true}`; `false` za nepoznat ili već završen ref (duplikat, ignoriran) |
 | `credit` | `{type, credit: {ref, iban, amount, currency, scheme, debtor: {name?, iban?, bic?, account?}, creditorName?, remittance?, reference?, endToEndId?}}` | `{"status":"booked","servicerRef":"…"}` ili `{"status":"returned","code":"AC01","reason":"…"}` |
+| `collection.returned` | `{type, ref, code}`: `ref` kolekcije (kao u `POST /collections`), `code` SEPA R-kod (`MD06`, `MD01`, `AC04` …) | `{"applied": true}` (vraćeno vjerovniku na teret, camt.054 DBIT s `RtrInf`); `false` za nepoznatu, nenamirenu, stariju od 13 mjeseci ili već vraćenu (ponavljanje); `503` kad vjerovnik nema sredstava (ponavljaj) |
+| `credit.recall` | `{type, recall: {ref, recallRef, code}}`: `ref` je `credit.ref` primljene uplate, `recallRef` camt.056 `CxlId`, `code` razlog (`DUPL`, `TECH`, `FRAD`, `CUST`, `AC03`, `AM09` …) | `{"status":"returned","servicerRef":"…"}` (bridge šalje pacs.004) ili `{"status":"refused","code":"NOOR"\|"ARDT"\|"AM04"\|"NOAS"}` (bridge šalje camt.029) |
 
 - `credit.ref` je referenca sheme (bridgea): isti ref drugi put vraća prvi rezultat, ne
   knjiži ponovno. `iban` je IBAN, VIBAN ili agency račun (IBAN ili sort code + broj računa).
   `returned` znači da bridge vraća novac pošiljatelju s tim ISO kodom.
+- `collection.returned` (odluka 1000): ista knjiga kao `/_sim/direct-debit/return`; novac je
+  shema već vratila, pa ga ne odbijamo, nego knjižimo kad sredstva budu (`503`, ponavljaj).
+- `credit.recall` (odluka 1001): `DUPL`, `TECH` i `FRAD` vraćamo odmah ako su sredstva na
+  računu (inače `AM04`); ostali razlozi traže pristanak klijenta, kojeg Connect nema kako
+  pitati, pa je odgovor `NOAS`. `NOOR`: uplata s tim refom nije knjižena kod nas; `ARDT`:
+  vraćena je već pri primitku. Ponovljen opoziv istog refa vraća prvi odgovor. Povrat našeg
+  odlaznog plaćanja (pacs.004) bridge šalje kao običan `credit` na račun platitelja.
 - Ostali odgovori: `401` loš HMAC, `400` tijelo izvan protokola, `503` server još ne sluša,
   `5xx` greška kod nas (bridge ponavlja).
 

@@ -7,7 +7,8 @@ import { after, beforeEach, describe, test } from 'node:test'
 import Fastify, { type FastifyInstance } from 'fastify'
 import { many } from '../src/xml.js'
 import { HttpRails, HMAC_HEADER, hmacMatches, railsCallbackApp, railsHmac } from '../src/rails-http.js'
-import { C1, C2, DE_IBAN, balance, call, drain, pain001, setup, type Ctx, type TxSpec } from './helpers.js'
+import { FUNDING } from '../src/emulator.js'
+import { C1, C2, DE_IBAN, FR_IBAN, balance, call, ddDrain, ddEntry, drain, pain001, pain008, setup, type Ctx, type TxSpec } from './helpers.js'
 
 const SECRET = 'bridge-secret'
 
@@ -206,6 +207,57 @@ describe('HttpRails: credits from the scheme', () => {
 
   test('an account not here: returned AC01', async () => {
     assert.deepEqual((await credit('SCT-2', 'EE127700771001260999')).body, { status: 'returned', code: 'AC01', reason: 'Incorrect account number.' })
+  })
+})
+
+describe('HttpRails: R-transactions after settlement and recalls (decisions 1000, 1001)', () => {
+  test('collection.returned: a collection the bridge settled is debited back once; unknown false; 400 outside the protocol', async () => {
+    const xml = pain008([{ txs: [{ debtorIban: FR_IBAN, debtorBic: 'SATPFRP0', endToEndId: 'E2E-RT', instrId: 'INSTR-RT', amount: '30.00' }] }])
+    assert.equal((await call(ctx, { method: 'POST', url: '/direct-debit/collection', body: xml })).statusCode, 202)
+    ctx.clock.set('2026-03-12T10:30:00Z')
+    assert.equal(await ctx.emulator.directDebit.tick(), 1)
+    const [c] = await ctx.emulator.directDebit.collections()
+    assert.equal(c.status, 'SETTLED')
+    await ddDrain(ctx)
+    assert.equal(await balance(ctx, C1.iban), '10030.00')
+    assert.deepEqual(await callback({ type: 'collection.returned', ref: c.id, code: 'MD06' }), { status: 200, body: { applied: true } })
+    const [m] = await ddDrain(ctx)
+    const e = ddEntry(m)
+    assert.deepEqual([e.ind, e.amount, e.returnInfo], ['DBIT', '30.00', ['INSTR-RT', 'CD:MD06']])
+    assert.deepEqual(await callback({ type: 'collection.returned', ref: c.id, code: 'MD06' }), { status: 200, body: { applied: false } }, 'a repeat')
+    assert.deepEqual(await callback({ type: 'collection.returned', ref: 'NO-SUCH', code: 'MD06' }), { status: 200, body: { applied: false } })
+    assert.equal((await callback({ type: 'collection.returned', ref: c.id, code: 'md6' })).status, 400)
+    assert.equal(await balance(ctx, C1.iban), '10000.00')
+  })
+
+  test('collection.returned without the funds: 503 (the bridge retries), nothing booked', async () => {
+    const xml = pain008([{ txs: [{ debtorIban: FR_IBAN, debtorBic: 'SATPFRP0', endToEndId: 'E2E-RF', amount: '30.00' }] }])
+    assert.equal((await call(ctx, { method: 'POST', url: '/direct-debit/collection', body: xml })).statusCode, 202)
+    ctx.clock.set('2026-03-12T10:30:00Z')
+    await ctx.emulator.directDebit.tick()
+    const [c] = await ctx.emulator.directDebit.collections()
+    await ctx.emulator.ledger.transfer({ ref: 'drain', from: C1.iban, to: FUNDING, amount: 1000001n, currency: 'EUR' })
+    const r = await callback({ type: 'collection.returned', ref: c.id, code: 'MD01' })
+    assert.equal(r.status, 503)
+    assert.equal(r.body.retry, true)
+    assert.equal((await ctx.emulator.directDebit.collections())[0].status, 'SETTLED')
+  })
+
+  test('credit.recall: DUPL returned (camt.054 DBIT), CUST refused NOAS, unknown NOOR, a repeat the first answer', async () => {
+    const credit = (ref: string) => callback({ type: 'credit', credit: { ref, iban: C2.iban, amount: '5.00', currency: 'EUR', scheme: 'SEPA', debtor: { name: 'Hans Muster', iban: DE_IBAN } } })
+    const recall = (ref: string, code: string) => callback({ type: 'credit.recall', recall: { ref, recallRef: `CXL-${ref}`, code } })
+    assert.equal((await credit('SCT-R1')).body.status, 'booked')
+    assert.equal((await credit('SCT-R2')).body.status, 'booked')
+    await messages(C2.code)
+    const r = await recall('SCT-R1', 'DUPL')
+    assert.equal(r.status, 200)
+    assert.equal(r.body.status, 'returned')
+    assert.deepEqual((await messages(C2.code)).notes, [['DBIT', '5.00', r.body.servicerRef]])
+    assert.deepEqual(await recall('SCT-R1', 'DUPL'), r)
+    assert.deepEqual((await recall('SCT-R2', 'CUST')).body, { status: 'refused', code: 'NOAS' })
+    assert.deepEqual((await recall('SCT-NONE', 'TECH')).body, { status: 'refused', code: 'NOOR' })
+    assert.equal((await callback({ type: 'credit.recall', recall: { ref: 'SCT-R2', code: 'DUPL' } })).status, 400)
+    assert.equal(await balance(ctx, C2.iban), '105.00')
   })
 })
 
