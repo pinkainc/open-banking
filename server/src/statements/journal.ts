@@ -12,7 +12,8 @@ export interface JournalEntry extends Booking {
 }
 
 export interface JournalStore {
-  record(b: Booking): Promise<JournalEntry>
+  /** `key` an outbox item's (decision 991): a second record with it returns the first entry and adds nothing. */
+  record(b: Booking, key?: string): Promise<JournalEntry>
   /** Entries of an account booked in [from, to), oldest first (booking time, then seq). */
   entries(account: string, from: number, to: number): Promise<JournalEntry[]>
   /** Balance per currency of everything booked before the instant (signed, minor units). */
@@ -24,9 +25,14 @@ export interface JournalStore {
 export class MemoryJournal implements JournalStore {
   #byAccount = new Map<string, JournalEntry[]>()
   #seq = 0
+  /** Entries by outbox key; unbounded as the journal is (decision 915). */
+  #keys = new Map<string, JournalEntry>()
 
-  async record(b: Booking): Promise<JournalEntry> {
+  async record(b: Booking, key?: string): Promise<JournalEntry> {
+    const known = key === undefined ? undefined : this.#keys.get(key)
+    if (known) return known
     const e: JournalEntry = { ...b, seq: ++this.#seq }
+    if (key !== undefined) this.#keys.set(key, e)
     let list = this.#byAccount.get(b.account)
     if (!list) this.#byAccount.set(b.account, (list = []))
     list.push(e)

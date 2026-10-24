@@ -17,7 +17,8 @@ import { normalizeIban } from '../iban.js'
 import { notificationMsgId, servicerRef } from '../ids.js'
 import type { InboxStore } from '../inbox.js'
 import { InsufficientFunds, type Ledger } from '../ledger.js'
-import { camt054, type Booking } from '../payments/camt054.js'
+import type { Booking } from '../payments/camt054.js'
+import type { Outbox } from '../outbox.js'
 import type { Bank, IncomingEvent } from '../payments/engine.js'
 import type { Rails } from '../rails.js'
 import { addDays } from '../statements/camt060.js'
@@ -144,7 +145,8 @@ export interface BacsDeps {
   clock: Clock
   bank: Bank
   virtual: VirtualAccounts
-  onBooking?: (customer: Customer, b: Booking) => void | Promise<void>
+  /** A booking's statement entry and camt.054 go with it (decision 990). */
+  outbox: Outbox
   /** Pending / rejected incoming payments for GET /accounts/{acc}/payments (decision 711). */
   onIncoming?: (e: IncomingEvent) => void | Promise<void>
   /** Books an incoming credit (the payment engine's, so VIBANs work as for any credit). */
@@ -511,8 +513,9 @@ export class BacsService {
   /** One debit attempt; no partial payments (G "Receiving Collections"). */
   async #debit(c: BacsCollection): Promise<boolean> {
     const m = c.mandate
+    const notices = [this.d.outbox.notice(m.customer, this.#booking(c, 'DBIT', c.id))]
     try {
-      await this.d.ledger.transfer({ ref: c.id, from: m.debtor.iban, to: this.d.rails.settlementAccount(BACS_SCHEME), amount: c.amount, currency: 'GBP' })
+      await this.d.ledger.transfer({ ref: c.id, from: m.debtor.iban, to: this.d.rails.settlementAccount(BACS_SCHEME), amount: c.amount, currency: 'GBP' }, notices)
     } catch (e) {
       if (e instanceof InsufficientFunds) return false
       throw e
@@ -520,18 +523,19 @@ export class BacsService {
     c.debit = 'BOOKED'
     c.debitedAt = this.d.clock.now()
     await this.#saveCollection(c)
-    await this.#notify(m.customer, this.#booking(c, 'DBIT', c.id))
+    await this.d.outbox.deliver(notices)
     return true
   }
 
   async #refund(c: BacsCollection) {
     const f = c.refund!
-    await this.d.ledger.transfer({ ref: f.ref, from: this.d.rails.settlementAccount(BACS_SCHEME), to: c.mandate.debtor.iban, amount: c.amount, currency: 'GBP' })
-    f.bookedAt = this.d.clock.now()
-    await this.#saveCollection(c)
     // A return (UPDD) or a reversal (PRDD) of the direct debit, with the reason as RtrInf.
     const b = this.#booking(c, 'CRDT', f.ref)
-    await this.#notify(c.mandate.customer, { ...b, bankTxCode: { family: 'RDDT', subFamily: f.kind === 'RETURN' ? 'UPDD' : 'PRDD' }, returnInfo: { code: f.code, additional: [f.text] } })
+    const notices = [this.d.outbox.notice(c.mandate.customer, { ...b, bankTxCode: { family: 'RDDT', subFamily: f.kind === 'RETURN' ? 'UPDD' : 'PRDD' }, returnInfo: { code: f.code, additional: [f.text] } })]
+    await this.d.ledger.transfer({ ref: f.ref, from: this.d.rails.settlementAccount(BACS_SCHEME), to: c.mandate.debtor.iban, amount: c.amount, currency: 'GBP' }, notices)
+    f.bookedAt = this.d.clock.now()
+    await this.#saveCollection(c)
+    await this.d.outbox.deliver(notices)
   }
 
   #booking(c: BacsCollection, direction: 'DBIT' | 'CRDT', ref: string): Booking {
@@ -546,10 +550,6 @@ export class BacsService {
     }
   }
 
-  async #notify(customer: Customer, b: Booking) {
-    await this.d.onBooking?.(customer, b)
-    await this.d.inbox.add({ customer, type: 'CREDIT_DEBIT_NOTIFICATION', body: camt054(b, customer.camt054, this.d.bank) })
-  }
 
   // --- The store (decision 977) ---------------------------------------------------------------
 

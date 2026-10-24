@@ -22,6 +22,8 @@ import type pg from 'pg'
 import type { Clock } from '../clock.js'
 import { InsufficientFunds, isSystemAccount, type Ledger, type Posting } from '../ledger.js'
 import type { PgDb } from './db.js'
+import type { OutboxItem } from '../outbox.js'
+import { insertOutbox, PgOutbox } from './outbox.js'
 
 /** Transactions of one account that may hold a pool connection at once in one process. */
 const GATE = 2
@@ -43,7 +45,11 @@ export class PgLedger implements Ledger {
   constructor(private db: PgDb, o: PgLedgerOptions = {}) {
     this.namespace = o.namespace ?? randomUUID()
     this.#clock = o.clock
+    this.outbox = new PgOutbox(db, { namespace: this.namespace })
   }
+
+  /** Items of bookings not delivered yet: written in the booking's transaction (decision 990). */
+  readonly outbox: PgOutbox
 
   async available(account: string, currency: string) {
     return this.#available(this.db.pool, account, currency)
@@ -71,11 +77,12 @@ export class PgLedger implements Ledger {
     })
   }
 
-  async commit(ref: string, to: string) {
+  async commit(ref: string, to: string, outbox: OutboxItem[] = []) {
     await this.#tx(undefined, async (c) => {
       const { rows } = await c.query('delete from ledger_holds where ns = $1 and ref = $2 returning account, currency, amount', [this.namespace, ref])
       if (!rows.length) throw new Error(`no reservation ${ref}`)
       await this.#move(c, ref, rows[0].account, to, BigInt(rows[0].amount), rows[0].currency)
+      await insertOutbox(c, this.namespace, outbox)
     })
   }
 
@@ -84,12 +91,13 @@ export class PgLedger implements Ledger {
   }
 
   /** reserve + commit in one transaction: a failure leaves nothing. */
-  async transfer(t: { ref: string; from: string; to: string; amount: bigint; currency: string }) {
+  async transfer(t: { ref: string; from: string; to: string; amount: bigint; currency: string }, outbox: OutboxItem[] = []) {
     if (t.amount <= 0n) throw new Error('amount must be positive')
     await this.#debiting(t.from, async (c) => {
       await this.#checkFree(c, t.ref)
       await this.#checkFunds(c, t.from, t.currency, t.amount)
       await this.#move(c, t.ref, t.from, t.to, t.amount, t.currency)
+      await insertOutbox(c, this.namespace, outbox)
     })
   }
 

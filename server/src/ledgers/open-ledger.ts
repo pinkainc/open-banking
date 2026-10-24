@@ -23,8 +23,9 @@
 // - Limits: amounts are JSON numbers on open-ledger, so at most 2^53-1 minor units
 //   (RangeError beyond); currencies of an account come in symbol order, as open-ledger lists
 //   balances (decision 925).
-import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, sign } from 'node:crypto'
+import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomUUID, sign } from 'node:crypto'
 import { InsufficientFunds, isSystemAccount, type Ledger, type Posting } from '../ledger.js'
+import { MemoryOutbox, type OutboxItem, type OutboxStore } from '../outbox.js'
 
 export interface OpenLedgerOptions {
   /** The server, e.g. http://127.0.0.1:4620/api/v2 (a trailing /api/v2 is added when missing). */
@@ -35,6 +36,8 @@ export interface OpenLedgerOptions {
   secretKey?: string
   /** How long a request or an intent may take; default 10 s. */
   timeoutMs?: number
+  /** Where the items of bookings wait as intents (decision 992); default in memory. */
+  outbox?: OutboxStore
 }
 
 /** An answer from open-ledger that is not what we asked for. */
@@ -43,6 +46,10 @@ export class OpenLedgerError extends Error {
 }
 
 const MAX = BigInt(Number.MAX_SAFE_INTEGER)
+/** A booking open-ledger (or we) turned down: nothing was booked. A timeout, a 5xx or a transport error may have booked. */
+const refused = (e: unknown) => e instanceof InsufficientFunds || e instanceof RangeError
+  || (e instanceof OpenLedgerError && e.status < 500)
+  || (e instanceof Error && /^(no reservation |reservation .* exists$|amount must be positive$)/.test(e.message))
 const FINAL = new Set(['completed', 'rejected', 'failed', 'aborted', 'expired'])
 const PKCS8 = Buffer.from('302e020100300506032b657004220420', 'hex')
 const SPKI_LEN = 12
@@ -77,6 +84,8 @@ export class OpenLedgerLedger implements Ledger {
   readonly #timeout: number
   /** Things made once per process (ledger, symbols, wallets, limits): name → its creation. */
   #made = new Map<string, Promise<void>>()
+  /** The items of bookings: written as intents before the booking, which names them (decision 992). */
+  readonly outbox: OutboxStore
 
   constructor(o: OpenLedgerOptions) {
     this.#base = o.url.replace(/\/+$/, '').replace(/(?<!\/api\/v2)$/, '/api/v2')
@@ -84,6 +93,7 @@ export class OpenLedgerLedger implements Ledger {
     this.#key = createPrivateKey({ key: Buffer.concat([PKCS8, Buffer.from(o.secretKey ?? generateSecretKey(), 'base64')]), format: 'der', type: 'pkcs8' })
     this.#public = createPublicKey(this.#key).export({ format: 'der', type: 'spki' }).subarray(SPKI_LEN).toString('base64')
     this.#timeout = o.timeoutMs ?? 10_000
+    this.outbox = o.outbox ?? new MemoryOutbox()
   }
 
   /** Our public key (base64, raw), the owner of the ledger and every record in it. */
@@ -109,14 +119,52 @@ export class OpenLedgerLedger implements Ledger {
     await this.#open(r.ref, 'reserve', r.account, hold(r.account), r.amount, r.currency, { account: r.account })
   }
 
-  async commit(ref: string, to: string) {
-    if (!(await this.#settle(ref, 'commit', to))) throw new Error(`no reservation ${ref}`)
+  async commit(ref: string, to: string, outbox: OutboxItem[] = []) {
+    await this.#withIntent(ref, outbox, async (mark) => {
+      if (!(await this.#settle(ref, 'commit', to, mark))) throw new Error(`no reservation ${ref}`)
+    })
   }
 
   async release(ref: string) { await this.#settle(ref, 'release') }
 
-  async transfer(t: { ref: string; from: string; to: string; amount: bigint; currency: string }) {
-    await this.#open(t.ref, 'transfer', t.from, wallet(t.to), t.amount, t.currency, { from: t.from, to: t.to }, t.to)
+  async transfer(t: { ref: string; from: string; to: string; amount: bigint; currency: string }, outbox: OutboxItem[] = []) {
+    await this.#withIntent(t.ref, outbox, (mark) =>
+      this.#open(t.ref, 'transfer', t.from, wallet(t.to), t.amount, t.currency, { from: t.from, to: t.to, ...mark }, t.to))
+  }
+
+  /**
+   * Whether the booking of an intent item happened: a completed transfer or commit of its
+   * ref whose custom data names the intent's batch.
+   */
+  async booked(intent: string): Promise<boolean> {
+    const at = intent.indexOf(':')
+    const batch = intent.slice(0, at)
+    const ref = encodeHandle(intent.slice(at + 1))
+    for (let n = 0; ; n++) {
+      const open = await this.#read(`o.${ref}.${n}`)
+      if (!open) return false
+      if (open.meta.status === 'completed' && open.data.custom?.outbox === batch) return true
+      const settled = await this.#read(`s.${ref}.${n}`)
+      if (settled?.meta.status === 'completed' && settled.data.custom?.outbox === batch) return true
+    }
+  }
+
+  /**
+   * Outbox after intent (decision 992): the items are stored first, marked with a batch the
+   * booking's intent carries in its custom data; a refused booking takes them back. Any
+   * other failure (a timeout) leaves them for recover(), which asks booked().
+   */
+  async #withIntent(ref: string, items: OutboxItem[], book: (mark: { outbox?: string }) => Promise<void>) {
+    if (!items.length) return book({})
+    const batch = randomUUID()
+    const marked = items.map((i) => ({ ...i, intent: `${batch}:${ref}` }))
+    await this.outbox.put(marked)
+    try {
+      await book({ outbox: batch })
+    } catch (e) {
+      if (refused(e)) await this.outbox.remove(marked.map((i) => i.key))
+      throw e
+    }
   }
 
   /** Bookings (completed transfers and commits) as postings, oldest first: the journal open-ledger keeps. */
@@ -169,7 +217,7 @@ export class OpenLedgerLedger implements Ledger {
   }
 
   /** Commit (to `to`) or release the open reservation of ref; false when there is none. */
-  async #settle(ref: string, kind: 'commit' | 'release', to?: string): Promise<boolean> {
+  async #settle(ref: string, kind: 'commit' | 'release', to?: string, mark: { outbox?: string } = {}): Promise<boolean> {
     for (let n = 0; ; n++) {
       const open = await this.#read(`o.${encodeHandle(ref)}.${n}`)
       if (!open) return false
@@ -180,7 +228,7 @@ export class OpenLedgerLedger implements Ledger {
       if (kind === 'commit') await this.#wallet(to!, c.symbol.handle)
       const claims = [{ action: 'transfer', source: { handle: hold(account) }, target: { handle: target }, symbol: c.symbol, amount: c.amount }]
       const handle = `s.${encodeHandle(ref)}.${n}`
-      const made = await this.#intent(handle, claims, { ref, kind, n: String(n), from: account, to: kind === 'commit' ? to! : account })
+      const made = await this.#intent(handle, claims, { ref, kind, n: String(n), from: account, to: kind === 'commit' ? to! : account, ...mark })
       if (!made) continue // settled before
       if (made.meta.status !== 'completed') {
         const r = rejection(made)

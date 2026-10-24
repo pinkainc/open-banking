@@ -162,6 +162,29 @@ create table if not exists journal_entries (
   primary key (ns, seq)
 );
 create index if not exists journal_entries_account on journal_entries (ns, account, booked_at, seq);
+alter table journal_entries add column if not exists entry_key text;
+create unique index if not exists journal_entries_key on journal_entries (ns, entry_key) where entry_key is not null;
+`
+
+// The ledger's outbox (decision 990): items that report a booking, written in the booking's
+// transaction (an intent before an open-ledger booking, decision 992); delivered and removed
+// by the process. The message keys that make the delivery exactly once into the inbox and
+// the journal (decision 991) are columns of theirs.
+const OUTBOX_SCHEMA = `
+create sequence if not exists outbox_seq;
+create table if not exists outbox_items (
+  ns      text   not null,
+  key     text   not null,
+  kind    text   not null,
+  payload jsonb  not null,
+  at      bigint not null,
+  intent  text,
+  ord     bigint not null,
+  primary key (ns, key)
+);
+create index if not exists outbox_items_ord on outbox_items (ns, ord);
+alter table inbox_messages add column if not exists msg_key text;
+create unique index if not exists inbox_messages_key on inbox_messages (ns, msg_key) where msg_key is not null;
 `
 
 // Remembered business state (decision 961): one table for every KeyedStore kind. `ord`
@@ -231,7 +254,7 @@ export class PgDb {
     const c = await pool.connect()
     try {
       await c.query('select pg_advisory_lock($1)', [SCHEMA_LOCK])
-      for (const s of [INBOX_SCHEMA, LEDGER_SCHEMA, AGENCY_SCHEMA, ACQUIRING_SCHEMA, RAILS_SCHEMA, JOURNAL_SCHEMA, KEYED_SCHEMA, DIRECTORY_SCHEMA].flatMap(statements)) await c.query(s)
+      for (const s of [INBOX_SCHEMA, LEDGER_SCHEMA, AGENCY_SCHEMA, ACQUIRING_SCHEMA, RAILS_SCHEMA, JOURNAL_SCHEMA, KEYED_SCHEMA, DIRECTORY_SCHEMA, OUTBOX_SCHEMA].flatMap(statements)) await c.query(s)
     } finally {
       await c.query('select pg_advisory_unlock($1)', [SCHEMA_LOCK])
       c.release()

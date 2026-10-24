@@ -26,7 +26,8 @@ import { notificationMsgId, servicerRef } from '../ids.js'
 import type { InboxStore } from '../inbox.js'
 import { InsufficientFunds, toMinor, type Ledger } from '../ledger.js'
 import type { Bank } from '../payments/engine.js'
-import { camt054, type Booking } from '../payments/camt054.js'
+import type { Booking } from '../payments/camt054.js'
+import type { Outbox } from '../outbox.js'
 import { decimalEq, decimalSum } from '../payments/pain001.js'
 import type { XsdValidator } from '../payments/xsd.js'
 import type { Rails } from '../rails.js'
@@ -107,7 +108,8 @@ export interface DirectDebitDeps {
   xsd?: XsdValidator
   virtual?: VirtualAccounts
   strictIban?: boolean
-  onBooking?: (customer: Customer, b: Booking) => void | Promise<void>
+  /** A booking's statement entry and camt.054 go with it (decision 990). */
+  outbox: Outbox
   /** Where the pain.008 and pain.007 MsgIds are kept (decision 966); default in memory. */
   keyed?: KeyedFactory
 }
@@ -333,9 +335,14 @@ export class DirectDebitService {
       await this.#save(c)
       return { ...base, status: 'RJCT', code, text: REASONS[code] }
     }
+    // The camt.054s go with the booking (decision 990); they are delivered once it is saved SETTLED.
+    const notices = [
+      ...(c.debtorCustomer ? [this.d.outbox.notice(c.debtorCustomer, this.#booking(c, 'debtor', 'DBIT', c.id))] : []),
+      ...(c.creditorCustomer ? [this.d.outbox.notice(c.creditorCustomer, this.#booking(c, 'creditor', 'CRDT', servicerRef()))] : []),
+    ]
     if (c.debtorCustomer) {
       try {
-        await this.d.ledger.transfer({ ref: c.id, from: c.debtor.iban, to: c.creditorCustomer ? c.creditor.iban : settlement, amount: c.amount, currency: c.currency })
+        await this.d.ledger.transfer({ ref: c.id, from: c.debtor.iban, to: c.creditorCustomer ? c.creditor.iban : settlement, amount: c.amount, currency: c.currency }, notices)
       } catch (e) {
         if (e instanceof InsufficientFunds) return fail('AM04')
         throw e
@@ -346,13 +353,12 @@ export class DirectDebitService {
         debtor: c.debtor, endToEndId: c.endToEndId, mandateId: c.mandateId, settlementDate: c.settlementDate,
       })
       if (outcome.status === 'rejected') return fail(outcome.code)
-      await this.d.ledger.transfer({ ref: c.id, from: settlement, to: c.creditor.iban, amount: c.amount, currency: c.currency })
+      await this.d.ledger.transfer({ ref: c.id, from: settlement, to: c.creditor.iban, amount: c.amount, currency: c.currency }, notices)
     }
     c.status = 'SETTLED'
     c.settledAt = this.d.clock.now()
     await this.#save(c)
-    if (c.debtorCustomer) await this.#notify(c.debtorCustomer, this.#booking(c, 'debtor', 'DBIT', c.id))
-    if (c.creditorCustomer) await this.#notify(c.creditorCustomer, this.#booking(c, 'creditor', 'CRDT', servicerRef()))
+    await this.d.outbox.deliver(notices)
     return { ...base, status: 'ACSC' }
   }
 
@@ -362,8 +368,15 @@ export class DirectDebitService {
     const from = c.creditorCustomer ? c.creditor.iban : settlement
     const to = c.debtorCustomer ? c.debtor.iban : settlement
     const ref = servicerRef()
+    // P 09: "TxId…" then "CD:<code>" under Rsn/Cd NARR. pain.008 has no TxId; InstrId or EndToEndId stands in.
+    const returnInfo = { code: 'NARR', additional: [c.instrId ?? c.endToEndId, `CD:${code}`] }
+    const family = { subFamily: 'UPDD' }
+    const notices = [
+      ...(c.debtorCustomer ? [this.d.outbox.notice(c.debtorCustomer, { ...this.#booking(c, 'debtor', 'CRDT', ref), bankTxCode: { family: 'RDDT', ...family }, returnInfo })] : []),
+      ...(c.creditorCustomer ? [this.d.outbox.notice(c.creditorCustomer, { ...this.#booking(c, 'creditor', 'DBIT', servicerRef()), bankTxCode: { family: 'IDDT', ...family }, returnInfo })] : []),
+    ]
     try {
-      await this.d.ledger.transfer({ ref, from, to, amount: c.amount, currency: c.currency })
+      await this.d.ledger.transfer({ ref, from, to, amount: c.amount, currency: c.currency }, notices)
     } catch (e) {
       if (e instanceof InsufficientFunds) return 'funds'
       throw e
@@ -371,11 +384,7 @@ export class DirectDebitService {
     c.status = 'REFUNDED'
     c.reason = code
     await this.#save(c)
-    // P 09: "TxId…" then "CD:<code>" under Rsn/Cd NARR. pain.008 has no TxId; InstrId or EndToEndId stands in.
-    const returnInfo = { code: 'NARR', additional: [c.instrId ?? c.endToEndId, `CD:${code}`] }
-    const family = { subFamily: 'UPDD' }
-    if (c.debtorCustomer) await this.#notify(c.debtorCustomer, { ...this.#booking(c, 'debtor', 'CRDT', ref), bankTxCode: { family: 'RDDT', ...family }, returnInfo })
-    if (c.creditorCustomer) await this.#notify(c.creditorCustomer, { ...this.#booking(c, 'creditor', 'DBIT', servicerRef()), bankTxCode: { family: 'IDDT', ...family }, returnInfo })
+    await this.d.outbox.deliver(notices)
     return 'ok'
   }
 
@@ -554,10 +563,6 @@ export class DirectDebitService {
     await this.d.inbox.add({ customer, type, requestId, body: ddStatusReport(r, this.d.bank.bic, this.d.clock.now()) })
   }
 
-  async #notify(customer: Customer, b: Booking) {
-    await this.d.onBooking?.(customer, b)
-    await this.d.inbox.add({ customer, type: 'CREDIT_DEBIT_NOTIFICATION', body: camt054(b, customer.camt054, this.d.bank) })
-  }
 }
 
 /** A collection as the keyed store keeps it (decision 975): JSON, the customers by key. */

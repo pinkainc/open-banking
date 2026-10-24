@@ -26,7 +26,8 @@ import { normalizeIban } from '../iban.js'
 import { servicerRef } from '../ids.js'
 import type { InboxStore } from '../inbox.js'
 import { fromMinor, InsufficientFunds, type Ledger } from '../ledger.js'
-import { camt054, type Booking } from '../payments/camt054.js'
+import type { Booking } from '../payments/camt054.js'
+import type { Outbox } from '../outbox.js'
 import type { Bank } from '../payments/engine.js'
 import { addDays, instant } from '../statements/camt060.js'
 import { dateTallinn, isoTallinn } from '../time.js'
@@ -113,7 +114,8 @@ export interface FxDeps {
   inbox: InboxStore
   clock: Clock
   bank: Bank
-  onBooking?: (c: Customer, b: Booking) => void | Promise<void>
+  /** A booking's statement entry and camt.054 go with it (decision 990). */
+  outbox: Outbox
   /** Where offers and pricing are kept (decision 980); memory when not given. */
   keyed?: KeyedFactory
 }
@@ -422,12 +424,7 @@ export class FxService {
   async #settle(o: Offer) {
     const d = o.deal!
     const now = this.d.clock.now()
-    await this.d.ledger.commit(d.reservation!, FX_POSITION)
     const creditRef = servicerRef()
-    await this.d.ledger.transfer({ ref: creditRef, from: FX_POSITION, to: o.account, amount: o.amountTo!, currency: o.currencyTo })
-    d.status = 'COMPLETED'
-    d.settledAt = now
-    await this.#save(o)
     const c = o.customer
     const leg = (direction: 'DBIT' | 'CRDT', amount: bigint, currency: string, ref: string): Booking => ({
       account: o.account, owner: { name: c.name, code: c.code }, direction, amount, currency, servicerRef: ref,
@@ -436,10 +433,15 @@ export class FxService {
       remittance: o.comment || `FX ${o.currencyFrom}/${o.currencyTo} ${o.quote!.toFixed(5)}`,
       bankTxCode: { domain: 'FORX', family: 'OTHR', subFamily: 'OTHR' },
     })
-    for (const b of [leg('DBIT', o.amountFrom!, o.currencyFrom, servicerRef()), leg('CRDT', o.amountTo!, o.currencyTo, creditRef)]) {
-      await this.d.onBooking?.(c, b)
-      await this.d.inbox.add({ customer: c, type: 'CREDIT_DEBIT_NOTIFICATION', body: camt054(b, c.camt054, this.d.bank) })
-    }
+    // Each leg's camt.054 goes with its booking (decision 990), delivered once the deal is saved COMPLETED.
+    const debit = [this.d.outbox.notice(c, leg('DBIT', o.amountFrom!, o.currencyFrom, servicerRef()))]
+    const credit = [this.d.outbox.notice(c, leg('CRDT', o.amountTo!, o.currencyTo, creditRef))]
+    await this.d.ledger.commit(d.reservation!, FX_POSITION, debit)
+    await this.d.ledger.transfer({ ref: creditRef, from: FX_POSITION, to: o.account, amount: o.amountTo!, currency: o.currencyTo }, credit)
+    d.status = 'COMPLETED'
+    d.settledAt = now
+    await this.#save(o)
+    await this.d.outbox.deliver([...debit, ...credit])
   }
 
   /**

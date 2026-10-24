@@ -36,7 +36,18 @@ export type ProcessedRefusal = { id: string; reason: 'unknown' | 'archived' }
 export interface Scope { customers: Set<string>; type?: string }
 
 /** What a new message carries; the store gives it an id, a creation time (from its clock) and a seq. */
-export interface NewMessage { customer: CustomerKey; type: string; body: string | Buffer; requestId?: string; contentType?: string }
+export interface NewMessage {
+  customer: CustomerKey; type: string; body: string | Buffer; requestId?: string; contentType?: string
+  /**
+   * The outbox item it delivers (decision 991): a second add with the key returns the first
+   * message and adds nothing, while that message is kept (pending, or processed until
+   * archived; in memory at most KEY_BOUNDS).
+   */
+  key?: string
+}
+
+/** How long and how many message keys MemoryInbox remembers (decision 991). */
+export const KEY_BOUNDS: Bounds = { ttlMs: 7 * DAY_MS, max: 100_000 }
 
 /**
  * The message box behind an async interface (decision 900): MemoryInbox below, PgInbox
@@ -92,8 +103,10 @@ export class MemoryInbox implements InboxStore {
   #processed: BoundedMap<string, Message>
   #seq = 0
   #listeners: ((m: Message) => void | Promise<void>)[] = []
+  #keys: BoundedMap<string, Message>
   constructor(private clock: Clock, private retentionMs = RETENTION_MS, tombstones: Bounds = DEFAULT_BOUNDS.tombstones,
     processed: Bounds = DEFAULT_BOUNDS.processed) {
+    this.#keys = new BoundedMap(clock, KEY_BOUNDS)
     this.#gone = new BoundedMap(clock, tombstones)
     this.#processed = new BoundedMap(clock, processed)
   }
@@ -104,12 +117,15 @@ export class MemoryInbox implements InboxStore {
   onAdd(listener: (m: Message) => void | Promise<void>) { this.#listeners.push(listener) }
 
   async add(m: NewMessage): Promise<Message> {
+    const known = m.key === undefined ? undefined : this.#keys.get(m.key)
+    if (known) return known
     const msg: Message = {
       id: responseId(), requestId: m.requestId, type: m.type,
       clientCode: m.customer.code, clientCountry: m.customer.country,
       createdAt: this.clock.now(), body: m.body, contentType: m.contentType ?? 'application/xml', seq: ++this.#seq,
     }
     this.#messages.set(msg.id, msg)
+    if (m.key !== undefined) this.#keys.set(m.key, msg)
     for (const l of this.#listeners) await l(msg)
     return msg
   }

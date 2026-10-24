@@ -5,6 +5,7 @@ import { DEFAULT_BOUNDS, type Bounds } from './bounded.js'
 import { systemClock, type Clock } from './clock.js'
 import { keyOf, MemoryDirectory, type CustomerInput, type DirectoryStore } from './directory.js'
 import { MemoryInbox, type InboxStore } from './inbox.js'
+import { bookingOf, Outbox, type NoticePayload } from './outbox.js'
 import { RequestLog } from './requests.js'
 import { MemoryLedger, toMinor, type Ledger } from './ledger.js'
 import { PaymentEngine, type Bank } from './payments/engine.js'
@@ -88,6 +89,8 @@ export class Emulator {
   /** The keyed store factory every service's remembered state comes from (decision 961). */
   readonly keyed: KeyedFactory
   readonly ledger: Ledger
+  /** The ledger's outbox: delivers what reports a booking, also after a crash (`recover`, decision 990). */
+  readonly outbox: Outbox
   readonly rails: Rails
   readonly inbox: InboxStore
   /** Every request answered 202, as submitted (GET /v2/requests, decision 630). */
@@ -135,6 +138,15 @@ export class Emulator {
     if (this.bank.address === undefined) this.bank.address = defaultBankAddress(this.bank.bic)
     else if (this.bank.address) checkBankAddress(this.bank.address)
     const xsd = opts.xsdDir ? new XsdValidator(opts.xsdDir) : undefined
+    // What reports a booking goes with it (decisions 990, 991): the statement entry, a
+    // debit out of the payment limits' in-flight amounts, the camt.054; each once by the key.
+    this.outbox = new Outbox(this.ledger, this.clock, this.bank)
+    this.outbox.on('notice', async (i) => {
+      const n = i.payload as NoticePayload
+      await this.journal.record(bookingOf(n.booking), i.key)
+      if (n.inflight) await this.engine.notified(n.inflight)
+      await this.inbox.add({ customer: n.customer, type: 'CREDIT_DEBIT_NOTIFICATION', body: n.body, key: i.key })
+    })
     this.viban = new VibanService(this.directory, this.inbox, this.clock, {
       schemas: opts.xsdDir ? new VibanSchemas(opts.xsdDir) : undefined, errors: opts.vibanErrors, keyed,
     })
@@ -143,24 +155,24 @@ export class Emulator {
     }, { ...DEFAULT_INCOMING, ...opts.memory?.incoming })
     this.engine = new PaymentEngine(this.directory, this.ledger, this.rails, this.inbox, this.clock, this.bank, {
       strictIban: opts.strictIban, pain00103Until: opts.pain00103Until ?? '2026-11-15', xsd, virtual: this.viban.registry, msgIds,
-      onBooking: async (_c, b) => { await this.journal.record(b) }, limits: (c) => this.reports.paymentLimits(c),
+      outbox: this.outbox, limits: (c) => this.reports.paymentLimits(c),
       onIncoming: (e) => this.accounts.onIncoming(e), agency: () => this.agency?.accounts, pending: opts.railsPending?.(), keyed,
     })
     // Outcomes the rails deliver later and credits from the scheme come in here (decision 930).
     this.rails.listen({ outcome: (ref, o) => this.engine.settle(ref, o), credit: (c) => this.engine.received(c) })
     this.directDebit = new DirectDebitService({
       directory: this.directory, ledger: this.ledger, rails: this.rails, inbox: this.inbox, clock: this.clock, bank: this.bank,
-      xsd, virtual: this.viban.registry, strictIban: opts.strictIban, onBooking: async (_c, b) => { await this.journal.record(b) }, msgIds, keyed,
+      xsd, virtual: this.viban.registry, strictIban: opts.strictIban, outbox: this.outbox, msgIds, keyed,
     })
     this.fx = new FxService({
       directory: this.directory, ledger: this.ledger, inbox: this.inbox, clock: this.clock, bank: this.bank,
-      onBooking: async (_c, b) => { await this.journal.record(b) }, keyed,
+      outbox: this.outbox, keyed,
     })
     this.contracts = new Contracts(this.directory, this.clock, keyed)
     this.payee = new PayeeService({ directory: this.directory, viban: this.viban.registry, inbox: this.inbox, clock: this.clock, agency: () => this.agency?.accounts, keyed })
     this.bacs = new BacsService({
       directory: this.directory, ledger: this.ledger, rails: this.rails, inbox: this.inbox, clock: this.clock, bank: this.bank, virtual: this.viban.registry,
-      onBooking: async (_c, b) => { await this.journal.record(b) }, onIncoming: (e) => this.accounts.onIncoming(e),
+      outbox: this.outbox, onIncoming: (e) => this.accounts.onIncoming(e),
       credit: (p) => this.engine.incoming(p), keyed,
     }, opts.memory?.bacs)
     this.agency = new Agency({ directory: this.directory, inbox: this.inbox, clock: this.clock, bank: this.bank }, opts.memory?.agency, opts.agency)
@@ -178,6 +190,8 @@ export class Emulator {
     const stored = new Set<string>()
     for (const c of seed.customers) if (await e.directory.get(c)) stored.add(keyOf({ code: c.code, country: c.country.toUpperCase() }))
     for (const c of seed.customers) await e.addCustomer(c, { fundOnce: true, keepStored: stored.has(keyOf({ code: c.code, country: c.country.toUpperCase() })) })
+    // What a crash left between a booking and its report (decision 990).
+    await e.outbox.recover()
     return e
   }
 

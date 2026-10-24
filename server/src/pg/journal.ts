@@ -19,12 +19,17 @@ export class PgJournal implements JournalStore {
   readonly namespace: string
   constructor(private db: PgDb, o: { namespace?: string } = {}) { this.namespace = o.namespace ?? randomUUID() }
 
-  async record(b: Booking): Promise<JournalEntry> {
+  async record(b: Booking, key?: string): Promise<JournalEntry> {
     const stored: Stored = { ...b, amount: b.amount.toString(), bookedAt: b.bookedAt.getTime() }
     const r = await this.db.pool.query(
-      `insert into journal_entries (ns, seq, account, booked_at, direction, currency, amount, entry)
-       values ($1, nextval('journal_seq'), $2, $3, $4, $5, $6, $7) returning seq`,
-      [this.namespace, b.account, stored.bookedAt, b.direction, b.currency, stored.amount, JSON.stringify(stored)])
+      `insert into journal_entries (ns, seq, account, booked_at, direction, currency, amount, entry, entry_key)
+       values ($1, nextval('journal_seq'), $2, $3, $4, $5, $6, $7, $8)
+       on conflict (ns, entry_key) where entry_key is not null do nothing returning seq`,
+      [this.namespace, b.account, stored.bookedAt, b.direction, b.currency, stored.amount, JSON.stringify(stored), key ?? null])
+    if (!r.rows.length) {
+      const first = await this.db.pool.query('select seq, entry from journal_entries where ns = $1 and entry_key = $2', [this.namespace, key])
+      return revive(first.rows[0])
+    }
     return { ...b, seq: Number(r.rows[0].seq) }
   }
 

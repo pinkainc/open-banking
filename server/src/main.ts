@@ -8,6 +8,8 @@ import { Emulator, type Seed } from './emulator.js'
 import { PgDb } from './pg/db.js'
 import { PgInbox } from './pg/inbox.js'
 import { PgLedger } from './pg/ledger.js'
+import { PgOutbox } from './pg/outbox.js'
+import { RECOVER_MIN_AGE_MS } from './outbox.js'
 import { PgAgencyStore } from './pg/agency.js'
 import { PgAcquiringStore } from './pg/acquiring.js'
 import { PgRailsPending } from './pg/rails-pending.js'
@@ -80,7 +82,8 @@ const emulator = await Emulator.fromSeed(seed, {
   journal: db && (() => new PgJournal(db, { namespace })),
   keyed: db && ((clock) => pgKeyed(db, clock, namespace)),
   directory: db && ((clock) => new PgDirectory(db, clock, { namespace })),
-  ledger: ledgerKind === 'open-ledger' ? new OpenLedgerLedger({ url: env.OPEN_LEDGER_URL!, namespace, secretKey: env.OPEN_LEDGER_KEY, timeoutMs })
+  // open-ledger shares no transaction with us: the outbox items wait as intents in Postgres (decision 992).
+  ledger: ledgerKind === 'open-ledger' ? new OpenLedgerLedger({ url: env.OPEN_LEDGER_URL!, namespace, secretKey: env.OPEN_LEDGER_KEY, timeoutMs, outbox: db && new PgOutbox(db, { namespace }) })
     : ledgerKind === 'postgres' ? (clock) => new PgLedger(db!, { namespace, clock }) : undefined,
   xsdDir: existsSync(xsdDir) ? xsdDir : undefined,
   strictIban: env.STRICT_IBAN !== '0',
@@ -97,6 +100,9 @@ if (flavour !== 'EE' && flavour !== 'UK') throw new Error(`CONNECT_FLAVOUR must 
 const app = buildApp({ emulator, https: tls, sim: env.SIM !== '0', flavour, idempotencyKeys: max(env.MAX_IDEMPOTENCY_KEYS) })
 if (env.LOG) app.addHook('onResponse', async (req, reply) => console.error(`${req.method} ${req.url} ${reply.statusCode}`))
 setInterval(() => { emulator.inbox.purge().catch((e) => console.error('inbox purge failed:', e)) }, 60 * 60 * 1000).unref()
+// What another process of the namespace left between a booking and its report (decision 990);
+// this process's own crash is recovered at its next start.
+setInterval(() => { emulator.outbox.recover({ minAgeMs: RECOVER_MIN_AGE_MS }).catch((e) => console.error('outbox recovery failed:', e)) }, 60 * 1000).unref()
 // Automatic end-of-day statements: checked every minute, sent once per finished day.
 if (env.EOD_STATEMENTS !== '0') setInterval(() => { emulator.reports.tick().catch((e) => console.error('end-of-day statements failed:', e)) }, 60 * 1000).unref()
 // SEPA Direct Debit: collections due are settled at 11:30 CET; checked every minute.

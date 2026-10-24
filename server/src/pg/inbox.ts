@@ -100,11 +100,17 @@ export class PgInbox implements InboxStore {
       createdAt: this.clock.now(), body: m.body, contentType: m.contentType ?? 'application/xml', seq: 0,
     }
     const text = typeof m.body === 'string'
+    // A key already stored (decision 991): nothing added, the first message answered.
     const { rows } = await this.db.pool.query(
-      `insert into inbox_messages (ns, id, owner, request_id, type, client_code, client_country, created_at, body, body_text, content_type, seq)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, nextval('inbox_seq')) returning seq`,
+      `insert into inbox_messages (ns, id, owner, request_id, type, client_code, client_country, created_at, body, body_text, content_type, seq, msg_key)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, nextval('inbox_seq'), $12)
+       on conflict (ns, msg_key) where msg_key is not null do nothing returning seq`,
       [this.namespace, msg.id, keyOf(m.customer), msg.requestId ?? null, msg.type, msg.clientCode, msg.clientCountry,
-        msg.createdAt.getTime(), text ? Buffer.from(m.body as string, 'utf8') : m.body, text, msg.contentType])
+        msg.createdAt.getTime(), text ? Buffer.from(m.body as string, 'utf8') : m.body, text, msg.contentType, m.key ?? null])
+    if (!rows.length) {
+      const first = await this.db.pool.query(`select ${COLS} from inbox_messages where ns = $1 and msg_key = $2`, [this.namespace, m.key])
+      return first.rows[0] ? this.#message(first.rows[0]) : msg
+    }
     msg.seq = Number(rows[0].seq)
     for (const l of this.#listeners) await l(msg)
     return msg

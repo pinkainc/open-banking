@@ -100,6 +100,24 @@ for (const [store, make] of LEDGERS) describe(`ledger (${store})`, () => {
     assert.equal(await l.available('B', 'EUR'), big - 1n)
   })
 
+  test('a booking keeps the items that report it; a refused one keeps none (decisions 990, 992)', async () => {
+    const l = await make()
+    const item = (k: string) => ({ key: `${k}-${Math.random()}`, kind: 'notice', payload: { n: k }, at: 1 })
+    const [t, c, refused] = [item('t'), item('c'), item('x')]
+    await l.transfer({ ref: 'o1', from: '@funding', to: 'A', amount: 100n, currency: 'EUR' }, [t])
+    await l.reserve({ ref: 'o2', account: 'A', amount: 40n, currency: 'EUR' })
+    await l.commit('o2', 'B', [c])
+    await assert.rejects(l.transfer({ ref: 'o3', from: 'A', to: 'B', amount: 1000n, currency: 'EUR' }, [refused]), InsufficientFunds)
+    await assert.rejects(l.commit('o9', 'B', [refused]), /no reservation o9/)
+    const pending = await l.outbox.pending()
+    assert.deepEqual(pending.map((i) => i.payload), [{ n: 't' }, { n: 'c' }])
+    // An intent (open-ledger) is confirmed by the booking that names it; another is not.
+    for (const i of pending) if (i.intent !== undefined) assert.equal(await l.booked!(i.intent), true)
+    if (l.booked) assert.equal(await l.booked(`${crypto.randomUUID()}:o1`), false, 'a batch no booking names')
+    await l.outbox.remove([t.key, c.key])
+    assert.deepEqual(await l.outbox.pending(), [])
+  })
+
   test('concurrent reservations on one account never overdraw', async () => {
     const l = await make()
     await l.transfer({ ref: 'f', from: '@funding', to: 'A', amount: 500n, currency: 'EUR' })

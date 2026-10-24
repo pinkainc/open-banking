@@ -3,6 +3,7 @@
 // its SDK or HTTP API) without touching the Connect-facing code. Amounts are integers
 // in minor units (cents).
 import { keepLast } from './bounded.js'
+import { MemoryOutbox, type OutboxItem, type OutboxStore } from './outbox.js'
 
 export class InsufficientFunds extends Error {}
 
@@ -12,11 +13,15 @@ export interface Ledger {
   balances(account: string): Promise<Record<string, { balance: bigint; available: bigint }>>
   /** Sets funds aside for a payment; throws InsufficientFunds. */
   reserve(r: { ref: string; account: string; amount: bigint; currency: string }): Promise<void>
-  /** Books a reservation to its destination. */
-  commit(ref: string, to: string): Promise<void>
+  /** Books a reservation to its destination; `outbox` the items that report it, kept with the booking (decision 990). */
+  commit(ref: string, to: string, outbox?: OutboxItem[]): Promise<void>
   release(ref: string): Promise<void>
-  /** reserve + commit in one step. */
-  transfer(t: { ref: string; from: string; to: string; amount: bigint; currency: string }): Promise<void>
+  /** reserve + commit in one step; `outbox` as for commit. */
+  transfer(t: { ref: string; from: string; to: string; amount: bigint; currency: string }, outbox?: OutboxItem[]): Promise<void>
+  /** The items of bookings not delivered yet. */
+  readonly outbox: OutboxStore
+  /** Whether the booking an intent item names happened (only a ledger that writes intents, decision 992). */
+  booked?(intent: string): Promise<boolean>
 }
 
 /** Accounts whose name starts with '@' are the bank's own (settlement, funding) and may go negative. */
@@ -31,6 +36,7 @@ export class MemoryLedger implements Ledger {
   #balances = new Map<string, bigint>()
   #holds = new Map<string, { account: string; amount: bigint; currency: string }>()
   readonly postings: Posting[] = []
+  readonly outbox = new MemoryOutbox()
 
   #k = (a: string, c: string) => `${a}|${c}`
   #bal(a: string, c: string) { return this.#balances.get(this.#k(a, c)) ?? 0n }
@@ -62,7 +68,10 @@ export class MemoryLedger implements Ledger {
     this.#holds.set(r.ref, { account: r.account, amount: r.amount, currency: r.currency })
   }
 
-  async commit(ref: string, to: string) { this.#commit(ref, to) }
+  async commit(ref: string, to: string, outbox: OutboxItem[] = []) {
+    this.#commit(ref, to)
+    this.outbox.putNow(outbox) // with the booking, no await between
+  }
   #commit(ref: string, to: string) {
     const h = this.#holds.get(ref)
     if (!h) throw new Error(`no reservation ${ref}`)
@@ -72,10 +81,11 @@ export class MemoryLedger implements Ledger {
 
   async release(ref: string) { this.#holds.delete(ref) }
 
-  async transfer(t: { ref: string; from: string; to: string; amount: bigint; currency: string }) {
+  async transfer(t: { ref: string; from: string; to: string; amount: bigint; currency: string }, outbox: OutboxItem[] = []) {
     // reserve + commit with no await between, so nothing sees or takes the hold in between.
     this.#reserve({ ref: t.ref, account: t.from, amount: t.amount, currency: t.currency })
     this.#commit(t.ref, t.to)
+    this.outbox.putNow(outbox)
   }
 
   #move(ref: string, from: string, to: string, amount: bigint, currency: string) {

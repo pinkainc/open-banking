@@ -32,7 +32,8 @@ import { InsufficientFunds, toMinor, type Ledger } from '../ledger.js'
 import type { CreditResult, IncomingCredit, Rails, RailsOutcome, Scheme } from '../rails.js'
 import { parseXml, XmlSyntaxError } from '../xml.js'
 import { isUkAccount } from '../routing.js'
-import { camt054, type Booking } from './camt054.js'
+import type { Booking } from './camt054.js'
+import type { Outbox, OutboxItem } from '../outbox.js'
 import { decimalEq, decimalSum, painVersion, readPain001, structuralProblem, type Block, type PainVersion, type PaymentFile, type Tx } from './pain001.js'
 import { aggregate, pain002, type StatusReport, type TxStatus } from './pain002.js'
 import type { XsdValidator } from './xsd.js'
@@ -56,8 +57,11 @@ export interface EngineOptions {
   /** pain.001.001.03 is refused from this day on (the bank's announced end of support). */
   pain00103Until?: string
   xsd?: XsdValidator
-  /** Called with every booking on a customer account (the statement journal listens here). */
-  onBooking?: (customer: Customer, b: Booking) => void | Promise<void>
+  /**
+   * Where a booking's statement entry and camt.054 go with the booking (decision 990): the
+   * emulator's outbox, whose notice handler writes the journal and the inbox.
+   */
+  outbox: Outbox
   /** Virtual IBANs: booked on their master account (L3). */
   virtual?: VirtualAccounts
   /**
@@ -139,9 +143,8 @@ export const inactiveCreditor = (v: VirtualAccount) =>
 export const MANUAL_REVIEW = new Set(['Robba Bank', 'Steela Koinz', 'Laundra Cashwell', 'Frauda Lott', 'Skimmi Cardar'].map((n) => n.toLowerCase()))
 const normName = (n?: string) => (n ?? '').replace(/\s+/g, ' ').trim().toLowerCase()
 
-type Notice = { customer: Customer; booking: Booking }
 /** One status of one payment; `next` yields its following status (a later report). */
-interface Step { status: TxStatus; notices?: Notice[]; next?: () => Promise<Step | undefined> }
+interface Step { status: TxStatus; notices?: OutboxItem[]; next?: () => Promise<Step | undefined> }
 interface FileRef { customer: Customer; requestId: string; version: PainVersion; msgId: string }
 /** A payment that passed the checks that need no money. */
 interface Plan {
@@ -205,7 +208,7 @@ export class PaymentEngine {
   #crediting = new Map<string, Promise<CreditResult>>()
   constructor(
     private directory: DirectoryStore, private ledger: Ledger, private rails: Rails, private inbox: InboxStore,
-    private clock: Clock, private bank: Bank, private opts: EngineOptions = {},
+    private clock: Clock, private bank: Bank, private opts: EngineOptions,
   ) {
     const keyed = opts.keyed ?? memoryKeyed(clock)
     const msgIds = opts.msgIds ?? DEFAULT_BOUNDS.msgIds
@@ -304,7 +307,7 @@ export class PaymentEngine {
         r.groupStatus = aggregate(r.blocks.flatMap((b) => b.txs.map((t) => t.status)))
       }
       await this.#report(file.customer, file.requestId, r)
-      for (const s of round) for (const n of s.notices ?? []) await this.#notify(n.customer, n.booking)
+      for (const s of round) await this.opts.outbox.deliver(s.notices ?? [])
       const next: Step[] = []
       for (const s of round) {
         const n = s.next && (await s.next())
@@ -403,14 +406,15 @@ export class PaymentEngine {
     }
     const review = MANUAL_REVIEW.has(normName(tx.creditorName))
     if (p.creditorOwner && !review) {
+      const booked = await this.#internalBooked(file, p)
       try {
-        await this.ledger.transfer({ ref: p.ref, from: p.debtorAccount, to: p.creditorAccount!, amount: p.amount, currency: p.currency })
+        await this.ledger.transfer({ ref: p.ref, from: p.debtorAccount, to: p.creditorAccount!, amount: p.amount, currency: p.currency }, booked.notices)
       } catch (e) {
         if (e instanceof InsufficientFunds) return rj(R.funds, scheme)
         throw e
       }
       await this.#hold(file.customer, p)
-      return await this.#internalBooked(file, p)
+      return booked
     }
     try {
       await this.ledger.reserve({ ref: p.ref, account: p.debtorAccount, amount: p.amount, currency: p.currency })
@@ -430,19 +434,19 @@ export class PaymentEngine {
     return { status: accepted, next: () => this.#rails(file, p, accepted) }
   }
 
-  /** Booked internally: ACSC, camt.054 DBIT to the debtor and CRDT to the creditor. */
+  /** Booked internally: ACSC, camt.054 DBIT to the debtor and CRDT to the creditor (made before the booking, which carries them). */
   async #internalBooked(file: FileRef, p: Plan): Promise<Step> {
     const { block, tx, creditorOwner, creditorV } = p
     const customer = file.customer
-    const notices: Notice[] = [{ customer, booking: await this.#debitBooking(customer, p, 'INTERNAL', this.bank.bic) }]
-    notices.push({ customer: creditorOwner!, booking: {
+    const notices = [this.#notice(customer, await this.#debitBooking(customer, p, 'INTERNAL', this.bank.bic))]
+    notices.push(this.#notice(creditorOwner!, {
       account: p.creditorAccount!, virtual: creditorV ? virtualParty(creditorV) : p.creditorA && agencyParty(p.creditorA, p.creditorIban ?? tx.creditorOther!, tx.creditorName),
       owner: { name: creditorOwner!.name, code: creditorOwner!.code }, direction: 'CRDT',
       amount: p.amount, currency: p.currency, servicerRef: servicerRef(), scheme: 'INTERNAL', bookedAt: this.clock.now(),
       instrId: tx.instrId, endToEndId: tx.endToEndId, ultimateDebtor: tx.ultimateDebtor ?? block.ultimateDebtor, ultimateCreditor: tx.ultimateCreditor,
       counterparty: { name: block.debtorName ?? customer.name, ...(block.debtorOther ? { account: p.debtorIban } : { iban: p.debtorIban }), bic: this.bank.bic, code: customer.code },
       remittance: tx.ustrd, reference: tx.reference,
-    } })
+    }))
     return { status: { block, tx, status: 'ACSC', servicerRef: p.ref, scheme: 'INTERNAL', creditorBic: this.bank.bic }, notices }
   }
 
@@ -509,11 +513,9 @@ export class PaymentEngine {
     const { block, tx } = p
     const scheme = p.scheme!
     if (outcome.status === 'settled') {
-      await this.ledger.commit(p.ref, this.rails.settlementAccount(scheme))
-      return {
-        status: { ...accepted, status: 'ACSC', reason: undefined, scheme },
-        notices: [{ customer: file.customer, booking: await this.#debitBooking(file.customer, p, scheme) }],
-      }
+      const notices = [this.#notice(file.customer, await this.#debitBooking(file.customer, p, scheme))]
+      await this.ledger.commit(p.ref, this.rails.settlementAccount(scheme), notices)
+      return { status: { ...accepted, status: 'ACSC', reason: undefined, scheme }, notices }
     }
     // SEPA Instant attempted and failed: an automatic choice goes on as SEPA (ACWC first).
     if (outcome.status === 'unavailable' && scheme === 'INST' && p.automatic) {
@@ -622,9 +624,10 @@ export class PaymentEngine {
         await this.#incomingOf(p.file, p.plan, 'Rejected')
         steps.push({ status: { ...p.status, status: 'RJCT', reason: reason ?? R.regulatory } })
       } else if (p.plan.creditorOwner) {
-        await this.ledger.commit(ref, p.plan.creditorAccount!)
+        const booked = await this.#internalBooked(p.file, p.plan)
+        await this.ledger.commit(ref, p.plan.creditorAccount!, booked.notices)
         await this.#incomingOf(p.file, p.plan, 'Booked')
-        steps.push(await this.#internalBooked(p.file, p.plan))
+        steps.push(booked)
       } else {
         const s = await this.#rails(p.file, p.plan, { ...p.status, status: 'ACSP', reason: undefined })
         if (s) steps.push(s)
@@ -714,13 +717,16 @@ export class PaymentEngine {
     return (await this.#agencyDebtor(b, customer))?.master ?? id
   }
 
-  async #notify(customer: Customer, b: Booking) {
-    // In the journal first, then out of the in-flight amounts: never counted by neither.
-    await this.opts.onBooking?.(customer, b)
-    if (b.direction === 'DBIT') await this.#inflight.take(b.servicerRef)
-    // Notifications carry no Message-Request-Id.
-    await this.inbox.add({ customer, type: 'CREDIT_DEBIT_NOTIFICATION', body: camt054(b, customer.camt054, this.bank) })
+  /**
+   * A booking's outbox item: its statement entry, then (a debit) out of the in-flight
+   * amounts, never counted by neither, then the camt.054 (no Message-Request-Id).
+   */
+  #notice(customer: Customer, b: Booking): OutboxItem {
+    return this.opts.outbox.notice(customer, b, b.direction === 'DBIT' ? { inflight: b.servicerRef } : {})
   }
+
+  /** A debit's camt.054 is out (the outbox notice handler): no longer counted against the limits. */
+  async notified(ref: string) { await this.#inflight.take(ref) }
 
   /**
    * A credit from the rails (RailsEvents.credit): booked once per ref, a repeat answers
@@ -777,13 +783,14 @@ export class PaymentEngine {
     const owner = await this.directory.ownerOf(account)
     if (!owner) throw new Error(`no account ${iban}`)
     const ref = p.ref ?? servicerRef()
-    await this.ledger.transfer({ ref, from: this.rails.settlementAccount(p.scheme), to: account, amount: p.amount, currency: p.currency })
-    await this.#notify(owner, {
+    const notices = [this.#notice(owner, {
       account, virtual: v ? virtualParty(v) : a && agencyParty(a, iban, p.creditorName), owner: { name: owner.name, code: owner.code }, direction: 'CRDT', amount: p.amount, currency: p.currency,
       servicerRef: ref, scheme: p.scheme, bookedAt: this.clock.now(), endToEndId: p.endToEndId, pmtInfId: p.pmtInfId, instrId: p.instrId,
       counterparty: { name: codePage(p.debtor.name), iban: p.debtor.iban ? normalizeIban(p.debtor.iban) : undefined, account: p.debtor.account, bic: p.debtor.bic },
       remittance: codePage(p.remittance), reference: codePage(p.reference),
-    })
+    })]
+    await this.ledger.transfer({ ref, from: this.rails.settlementAccount(p.scheme), to: account, amount: p.amount, currency: p.currency }, notices)
+    await this.opts.outbox.deliver(notices)
     return { servicerRef: ref }
   }
 }
