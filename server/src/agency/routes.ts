@@ -11,19 +11,19 @@ import { jsonTextScope } from '../jsonbody.js'
 import { accepted } from '../requests.js'
 import { bankFor, type Flavour } from '../routing.js'
 import { RtfError } from './rtf.js'
-import { RTF_SCHEMES, checkSetup, type AgencyAccount, type AgencyBank, type RtfScheme } from './store.js'
+import { RTF_SCHEMES, checkSetup, type AgencyAccount, type AgencyBank, type AgencySetup, type RtfScheme } from './store.js'
 import { AGENT_ACCOUNT_SYNC } from './sync.js'
 
 /** 403 unless the customer has an Indirect Scheme Access Service Agreement (decision 801). */
-function agent(c: Caller) {
-  if (!c.customer.agency?.agreement) throw forbidden('User has not been granted the requested service')
+async function agent(emulator: Emulator, c: Caller) {
+  if (!(await emulator.agency.accounts.setup(c.customer))?.agreement) throw forbidden('User has not been granted the requested service')
   return c.customer
 }
 
 export function registerAgency(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Caller, flavour: Flavour, hostBank: string) {
   app.post('/agent/account/synchronize', async (req, reply) => {
     const c = caller(req)
-    const a = agent(c)
+    const a = await agent(emulator, c)
     const id = requestId()
     // BankCodes only count on the UK host, and not for a request handed to LHV EE (decision 804).
     const ukHost = flavour === 'UK' && bankFor(req, flavour, hostBank) === 'LHVUK'
@@ -34,7 +34,7 @@ export function registerAgency(app: FastifyInstance, emulator: Emulator, caller:
   jsonTextScope(app, (scope) => {
     scope.post('/v2/agent/account/synchronize', async (req, reply) => {
       const c = caller(req)
-      const a = agent(c)
+      const a = await agent(emulator, c)
       const id = requestId()
       await emulator.agency.sync.syncJson(req.body, a, id)
       return accepted(emulator.requests, req, reply, c, id, AGENT_ACCOUNT_SYNC)
@@ -74,22 +74,23 @@ export function agencySimRoutes(emulator: Emulator, flavour: Flavour) {
 
   return async (app: FastifyInstance) => {
     // The account manager's set-up of a customer's agreement (replaces it; {} removes it).
-    app.get('/agents/:country/:code', async (req) => ({ agency: customer(req).agency ?? null }))
+    app.get('/agents/:country/:code', async (req) => ({ agency: (await emulator.agency.accounts.setup(customer(req))) ?? null }))
     app.put('/agents/:country/:code', async (req) => {
       const c = customer(req)
       const b = body(req)
+      let setup: AgencySetup | undefined
       try {
-        if (Object.keys(b).length === 0) delete c.agency
-        else c.agency = checkSetup(b, c.accounts)
+        if (Object.keys(b).length !== 0) setup = checkSetup(b, c.accounts)
       } catch (e) { throw bad((e as Error).message) }
-      return { agency: c.agency ?? null }
+      await emulator.agency.accounts.setSetup(c, setup)
+      return { agency: setup ?? null }
     })
 
     // What the agents synchronised; ?bank=LHVEE|LHVUK, ?agent=<country>:<code>.
     app.get('/accounts', async (req) => {
       const q = req.query as { bank?: string; agent?: string }
       if (q.bank !== undefined && q.bank !== 'LHVEE' && q.bank !== 'LHVUK') throw bad('bank must be LHVEE or LHVUK')
-      let list = emulator.agency.accounts.all()
+      let list = await emulator.agency.accounts.all()
       if (q.bank) list = list.filter((a) => a.bank === (q.bank as AgencyBank))
       if (q.agent) list = list.filter((a) => `${a.agent.country}:${a.agent.code}`.toUpperCase() === q.agent!.toUpperCase())
       return { accounts: list.map(accountView) }

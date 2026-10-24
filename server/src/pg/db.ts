@@ -1,6 +1,6 @@
 // One connection pool per process and database, with the schema of every Postgres store
-// (the inbox, decision 900; the ledger, decision 910) in place. PgInbox and PgLedger take
-// it; many of each, under their own namespaces, share it.
+// (the inbox, decision 900; the ledger, decision 910; agency and acquiring, decisions 943,
+// 946) in place. The Pg stores take it; many of each, under their own namespaces, share it.
 import pg from 'pg'
 
 // A processed message is a row with processed_ord set (its place among the processed,
@@ -77,6 +77,61 @@ create or replace trigger ledger_postings_append_only before update or delete on
   for each row execute function ledger_postings_append_only();
 `
 
+// Agency accounts and set-ups (decision 943). The key `id` is what agencyKey() makes of an
+// identifier (a GB account's sort code + account number, else the IBAN), so the primary key
+// serves lookups by IBAN, GB IBAN and sort code + account number per entity. `ord` is the
+// place of the last write (BoundedMap's order), `until` a TTL end (null: never). A set-up
+// row with a null setup is a removal, remembered so a seed on a restart keeps it removed.
+const AGENCY_SCHEMA = `
+create sequence if not exists agency_seq;
+create table if not exists agency_accounts (
+  ns      text   not null,
+  bank    text   not null,
+  id      text   not null,
+  agent   text   not null,
+  account jsonb  not null,
+  ord     bigint not null,
+  until   bigint,
+  primary key (ns, bank, id)
+);
+create index if not exists agency_accounts_ord on agency_accounts (ns, ord);
+create index if not exists agency_accounts_agent on agency_accounts (ns, agent, ord);
+create table if not exists agency_setups (
+  ns    text   not null,
+  agent text   not null,
+  setup jsonb,
+  ord   bigint not null,
+  primary key (ns, agent)
+);
+`
+
+// Acquiring (decision 946): merchant set-ups, card transactions (amounts as decimal strings
+// of minor units in the JSON), and the per-namespace transaction reference counter.
+const ACQUIRING_SCHEMA = `
+create sequence if not exists acq_seq;
+create table if not exists acq_merchants (
+  ns       text  not null,
+  customer text  not null,
+  setup    jsonb not null,
+  primary key (ns, customer)
+);
+create table if not exists acq_counters (
+  ns  text   primary key,
+  seq bigint not null
+);
+create table if not exists acq_transactions (
+  ns      text   not null,
+  ref     text   not null,
+  account text   not null,
+  tx      jsonb  not null,
+  ord     bigint not null,
+  until   bigint,
+  primary key (ns, ref)
+);
+create index if not exists acq_transactions_ord on acq_transactions (ns, ord);
+create index if not exists acq_transactions_account on acq_transactions (ns, account, ord);
+`
+
 /** Serialises schema creation between processes connecting at once (as open-ledger's 815). */
 const SCHEMA_LOCK = 4410
 
@@ -105,7 +160,7 @@ export class PgDb {
     const c = await pool.connect()
     try {
       await c.query('select pg_advisory_lock($1)', [SCHEMA_LOCK])
-      for (const s of [...statements(INBOX_SCHEMA), ...statements(LEDGER_SCHEMA)]) await c.query(s)
+      for (const s of [INBOX_SCHEMA, LEDGER_SCHEMA, AGENCY_SCHEMA, ACQUIRING_SCHEMA].flatMap(statements)) await c.query(s)
     } finally {
       await c.query('select pg_advisory_unlock($1)', [SCHEMA_LOCK])
       c.release()

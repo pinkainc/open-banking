@@ -17,6 +17,8 @@ import { MemoryLedger, type Ledger } from '../src/ledger.js'
 import { PgDb } from '../src/pg/db.js'
 import { PgInbox } from '../src/pg/inbox.js'
 import { PgLedger } from '../src/pg/ledger.js'
+import { PgAgencyStore } from '../src/pg/agency.js'
+import { PgAcquiringStore } from '../src/pg/acquiring.js'
 import { OpenLedgerLedger } from '../src/ledgers/open-ledger.js'
 import { openLedgerUrl } from './open-ledger-server.js'
 import { XsdValidator } from '../src/payments/xsd.js'
@@ -78,13 +80,17 @@ export const pgInboxDb = pgDb
 export const STORE = process.env.OPEN_BANKING_STORE ?? 'memory'
 if (STORE !== 'memory' && STORE !== 'postgres') throw new Error(`OPEN_BANKING_STORE must be memory or postgres, not ${STORE}`)
 if (STORE === 'postgres' && !process.env.DATABASE_URL) throw new Error('OPEN_BANKING_STORE=postgres needs DATABASE_URL')
-/** Emulator options with the inbox and the ledger in Postgres, one fresh namespace for both. */
-export async function postgresStore(): Promise<EmulatorOptions> {
+/**
+ * Emulator options with the inbox, the ledger, agency and acquiring in Postgres, one fresh
+ * namespace for all (or the one given: a restarted emulator on the same state).
+ */
+export async function postgresStore(namespace: string = randomUUID()): Promise<EmulatorOptions> {
   const db = await pgDb()
-  const namespace = randomUUID()
   return {
     inbox: (clock, bounds) => new PgInbox(db, clock, { ...bounds, namespace }),
     ledger: (clock) => new PgLedger(db, { namespace, clock }),
+    agency: (clock, bounds) => new PgAgencyStore(db, clock, { namespace, bounds }),
+    acquiring: (clock, bounds) => new PgAcquiringStore(db, clock, { namespace, bounds }),
   }
 }
 /** The options of the selected store (STORE), for every emulator a test builds. */

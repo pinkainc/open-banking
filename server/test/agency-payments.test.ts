@@ -38,11 +38,11 @@ beforeEach(async () => {
     const now = c.clock.now()
     const put = (bank: 'LHVEE' | 'LHVUK', id: string, status: 'ACTIVE' | 'CLOSED' | 'INST_RESTRICTED', name: string, agent = AG, master = EEM) =>
       store.put({ bank, id, country: id.slice(0, 2), ...(id.startsWith('NL') ? { iban: id } : { accountNo: id }), status, name, category: 'PERSONAL', copOptOut: false, agent: { code: agent.code, country: agent.country }, master, createdAt: now, updatedAt: now })
-    put('LHVEE', NL, 'ACTIVE', 'Jan Novak')
-    put('LHVEE', NL_CLOSED, 'CLOSED', 'Closed Holder')
-    put('LHVEE', NL_INST, 'INST_RESTRICTED', 'Inst Restricted')
-    put('LHVEE', NL_OTHER, 'ACTIVE', 'Other Agent Client', AG2, makeIban('EE', '7700771001260288'))
-    put('LHVUK', GB_NO, 'ACTIVE', 'Michael Smith', AG, GBM)
+    await put('LHVEE', NL, 'ACTIVE', 'Jan Novak')
+    await put('LHVEE', NL_CLOSED, 'CLOSED', 'Closed Holder')
+    await put('LHVEE', NL_INST, 'INST_RESTRICTED', 'Inst Restricted')
+    await put('LHVEE', NL_OTHER, 'ACTIVE', 'Other Agent Client', AG2, makeIban('EE', '7700771001260288'))
+    await put('LHVUK', GB_NO, 'ACTIVE', 'Michael Smith', AG, GBM)
   }
 })
 

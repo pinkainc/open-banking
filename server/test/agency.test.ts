@@ -132,18 +132,18 @@ describe('agent.account.sync (v1, XML)', () => {
     const m = await syncXml(req)
     assert.equal(m.xKey, 'LHVUK')
     assert.deepEqual(m.doc, parseXml(resp))
-    assert.equal(accounts().get('LHVUK', '40127612345678')?.status, 'ACTIVE')
-    assert.equal(accounts().get('LHVEE', '40127612345678'), undefined)
-    assert.equal(accounts().get('LHVUK', '40127612345678')?.master, GBM)
+    assert.equal((await accounts().get('LHVUK', '40127612345678'))?.status, 'ACTIVE')
+    assert.equal((await accounts().get('LHVEE', '40127612345678')), undefined)
+    assert.equal((await accounts().get('LHVUK', '40127612345678'))?.master, GBM)
   })
 
   test('bank codes: none is LHV EE, LHVBEE22 EE, LHVBGB2L(XXX) UK, both codes both entities', async () => {
     await syncXml(v1(acct({ no: '40127600000001' })))
-    assert.deepEqual(accounts().find('40127600000001').map((a) => a.bank), ['LHVEE'])
+    assert.deepEqual((await accounts().find('40127600000001')).map((a) => a.bank), ['LHVEE'])
     await syncXml(v1(acct({ no: '40127600000002' }), ['LHVBGB2LXXX']))
-    assert.deepEqual(accounts().find('40127600000002').map((a) => a.bank), ['LHVUK'])
+    assert.deepEqual((await accounts().find('40127600000002')).map((a) => a.bank), ['LHVUK'])
     await syncXml(v1(acct({ no: '40127600000003' }), ['LHVBEE22XXX', 'LHVBGB2L']))
-    assert.deepEqual(accounts().find('40127600000003').map((a) => a.bank), ['LHVEE', 'LHVUK'])
+    assert.deepEqual((await accounts().find('40127600000003')).map((a) => a.bank), ['LHVEE', 'LHVUK'])
   })
 
   test('an unsupported bank code, a UK code on the EE host or handed to LHV EE, three codes: INVALID_REQUEST, nothing stored', async () => {
@@ -156,11 +156,11 @@ describe('agent.account.sync (v1, XML)', () => {
     assert.deepEqual(errorsOf(m.doc), [['INVALID_REQUEST', 'BankCodes.BankCode']])
     m = await syncXml(v1(acct({ no: '40127600000004' }), ['LHVBGB2L', 'LHVBEE22', 'LHVBEE22XXX']))
     assert.deepEqual(errorsOf(m.doc), [['INVALID_REQUEST', 'BankCodes.BankCode']])
-    assert.deepEqual(accounts().find('40127600000004'), [])
+    assert.deepEqual((await accounts().find('40127600000004')), [])
     // The EE host takes LHV EE codes and no codes.
     m = await syncXml(v1(acct({ iban: 'NL32RABO0195610843', region: 'NL' }), ['LHVBEE22']), { c: ee })
     assert.equal(accountsOf(m.doc).length, 1)
-    assert.equal(accounts(ee).get('LHVEE', 'NL32RABO0195610843')?.master, EEM)
+    assert.equal((await accounts(ee).get('LHVEE', 'NL32RABO0195610843'))?.master, EEM)
   })
 
   test('errors: one per problem, all at once, the whole bulk refused', async () => {
@@ -192,7 +192,7 @@ describe('agent.account.sync (v1, XML)', () => {
       ['INVALID_REQUEST', 'account[11].Name'],
     ])
     assert.equal([m.doc.Errors.Error].flat()[0].Description, 'Invalid Region.')
-    assert.equal(accounts().size, 0)
+    assert.equal(await accounts().count(), 0)
   })
 
   test('not XML, another root, no accounts, over 1000: INVALID_REQUEST', async () => {
@@ -213,20 +213,20 @@ describe('agent.account.sync (v1, XML)', () => {
     assert.deepEqual(accountsOf(m.doc), [{ Region: 'GB', AccountNo: '40127600000020', Status: 'CLOSED' }])
     m = await syncXml(v1(acct({ iban: makeIban('GB', 'LHVB40127600000020') }), ['LHVBGB2L']))
     assert.equal(accountsOf(m.doc)[0].Status, 'CLOSED')
-    const a = accounts().get('LHVUK', '40127600000020')!
+    const a = (await accounts().get('LHVUK', '40127600000020'))!
     assert.equal(a.name, 'JOHN DOE')
     assert.equal(a.iban, makeIban('GB', 'LHVB40127600000020'))
     m = await syncXml(v1(acct({ no: '40127600000020', status: 'CLOSED' }) + acct({ no: '40127600000020', status: 'ACTIVE', name: 'JANE DOE' }), ['LHVBGB2L']))
     assert.equal(accountsOf(m.doc).length, 2)
-    assert.equal(accounts().get('LHVUK', '40127600000020')?.status, 'ACTIVE')
-    assert.equal(accounts().get('LHVUK', '40127600000020')?.name, 'JANE DOE')
+    assert.equal((await accounts().get('LHVUK', '40127600000020'))?.status, 'ACTIVE')
+    assert.equal((await accounts().get('LHVUK', '40127600000020'))?.name, 'JANE DOE')
   })
 
   test('an INST_RESTRICTED account (set by v2) is answered by v1 without Status, XSD-valid', async () => {
     await syncJson({ Accounts: [gb('40127600000030', { Status: 'INST_RESTRICTED' })] })
     const m = await syncXml(v1(acct({ no: '40127600000030' }), ['LHVBGB2L']))
     assert.deepEqual(accountsOf(m.doc), [{ Region: 'GB', AccountNo: '40127600000030' }])
-    assert.equal(accounts().get('LHVUK', '40127600000030')?.status, 'INST_RESTRICTED')
+    assert.equal((await accounts().get('LHVUK', '40127600000030'))?.status, 'INST_RESTRICTED')
   })
 
   test('another agent\'s account is not taken over; a customer without the agreement gets 403', async () => {
@@ -261,16 +261,16 @@ describe('agent.account.sync.v2 (JSON, UK host)', () => {
     const partial = blocks.find((b) => b.AcceptanceStatus === 'PARTIAL')
     const j = await syncJson(req)
     assert.deepEqual({ ...j, OriginalMsgId: '' }, partial)
-    const a = accounts().get('LHVUK', '12345612345678')!
+    const a = (await accounts().get('LHVUK', '12345612345678'))!
     assert.deepEqual([a.name, a.category, a.copOptOut, a.status, a.accountNo, a.iban], ['Account Name First', 'PERSONAL', false, 'ACTIVE', '12345612345678', undefined])
-    assert.equal(accounts().get('LHVUK', '12345687654321'), undefined)
+    assert.equal((await accounts().get('LHVUK', '12345687654321')), undefined)
     // Synchronised as open first, the same account can then be closed and opted out.
     const k = await syncJson({ ...req, Accounts: [{ ...req.Accounts[1], Status: 'ACTIVE' }, req.Accounts[1]] })
     assert.equal(k.AcceptanceStatus, 'PARTIAL')
     assert.equal(k.Accounts[1].ErrorInfo.ErrorCode, 'DUPLICATE_ACCOUNT')
     const ok = await syncJson(req)
     assert.equal(ok.AcceptanceStatus, 'OK')
-    assert.equal(accounts().get('LHVUK', '12345687654321')?.status, 'CLOSED')
+    assert.equal((await accounts().get('LHVUK', '12345687654321'))?.status, 'CLOSED')
   })
 
   test('per-account errors in order, OK / PARTIAL / FAILED from the confirmations', async () => {
@@ -312,12 +312,12 @@ describe('agent.account.sync.v2 (JSON, UK host)', () => {
     const j = await syncJson({ Accounts: [{ Country: 'GB', Identification: '40127600000050', CoPOptOut: true }] })
     assert.equal(j.AcceptanceStatus, 'OK')
     assert.deepEqual(j.Accounts[0].Data, { Country: 'GB', Identification: '40127600000050', Status: 'ACTIVE', CopOptOut: true })
-    assert.equal(accounts().get('LHVUK', '40127600000050')?.copOptOut, true)
+    assert.equal((await accounts().get('LHVUK', '40127600000050'))?.copOptOut, true)
     // A GB IBAN is the same account as its sort code and account number.
     const k = await syncJson({ Accounts: [{ Country: 'GB', Identification: makeIban('GB', 'NWBK40127600000050'), Status: 'CLOSED' }] })
     assert.equal(k.AcceptanceStatus, 'OK')
-    assert.equal(accounts().get('LHVUK', '40127600000050')?.status, 'CLOSED')
-    assert.equal(accounts().get('LHVUK', '40127600000050')?.copOptOut, true)
+    assert.equal((await accounts().get('LHVUK', '40127600000050'))?.status, 'CLOSED')
+    assert.equal((await accounts().get('LHVUK', '40127600000050'))?.copOptOut, true)
   })
 
   test('FAILED for the whole file: not JSON, schema violations, unsupported bank codes, over 1000 accounts', async () => {
@@ -338,7 +338,7 @@ describe('agent.account.sync.v2 (JSON, UK host)', () => {
       assert.deepEqual(j.Accounts, [])
       assert.equal(j.Errors[0].Code, code, JSON.stringify(j))
     }
-    assert.equal(accounts().size, 0)
+    assert.equal(await accounts().count(), 0)
   })
 
   test('v2 is a UK host service: 404 on the EE host and with X-Bank-Code: LHVEE', async () => {
@@ -370,14 +370,14 @@ describe('agency account store', () => {
     assert.equal(agencyKey('nl32 rabo 0195 6108 43'), 'NL32RABO0195610843')
     assert.equal(agencyKey('INV-42'), undefined)
     await syncXml(v1(acct({ no: '40127600000090', name: 'JOHN DOE' }), ['LHVBGB2L', 'LHVBEE22']))
-    assert.deepEqual(accounts().find(makeIban('GB', 'LHVB40127600000090')).map((a) => [a.bank, a.agent.code, a.master]), [['LHVEE', AG.code, GBM], ['LHVUK', AG.code, GBM]])
-    assert.deepEqual(accounts().ofAgent(AG, 'LHVUK').map((a) => a.id), ['40127600000090'])
-    const setup = ctx.emulator.directory.get(AG)!.agency
+    assert.deepEqual((await accounts().find(makeIban('GB', 'LHVB40127600000090'))).map((a) => [a.bank, a.agent.code, a.master]), [['LHVEE', AG.code, GBM], ['LHVUK', AG.code, GBM]])
+    assert.deepEqual((await accounts().ofAgent(AG, 'LHVUK')).map((a) => a.id), ['40127600000090'])
+    const setup = await accounts().setup(AG)
     assert.equal(rangeFor(setup, 'NL32RABO0195610843')?.master, EEM)
     assert.equal(rangeFor(setup, 'NL91ABNA0417164300'), undefined)
     assert.equal(rangeFor(setup, FR)?.bic, 'CCBPFRPPMTZ')
     assert.equal(rangeFor(undefined, '40127600000090'), undefined)
-    const a = accounts().get('LHVUK', '40127600000090')!
+    const a = (await accounts().get('LHVUK', '40127600000090'))!
     assert.ok(receivable(a, { instant: true }))
     assert.ok(receivable({ ...a, status: 'INST_RESTRICTED' }, { instant: false }))
     assert.ok(!receivable({ ...a, status: 'INST_RESTRICTED' }, { instant: true }))

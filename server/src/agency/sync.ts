@@ -67,11 +67,19 @@ interface Entry {
 }
 
 export class AgencySync {
+  /** One synchronisation at a time in this process: checks and writes do not interleave (decision 942). */
+  #gate: Promise<unknown> = Promise.resolve()
   constructor(private deps: SyncDeps) {}
 
+  #serial<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.#gate.then(fn)
+    this.#gate = run.catch(() => undefined)
+    return run
+  }
+
   /** Writes an account to one entity: given fields replace, missing ones keep (new: ACTIVE). */
-  #write(bank: AgencyBank, agent: Customer, e: Entry): AgencyAccount {
-    const old = this.deps.store.get(bank, e.key)
+  async #write(bank: AgencyBank, agent: Customer, e: Entry): Promise<AgencyAccount> {
+    const old = await this.deps.store.get(bank, e.key)
     const now = this.deps.clock.now()
     const a: AgencyAccount = {
       bank, id: e.key, country: e.country,
@@ -85,13 +93,20 @@ export class AgencySync {
     if (a.accountNo === undefined) delete a.accountNo
     if (a.name === undefined) delete a.name
     if (a.category === undefined) delete a.category
-    this.deps.store.put(a)
+    await this.deps.store.put(a)
     return a
   }
 
   /** Held by another agent in one of the entities (decision 802). */
-  #foreign(banks: AgencyBank[], agent: Customer, key: string) {
-    return banks.some((b) => { const a = this.deps.store.get(b, key); return a !== undefined && keyOf(a.agent) !== keyOf(agent) })
+  async #foreign(banks: AgencyBank[], agent: Customer, key: string) {
+    for (const b of banks) { const a = await this.deps.store.get(b, key); if (a !== undefined && keyOf(a.agent) !== keyOf(agent)) return true }
+    return false
+  }
+
+  /** Whether one of the entities holds the account. */
+  async #anyOf(banks: AgencyBank[], key: string) {
+    for (const b of banks) if (await this.deps.store.get(b, key)) return true
+    return false
   }
 
   // --- v1, XML ------------------------------------------------------------------------
@@ -100,7 +115,12 @@ export class AgencySync {
    * POST /agent/account/synchronize. `ukHost`: the request is processed by the UK host
    * (BankCodes allowed, decision 804). Returns nothing; the answer is in the inbox.
    */
-  async syncXml(body: unknown, agent: Customer, requestId: string, ukHost: boolean) {
+  syncXml(body: unknown, agent: Customer, requestId: string, ukHost: boolean) {
+    return this.#serial(() => this.#syncXml(body, agent, requestId, ukHost))
+  }
+
+  async #syncXml(body: unknown, agent: Customer, requestId: string, ukHost: boolean) {
+    const setup = await this.deps.store.setup(agent)
     const send = (xml: string) => this.deps.inbox.add({ customer: agent, type: AGENT_ACCOUNT_SYNC, requestId, body: xml })
     const errors: { code: V1Code; field?: string }[] = []
     const fail = () => send(errorsXml(errors.map((e) => ({ code: e.code, description: V1[e.code], field: e.field }))))
@@ -150,7 +170,7 @@ export class AgencySync {
     if (!list.length || list.length > SYNC_MAX) { errors.push({ code: 'INVALID_REQUEST', field: 'Accounts.Account' }); return fail() }
 
     const entries: { e: Entry; given: { region: string; accountNo?: string; iban?: string; name?: string } }[] = []
-    list.forEach((a, i) => {
+    const check = async (a: any, i: number) => {
       const at = `account[${i}]`
       const n = errors.length
       if (typeof a !== 'object' || a === null) { errors.push({ code: 'INVALID_REQUEST', field: at }); return }
@@ -179,31 +199,37 @@ export class AgencySync {
       if (ib && ib.slice(0, 2) !== region) { errors.push({ code: 'INVALID_REGION', field: `${at}.Region` }); return }
       if (ib && no && ib.slice(8) !== no) { errors.push({ code: 'ACCOUNT_NO_AND_IBAN_MISMATCH', field: `${at}.AccountNo, ${at}.Iban` }); return }
       const key = agencyKey(ib ?? no!)!
-      const range = rangeFor(agent.agency, key)
-      if (!range || this.#foreign(banks, agent, key)) { errors.push({ code: 'MASTER_ACCOUNT_NOT_FOUND', field: `${at}.AccountNo, ${at}.Iban` }); return }
+      const range = rangeFor(setup, key)
+      if (!range || await this.#foreign(banks, agent, key)) { errors.push({ code: 'MASTER_ACCOUNT_NOT_FOUND', field: `${at}.AccountNo, ${at}.Iban` }); return }
       entries.push({
         e: { key, country: region!, iban: ib, accountNo: no ?? (ib && region === 'GB' ? ib.slice(8) : undefined), status: (status ?? undefined) as AgencyStatus | undefined, name: name ?? undefined, master: range.master },
         given: { region: region!, accountNo: accountNo ?? undefined, iban: iban ?? undefined, name: name ?? undefined },
       })
-    })
+    }
+    for (const [i, a] of list.entries()) await check(a, i)
     if (errors.length) return fail()
 
     // Valid: every account written to every entity ("duplicity is not checked": the last wins).
-    const out = entries.map(({ e, given }) => {
+    const out = []
+    for (const { e, given } of entries) {
       let written: AgencyAccount | undefined
-      for (const b of banks) written = this.#write(b, agent, e)
+      for (const b of banks) written = await this.#write(b, agent, e)
       // The response status is the account's; the XSD has no INST_RESTRICTED, so it is left out then.
       const st = written!.status === 'INST_RESTRICTED' ? undefined : written!.status
-      return el('Account', el('Region', given.region), given.accountNo ? el('AccountNo', given.accountNo) : null,
-        given.iban ? el('Iban', given.iban) : null, st ? el('Status', st) : null, given.name ? el('Name', given.name) : null)
-    })
+      out.push(el('Account', el('Region', given.region), given.accountNo ? el('AccountNo', given.accountNo) : null,
+        given.iban ? el('Iban', given.iban) : null, st ? el('Status', st) : null, given.name ? el('Name', given.name) : null))
+    }
     return send(toXml(el('AgentAccountSyncResponse', el('Accounts', ...out))))
   }
 
   // --- v2, JSON -----------------------------------------------------------------------
 
   /** POST /v2/agent/account/synchronize (LHV UK). The answer is in the inbox. */
-  async syncJson(raw: unknown, agent: Customer, requestId: string) {
+  syncJson(raw: unknown, agent: Customer, requestId: string) {
+    return this.#serial(() => this.#syncJson(raw, agent, requestId))
+  }
+
+  async #syncJson(raw: unknown, agent: Customer, requestId: string) {
     const send = (b: object) => this.deps.inbox.add({ customer: agent, type: AGENT_ACCOUNT_SYNC, requestId, body: JSON.stringify(b), contentType: 'application/json' })
     const failed = (code: V2Code, detail?: string) => send({
       OriginalMsgId: requestId, AcceptanceStatus: 'FAILED', Accounts: [],
@@ -236,9 +262,11 @@ export class AgencySync {
       for (const k of ['CopOptOut', 'CoPOptOut']) if (o[k] !== undefined && o[k] !== null && typeof o[k] !== 'boolean') return failed('INVALID_JSON_REQUEST', `Accounts[${i}].${k} must be a boolean`)
     }
 
-    const responder = !!(agent.agency?.cop || agent.agency?.vop)
+    const setup = await this.deps.store.setup(agent)
+    const responder = !!(setup?.cop || setup?.vop)
     const seen = new Set<string>()
-    const results = (b.Accounts as Record<string, unknown>[]).map((o) => {
+    const results = []
+    for (const o of b.Accounts as Record<string, unknown>[]) results.push(await (async () => {
       const country = o.Country as string
       const identification = o.Identification as string
       const status = (o.Status ?? undefined) as string | undefined
@@ -260,10 +288,10 @@ export class AgencySync {
       else if ((responder && category === undefined) || (category !== undefined && category !== 'PERSONAL' && category !== 'BUSINESS')) code = 'CONFIRMATION_OF_PAYEE_ACCOUNT_CATEGORY_NOT_PROVIDED'
       else {
         key = agencyKey(id)!
-        const range = rangeFor(agent.agency, key)
-        if (seen.has(key) || this.#foreign(banks, agent, key)) code = 'DUPLICATE_ACCOUNT'
+        const range = rangeFor(setup, key)
+        if (seen.has(key) || await this.#foreign(banks, agent, key)) code = 'DUPLICATE_ACCOUNT'
         else if (!range) code = 'MASTER_ACCOUNT_NOT_FOUND'
-        else if (status === 'CLOSED' && banks.every((bk) => !this.deps.store.get(bk, key!))) code = 'NOT_FOUND'
+        else if (status === 'CLOSED' && !(await this.#anyOf(banks, key))) code = 'NOT_FOUND'
         else master = range.master
         seen.add(key)
       }
@@ -275,7 +303,7 @@ export class AgencySync {
         ...(copOptOut !== undefined ? { CopOptOut: copOptOut } : {}),
       })
       if (code) {
-        const current = key ? this.deps.store.get(banks[0], key)?.status : undefined
+        const current = key ? (await this.deps.store.get(banks[0], key))?.status : undefined
         return { Data: data(status ?? current, opt), Confirmed: false, ErrorInfo: { ErrorCode: code, ErrorDescription: V2[code] } }
       }
       const entry: Entry = {
@@ -283,9 +311,9 @@ export class AgencySync {
         ...(GB_ACCOUNT_NO.test(id) ? { accountNo: id } : { iban: id, ...(country === 'GB' ? { accountNo: id.slice(8) } : {}) }),
       }
       let written: AgencyAccount | undefined
-      for (const bk of banks) written = this.#write(bk, agent, entry)
+      for (const bk of banks) written = await this.#write(bk, agent, entry)
       return { Data: data(written!.status, written!.copOptOut), Confirmed: true }
-    })
+    })())
     const ok = results.filter((r) => r.Confirmed).length
     return send({
       OriginalMsgId: requestId,

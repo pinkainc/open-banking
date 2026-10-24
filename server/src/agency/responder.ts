@@ -12,7 +12,7 @@ import type { Customer, Directory } from '../directory.js'
 import type { InboxStore, Message } from '../inbox.js'
 import { matchName } from '../payee/match.js'
 import { COP_REASONS, VOP_REASONS } from '../payee/service.js'
-import { rangeFor, type AccountCategory, type AgencyAccount, type AgencyStore } from './store.js'
+import { agentKey, rangeFor, type AccountCategory, type AgencyAccount, type AgencySetup, type AgencyStore } from './store.js'
 
 export const COP_INCOMING = 'CONFIRMATION_OF_PAYEE_INCOMING'
 export const VOP_INCOMING = 'VERIFICATION_OF_PAYEE_INCOMING_NOTIFICATION'
@@ -39,26 +39,28 @@ export class AgencyResponder {
   constructor(private deps: ResponderDeps) {}
 
   /** The agent an account belongs to: its owner, else the agent whose agreement range covers it. */
-  #agent(identifier: string, account?: AgencyAccount): Customer | undefined {
-    if (account) return this.deps.directory.get(account.agent)
-    return this.deps.directory.all().find((c) => rangeFor(c.agency, identifier) !== undefined)
+  async #agent(identifier: string, account?: AgencyAccount): Promise<{ agent?: Customer; setup?: AgencySetup }> {
+    const setups = await this.deps.store.setups()
+    const agent = account ? this.deps.directory.get(account.agent)
+      : this.deps.directory.all().find((c) => rangeFor(setups.get(agentKey(c)), identifier) !== undefined)
+    return { agent, setup: agent && setups.get(agentKey(agent)) }
   }
 
-  async #notify(type: string, kind: 'cop' | 'vop', agent: Customer | undefined, body: object): Promise<Message | undefined> {
-    if (!agent?.agency?.agreement || !agent.agency.notifications || !agent.agency[kind]) return undefined
+  async #notify(type: string, kind: 'cop' | 'vop', agent: Customer | undefined, setup: AgencySetup | undefined, body: object): Promise<Message | undefined> {
+    if (!agent || !setup?.agreement || !setup.notifications || !setup[kind]) return undefined
     return this.deps.inbox.add({ customer: agent, type, body: JSON.stringify(body), contentType: 'application/json' })
   }
 
   /** An incoming CoP request on a sort code and account number of LHV UK (decision 808). */
   async cop(r: CopIncoming): Promise<ResponderResult> {
     const bban = `${r.sortCode}${r.accountNumber}`
-    const account = this.deps.store.get('LHVUK', bban)
-    const agent = this.#agent(bban, account)
+    const account = await this.deps.store.get('LHVUK', bban)
+    const { agent, setup } = await this.#agent(bban, account)
     const now = this.deps.clock.now().toISOString()
     let code: string
     let actual: string | undefined
     if (!account || account.status === 'CLOSED') code = 'AC01'
-    else if (!agent?.agency?.cop || !account.name) code = 'ACNS'
+    else if (!setup?.cop || !account.name) code = 'ACNS'
     else if (account.copOptOut) code = 'OPTO'
     else {
       const m = matchName(r.name, account.name)
@@ -93,23 +95,23 @@ export class AgencyResponder {
         },
       },
     }
-    return { body, agent, account, message: await this.#notify(COP_INCOMING, 'cop', agent, body) }
+    return { body, agent, account, message: await this.#notify(COP_INCOMING, 'cop', agent, setup, body) }
   }
 
   /** An incoming VoP request on an IBAN synchronised with LHV EE or LHV UK (decision 809). */
   async vop(r: VopIncoming): Promise<ResponderResult> {
-    const account = this.deps.store.find(r.iban)[0]
-    const agent = this.#agent(r.iban, account)
+    const account = (await this.deps.store.find(r.iban))[0]
+    const { agent, setup } = await this.#agent(r.iban, account)
     const now = this.deps.clock.now().toISOString()
     let code: string
     let actual: string | undefined
-    if (!account || account.status === 'CLOSED' || !agent?.agency?.vop || !account.name) code = 'NOAP'
+    if (!account || account.status === 'CLOSED' || !setup?.vop || !account.name) code = 'NOAP'
     else {
       code = { FULL: 'MTCH', CLOSE: 'CMTC', NONE: 'NMTC' }[matchName(r.name, account.name)]
       // The G samples give ActualName with a full match too, not with no match.
       if (code !== 'NMTC') actual = account.name
     }
-    const range = agent ? rangeFor(agent.agency, r.iban) : undefined
+    const range = agent ? rangeFor(setup, r.iban) : undefined
     const body = {
       Request: {
         Data: [{
@@ -132,6 +134,6 @@ export class AgencyResponder {
         },
       },
     }
-    return { body, agent, account, message: await this.#notify(VOP_INCOMING, 'vop', agent, body) }
+    return { body, agent, account, message: await this.#notify(VOP_INCOMING, 'vop', agent, setup, body) }
   }
 }

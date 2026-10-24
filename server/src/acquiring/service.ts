@@ -2,7 +2,7 @@
 // (its ACQ user code and settlement accounts), a minimal store of card transactions fed by
 // /_sim/acq, and POST /acq/merchant-report, answered in the inbox as ACQ_REPORT: a
 // camt.054.001.02 of the period's card transactions, or an <Errors> document.
-import { BoundedMap, type Bounds } from '../bounded.js'
+import type { Bounds } from '../bounded.js'
 import type { Clock } from '../clock.js'
 import { keyOf, type Customer, type CustomerKey, type Directory } from '../directory.js'
 import { errorsXml } from '../errors.js'
@@ -12,6 +12,7 @@ import { notificationMsgId } from '../ids.js'
 import { addDays, isDate } from '../statements/camt060.js'
 import { dateTallinn, localTallinn } from '../time.js'
 import { document, el, opt, parseXml, text, toXml } from '../xml.js'
+import { ACQ_BOUNDS, MemoryAcquiringStore, type AcquiringStore } from './store.js'
 
 export const ACQ_REPORT = 'ACQ_REPORT'
 export const REPORT_TYPES = ['CAMT_SETTLEMENT', 'CAMT_TRANSACTION'] as const
@@ -19,7 +20,7 @@ export type ReportType = typeof REPORT_TYPES[number]
 /** "Maximum period is 35 days" (P 13), counted inclusively (decision 822). */
 export const MAX_PERIOD_DAYS = 35
 /** Transactions are kept by count only, like agency accounts (decision 827). */
-export const ACQ_BOUNDS: Bounds = { max: 100_000 }
+export { ACQ_BOUNDS } from './store.js'
 
 /** The documented error codes and texts (P 13 "Error codes"). */
 export const E = {
@@ -89,18 +90,21 @@ const six = (n: bigint) => `${fromMinor(n)}0000`
 
 export interface AcquiringDeps { directory: Directory; inbox: InboxStore; clock: Clock }
 
-export class Acquiring {
-  #merchants = new Map<string, MerchantSetup>()
-  #tx: BoundedMap<string, CardTransaction>
-  #seq = 4900
-  constructor(private d: AcquiringDeps, bounds: Bounds = ACQ_BOUNDS) { this.#tx = new BoundedMap(d.clock, bounds) }
+const merchantKey = (c: CustomerKey) => keyOf({ code: c.code, country: c.country.toUpperCase() })
 
-  merchant(c: CustomerKey): MerchantSetup | undefined { return this.#merchants.get(keyOf({ code: c.code, country: c.country.toUpperCase() })) }
+export class Acquiring {
+  readonly store: AcquiringStore
+  /** `store`: where set-ups and card transactions live (decision 945); default in memory. */
+  constructor(private d: AcquiringDeps, bounds: Bounds = ACQ_BOUNDS, store?: (clock: Clock, bounds: Bounds) => AcquiringStore) {
+    this.store = store ? store(d.clock, bounds) : new MemoryAcquiringStore(d.clock, bounds)
+  }
+
+  merchant(c: CustomerKey): Promise<MerchantSetup | undefined> { return this.store.merchant(merchantKey(c)) }
 
   /** Sets (or with undefined removes) a customer's acquiring set-up; accounts default to all its accounts. */
-  setMerchant(c: Customer, s: { userCode?: unknown; accounts?: unknown } | undefined): MerchantSetup | undefined {
+  async setMerchant(c: Customer, s: { userCode?: unknown; accounts?: unknown } | undefined): Promise<MerchantSetup | undefined> {
     const k = keyOf(c)
-    if (s === undefined) { this.#merchants.delete(k); return undefined }
+    if (s === undefined) { await this.store.setMerchant(merchantKey(c), undefined); return undefined }
     if (s.userCode !== undefined && (typeof s.userCode !== 'string' || !/^[A-Za-z0-9]{1,20}$/.test(s.userCode))) throw new Error('userCode must be 1–20 letters or digits')
     let accounts = c.accounts
     if (s.accounts !== undefined) {
@@ -110,16 +114,16 @@ export class Acquiring {
       if (foreign) throw new Error(`${foreign} is not an account of ${k}`)
     }
     const m: MerchantSetup = { userCode: (s.userCode as string | undefined) ?? c.code, accounts: [...accounts] }
-    this.#merchants.set(k, m)
+    await this.store.setMerchant(merchantKey(c), m)
     return m
   }
 
   /** A card transaction on a merchant's settlement account (the simulator's card scheme). */
-  addTransaction(i: CardTransactionInput): CardTransaction {
+  async addTransaction(i: CardTransactionInput): Promise<CardTransaction> {
     const account = String(i.account ?? '').replace(/\s+/g, '').toUpperCase()
     const owner = this.d.directory.ownerOf(account)
     if (!owner) throw new Error(`no account ${account}`)
-    const m = this.merchant(owner)
+    const m = await this.merchant(owner)
     if (!m) throw new Error(`${keyOf(owner)} has no acquiring set-up`)
     if (!m.accounts.includes(account)) throw new Error(`${account} is not a settlement account of the merchant`)
     const amount = toMinor(String(i.amount))
@@ -139,32 +143,31 @@ export class Acquiring {
     const pan = i.pan ?? '5326100000003339'
     if (!/^[0-9*]{12,19}$/.test(pan.replace(/\s+/g, ''))) throw new Error('pan must be 12–19 digits')
     const t: CardTransaction = {
-      ref: String(++this.#seq), account, currency, direction, amount, fee, transactionDate, settlementDate,
+      ref: await this.store.nextRef(), account, currency, direction, amount, fee, transactionDate, settlementDate,
       terminal: i.terminal ?? '87654321 001', stan: i.stan, pan: maskPan(pan), mid: i.mid ?? '1234567',
       location: i.location, scheme: i.scheme ?? '689MC', orderRef: i.orderRef,
       subFamily: i.subFamily ?? (direction === 'CRDT' ? 'POSP' : 'DAJT'),
     }
-    this.#tx.set(t.ref, t)
+    await this.store.add(t)
     return t
   }
 
-  transactions(account?: string): CardTransaction[] {
-    const all = this.#tx.entries().map(([, t]) => t)
-    return account ? all.filter((t) => t.account === account.replace(/\s+/g, '').toUpperCase()) : all
+  transactions(account?: string): Promise<CardTransaction[]> {
+    return this.store.transactions(account === undefined ? undefined : account.replace(/\s+/g, '').toUpperCase())
   }
 
   /** POST /acq/merchant-report: the report or an error goes to the customer's inbox. */
   async report(xml: string, customer: Customer, requestId: string) {
     const add = (body: string) => this.d.inbox.add({ customer, type: ACQ_REPORT, requestId, body })
     try {
-      await add(this.#report(xml, customer))
+      await add(await this.#report(xml, customer))
     } catch (e) {
       const err = e instanceof ReportError ? e : new ReportError(E.technical)
       await add(errorsXml([{ code: err.err[0], description: err.err[1], field: err.field }]))
     }
   }
 
-  #report(xml: string, customer: Customer): string {
+  async #report(xml: string, customer: Customer): Promise<string> {
     let doc: any
     try { doc = parseXml(xml) } catch { throw new ReportError(E.invalid) }
     const r = doc?.MerchantReportRequest
@@ -179,17 +182,17 @@ export class Acquiring {
     if (!isDate(end)) throw new ReportError(E.dateNull, 'PeriodEnd')
     if (start > end) throw new ReportError(E.startAfterEnd)
     if (addDays(start, MAX_PERIOD_DAYS - 1) < end) throw new ReportError(E.tooLong)
-    const m = this.merchant(customer)
+    const m = await this.merchant(customer)
     if (!m) throw new ReportError(E.noUser)
     if (m.accounts.length === 0) throw new ReportError(E.noIban)
     if (end > dateTallinn(this.d.clock.now())) throw new ReportError(E.notReady)
-    return this.#camt054(type as ReportType, start, end, m, customer)
+    return this.#camt054(type as ReportType, start, end, m, customer, await this.transactions())
   }
 
-  #camt054(type: ReportType, start: string, end: string, m: MerchantSetup, customer: Customer): string {
+  #camt054(type: ReportType, start: string, end: string, m: MerchantSetup, customer: Customer, all: CardTransaction[]): string {
     const now = localTallinn(this.d.clock.now())
     const inPeriod = (d: string | undefined) => d !== undefined && d >= start && d <= end
-    const txs = this.transactions()
+    const txs = all
       .filter((t) => m.accounts.includes(t.account))
       .filter((t) => (type === 'CAMT_SETTLEMENT' ? inPeriod(t.settlementDate) : inPeriod(t.transactionDate)))
     // One block per account and currency; an account without transactions gets an empty EUR block (decision 826).

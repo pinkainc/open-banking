@@ -7,7 +7,7 @@ import type { InboxStore } from '../inbox.js'
 import type { Bank } from '../payments/engine.js'
 import { AgencyResponder } from './responder.js'
 import { RtfService } from './rtf.js'
-import { AGENCY_BOUNDS, AgencyStore } from './store.js'
+import { AGENCY_BOUNDS, MemoryAgencyStore, type AgencyStore } from './store.js'
 import { AgencySync } from './sync.js'
 
 export interface AgencyDeps { directory: Directory; inbox: InboxStore; clock: Clock; bank: Bank }
@@ -18,10 +18,12 @@ export class Agency {
   readonly sync: AgencySync
   readonly responder: AgencyResponder
   readonly rtf: RtfService
-  constructor(deps: AgencyDeps, bounds: Partial<Bounds> = {}) {
-    this.accounts = new AgencyStore(deps.clock, { ...AGENCY_BOUNDS, ...bounds })
+  /** `store`: where the accounts and set-ups live (decision 940); default in memory. */
+  constructor(deps: AgencyDeps, bounds: Partial<Bounds> = {}, store?: (clock: Clock, bounds: Bounds) => AgencyStore) {
+    const b = { ...AGENCY_BOUNDS, ...bounds }
+    this.accounts = store ? store(deps.clock, b) : new MemoryAgencyStore(deps.clock, b)
     this.sync = new AgencySync({ ...deps, store: this.accounts })
     this.responder = new AgencyResponder({ ...deps, store: this.accounts })
-    this.rtf = new RtfService(deps)
+    this.rtf = new RtfService({ ...deps, store: this.accounts })
   }
 }

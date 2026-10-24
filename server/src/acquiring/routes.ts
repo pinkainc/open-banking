@@ -42,24 +42,24 @@ export function acquiringSimRoutes(emulator: Emulator) {
     return c
   }
   return async (app: FastifyInstance) => {
-    app.get('/merchants/:country/:code', async (req) => ({ merchant: emulator.acquiring.merchant(customer(req)) ?? null }))
+    app.get('/merchants/:country/:code', async (req) => ({ merchant: (await emulator.acquiring.merchant(customer(req))) ?? null }))
     // {userCode?, accounts?} replaces the set-up; {} removes it.
     app.put('/merchants/:country/:code', async (req) => {
       const c = customer(req)
       const b = body(req)
       try {
-        return { merchant: emulator.acquiring.setMerchant(c, Object.keys(b).length ? b : undefined) ?? null }
+        return { merchant: (await emulator.acquiring.setMerchant(c, Object.keys(b).length ? b : undefined)) ?? null }
       } catch (e) { throw bad((e as Error).message) }
     })
     app.post('/transactions', async (req, reply) => {
       const b = body(req)
       try {
-        return reply.code(201).send({ transaction: view(emulator.acquiring.addTransaction(b as any)) })
+        return reply.code(201).send({ transaction: view(await emulator.acquiring.addTransaction(b as any)) })
       } catch (e) { throw bad((e as Error).message) }
     })
     app.get('/transactions', async (req) => {
       const q = req.query as { account?: string }
-      return { transactions: emulator.acquiring.transactions(q.account).map(view) }
+      return { transactions: (await emulator.acquiring.transactions(q.account)).map(view) }
     })
   }
 }

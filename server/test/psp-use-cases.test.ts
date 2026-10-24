@@ -115,10 +115,10 @@ function viban(ctx: Ctx, iban: string, master: string, holder: { name: string; c
   })
 }
 /** Synchronised LHV UK agency accounts of the sample agent (sort code 040325). */
-function agency(ctx: Ctx, accounts: [string, string][]) {
+async function agency(ctx: Ctx, accounts: [string, string][]) {
   const now = ctx.clock.now()
   for (const [no, name] of accounts) {
-    ctx.emulator.agency.accounts.put({
+    await ctx.emulator.agency.accounts.put({
       bank: 'LHVUK', id: no, country: 'GB', accountNo: no, status: 'ACTIVE', name, category: 'PERSONAL', copOptOut: false,
       agent: { code: AGENT.code, country: AGENT.country }, master: AGENT_MASTER, createdAt: now, updatedAt: now,
     })
@@ -172,7 +172,7 @@ describe('PSP use cases (G payment examples)', { skip: NO_PAGES }, () => {
   for (const n of [7, 8]) {
     test(`use case ${n}: ${n === 7 ? 'indirect scheme participant client payment' : 'level-2 indirect scheme participant client payment'}`, async () => {
       const ctx = await uk([agentCustomer])
-      agency(ctx, [['04032510097184', 'Jan Novak'], ['04032510097185', 'Nordic Data Oy']])
+      await agency(ctx, [['04032510097184', 'Jan Novak'], ['04032510097185', 'Nordic Data Oy']])
       const t = tabs(n)
       // Repair (decision 846): the published request has InitgPty/OrgId without the Id wrapper, which the XSD refuses.
       assert.match(t['Payment Request'], /<InitgPty>\s*<OrgId>/)
@@ -185,7 +185,7 @@ describe('PSP use cases (G payment examples)', { skip: NO_PAGES }, () => {
 
   test('use case 7, incoming: by sort code and account number (Faster Payments) and by IBAN (SEPA), on the master account', async () => {
     const ctx = await uk([agentCustomer])
-    agency(ctx, [['04032510097184', 'Jan Novak']])
+    await agency(ctx, [['04032510097184', 'Jan Novak']])
     const t = tabs(7)
     const credit = async (tab: string, body: object) => {
       const sample = t[tab]

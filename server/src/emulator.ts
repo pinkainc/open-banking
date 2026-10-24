@@ -26,6 +26,8 @@ import { PayeeService } from './payee/service.js'
 import { AccountsService, DEFAULT_INCOMING } from './accounts/service.js'
 import { BACS_BOUNDS, BacsService } from './bacs/service.js'
 import { Agency } from './agency/service.js'
+import { checkSetup, type AgencyStore } from './agency/store.js'
+import type { AcquiringStore } from './acquiring/store.js'
 import { Acquiring } from './acquiring/service.js'
 
 export interface Seed {
@@ -56,6 +58,10 @@ export interface EmulatorOptions {
    */
   inbox?: (clock: Clock, bounds: { tombstones: Bounds; processed: Bounds }) => InboxStore
   /** Limits of what is remembered (decision 504); each part overrides DEFAULT_BOUNDS. */
+  /** Agency accounts and set-ups (decision 940); default in memory. A PgAgencyStore (pg/agency.ts) keeps them in Postgres. */
+  agency?: (clock: Clock, bounds: Bounds) => AgencyStore
+  /** Merchant set-ups and card transactions (decision 945); default in memory, PgAcquiringStore (pg/acquiring.ts) in Postgres. */
+  acquiring?: (clock: Clock, bounds: Bounds) => AcquiringStore
   memory?: { tombstones?: Partial<Bounds>; msgIds?: Partial<Bounds>; processed?: Partial<Bounds>; requests?: Partial<Bounds>; incoming?: Partial<Bounds>; webhookEvents?: Partial<Bounds>; bacs?: Partial<typeof BACS_BOUNDS>; agency?: Partial<Bounds> }
 }
 
@@ -139,8 +145,8 @@ export class Emulator {
       onBooking: (_c, b) => { this.journal.record(b) }, onIncoming: (e) => this.accounts.onIncoming(e),
       credit: (p) => this.engine.incoming(p),
     }, opts.memory?.bacs)
-    this.agency = new Agency({ directory: this.directory, inbox: this.inbox, clock: this.clock, bank: this.bank }, opts.memory?.agency)
-    this.acquiring = new Acquiring({ directory: this.directory, inbox: this.inbox, clock: this.clock })
+    this.agency = new Agency({ directory: this.directory, inbox: this.inbox, clock: this.clock, bank: this.bank }, opts.memory?.agency, opts.agency)
+    this.acquiring = new Acquiring({ directory: this.directory, inbox: this.inbox, clock: this.clock }, undefined, opts.acquiring)
     this.reports = new AccountReports({
       directory: this.directory, ledger: this.ledger, journal: this.journal, inbox: this.inbox, clock: this.clock, bank: this.bank, xsd, msgIds,
     }, opts.reports)
@@ -166,6 +172,12 @@ export class Emulator {
       else this.accounts.register(a.iban, { opened: a.opened, nickname: a.nickname, closed: a.closed })
     }
     const customer = this.directory.add(c)
+    // The set-up lives in the agency store; a persistent one keeps what /_sim/agency changed
+    // over the seed's after a restart (fundOnce, decision 941).
+    if (c.agency !== undefined || !o.fundOnce) {
+      const setup = c.agency !== undefined ? checkSetup(c.agency, customer.accounts) : undefined
+      await this.agency.accounts.setSetup(customer, setup, { ifAbsent: o.fundOnce })
+    }
     if (c.limits) this.reports.configure(customer, { limits: { ...c.limits } })
     for (const a of c.accounts ?? []) {
       if (typeof a === 'string') continue

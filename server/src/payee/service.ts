@@ -111,7 +111,7 @@ export class PayeeService {
   }
 
   /** The bank's own holder of an IBAN: a customer's account or an ACTIVE, named VIBAN. */
-  #ownHolder(iban: string): Holder | undefined {
+  async #ownHolder(iban: string): Promise<Holder | undefined> {
     const owner = this.deps.directory.ownerOf(iban)
     if (owner) return { name: owner.name, category: 'BUSINESS' }
     const v = this.deps.viban.get(iban)
@@ -121,23 +121,23 @@ export class PayeeService {
   }
 
   /** A synchronised agency account that is not CLOSED and has a name (decision 836). */
-  #agencyHolder(id: string): Holder | undefined {
-    const a = this.deps.agency?.()?.find(id).find((x) => x.status !== 'CLOSED' && x.name)
+  async #agencyHolder(id: string): Promise<Holder | undefined> {
+    const a = (await this.deps.agency?.()?.find(id))?.find((x) => x.status !== 'CLOSED' && x.name)
     return a ? { name: a.name!, category: a.category ?? 'PERSONAL' } : undefined
   }
 
   /** Who holds an account given as an IBAN or a UK BBAN, and any forced answer. */
-  lookup(account: { iban?: string; bban?: string }): Found {
+  async lookup(account: { iban?: string; bban?: string }): Promise<Found> {
     const iban = account.iban ? normalizeIban(account.iban) : undefined
     const bban = account.bban ?? (iban ? gbBban(iban) : undefined)
     const sim = (iban ? this.accounts.get(iban) : undefined) ?? (bban ? this.accounts.get(bban) : undefined)
       ?? (bban && !iban ? this.accounts.entries().find(([k]) => gbBban(k) === bban)?.[1] : undefined)
-    let own = iban ? this.#ownHolder(iban) : undefined
+    let own = iban ? await this.#ownHolder(iban) : undefined
     if (!own && bban && !iban) {
       const match = (i: string) => gbBban(i) === bban
       const acct = this.deps.directory.all().flatMap((c) => c.accounts).find(match) ?? this.deps.viban.all().map((v) => v.iban).find(match)
-      if (acct) own = this.#ownHolder(acct)
-      else own = this.#agencyHolder(bban)
+      if (acct) own = await this.#ownHolder(acct)
+      else own = await this.#agencyHolder(bban)
     }
     const holder = sim?.name ? { name: sim.name, category: sim.category ?? own?.category ?? 'PERSONAL' } : own
     return { holder, answer: sim?.answer }
@@ -172,7 +172,7 @@ export class PayeeService {
     if (!list.length && !bic && !isSepaCountry(ibanCountry(iban))) list.push({ code: 'UNABLE_TO_CALCULATE_BIC_FROM_IBAN', field: 'IBAN' })
     if (list.length) return errors(list)
 
-    const found = this.lookup({ iban })
+    const found = await this.lookup({ iban })
     let match: string
     if (found.answer && PARTY_NAME_MATCH.includes(found.answer)) match = found.answer
     else if (!found.holder || !isSepaCountry(ibanCountry(iban))) match = 'NOT_APPLICABLE'
@@ -235,7 +235,7 @@ export class PayeeService {
     if (!b) return
     const identification = b.Identification as string
     const name = b.Name as string
-    const found = this.lookup({ iban: identification })
+    const found = await this.lookup({ iban: identification })
     let code: string
     if (found.answer && VOP_REASONS[found.answer]) code = found.answer
     else if (!found.holder) code = 'NOAP'
@@ -261,7 +261,7 @@ export class PayeeService {
     const identification = b.Identification as string
     const name = b.Name as string
     const category = b.AccountCategory as Category
-    const found = this.lookup({ bban: identification })
+    const found = await this.lookup({ bban: identification })
     let code: string
     if (found.answer && COP_REASONS[found.answer]) code = found.answer
     else if (!found.holder) code = 'AC01'

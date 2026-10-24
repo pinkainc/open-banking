@@ -4,10 +4,12 @@
 // LHV account: it is the agent's customer's account, identified by an IBAN or, in the UK,
 // a sort code and account number, whose money is held on the agent's master account here.
 //
-// The store is the one place the rest of the server asks about agency accounts:
+// The store is the one place the rest of the server asks about agency accounts and the
+// agents' set-ups (async, decision 940; MemoryAgencyStore here, PgAgencyStore in pg/agency.ts):
 //   agency.get(bank, id)        one entity's account by IBAN, GB IBAN or 14-digit BBAN
 //   agency.find(id)             the account in every entity (LHVEE first)
 //   agency.ofAgent(agent, bank) an agent's accounts
+//   agency.setup(agent)         the account manager's set-up of a customer
 //   receivable(a, {instant})    whether a credit to it is accepted (ACTIVE; INST_RESTRICTED
 //                               only for non-instant credits)
 //   rangeFor(setup, country, id) the agreement range (and master account) covering an id
@@ -113,32 +115,74 @@ export function receivable(a: AgencyAccount, o: { instant: boolean }): boolean {
 /** Agency accounts are kept by count only: a synchronised account lives on (decision 809). */
 export const AGENCY_BOUNDS: Bounds = { max: 100_000 }
 
-export class AgencyStore {
+/**
+ * Where agency accounts and the account manager's set-ups live (decision 940): in memory
+ * (MemoryAgencyStore) or in Postgres (PgAgencyStore, pg/agency.ts). Every call is async.
+ */
+export interface AgencyStore {
+  /** One entity's account by IBAN, GB IBAN or 14-digit sort code and account number. */
+  get(bank: AgencyBank, identifier: string): Promise<AgencyAccount | undefined>
+  /** The account in every entity it was synchronised to, LHV EE first. */
+  find(identifier: string): Promise<AgencyAccount[]>
+  /** An agent's accounts (optionally of one entity), oldest write first. */
+  ofAgent(agent: CustomerKey, bank?: AgencyBank): Promise<AgencyAccount[]>
+  /** Every account, oldest write first (a rewrite moves an account to the end). */
+  all(): Promise<AgencyAccount[]>
+  count(): Promise<number>
+  put(a: AgencyAccount): Promise<void>
+  /** A customer's agency set-up (decision 801); undefined: none. */
+  setup(agent: CustomerKey): Promise<AgencySetup | undefined>
+  /**
+   * Replaces a customer's set-up (undefined removes it). `ifAbsent`: only when the store
+   * holds nothing for the customer yet, not even a removal (the seed on a restart, decision 941).
+   */
+  setSetup(agent: CustomerKey, setup: AgencySetup | undefined, o?: { ifAbsent?: boolean }): Promise<void>
+  /** Every customer's set-up, by customer key (keyOf). */
+  setups(): Promise<Map<string, AgencySetup>>
+}
+
+/** A customer key as the stores keep it: the country in capitals. */
+export const agentKey = (c: CustomerKey) => keyOf({ code: c.code, country: c.country.toUpperCase() })
+
+export class MemoryAgencyStore implements AgencyStore {
   #m: BoundedMap<string, AgencyAccount>
+  /** null: removed (remembered so a seed on a restart does not bring it back). */
+  #setups = new Map<string, AgencySetup | null>()
   constructor(clock: Clock, bounds: Bounds = AGENCY_BOUNDS) { this.#m = new BoundedMap(clock, bounds) }
 
-  get size() { return this.#m.size }
-
-  /** One entity's account by IBAN, GB IBAN or 14-digit sort code and account number. */
-  get(bank: AgencyBank, identifier: string): AgencyAccount | undefined {
+  #get(bank: AgencyBank, identifier: string): AgencyAccount | undefined {
     const key = agencyKey(identifier)
     return key ? this.#m.get(`${bank}:${key}`) : undefined
   }
 
-  /** The account in every entity it was synchronised to, LHV EE first. */
-  find(identifier: string): AgencyAccount[] {
-    return (['LHVEE', 'LHVUK'] as const).map((b) => this.get(b, identifier)).filter((a): a is AgencyAccount => a !== undefined)
+  async get(bank: AgencyBank, identifier: string) { return this.#get(bank, identifier) }
+
+  async find(identifier: string) {
+    return (['LHVEE', 'LHVUK'] as const).map((b) => this.#get(b, identifier)).filter((a): a is AgencyAccount => a !== undefined)
   }
 
-  /** An agent's accounts (optionally of one entity), in the order they were first synchronised. */
-  ofAgent(agent: CustomerKey, bank?: AgencyBank): AgencyAccount[] {
-    const k = keyOf(agent)
-    return this.all().filter((a) => keyOf(a.agent) === k && (!bank || a.bank === bank))
+  async ofAgent(agent: CustomerKey, bank?: AgencyBank) {
+    const k = agentKey(agent)
+    return this.#all().filter((a) => agentKey(a.agent) === k && (!bank || a.bank === bank))
   }
 
-  all(): AgencyAccount[] { return this.#m.entries().map(([, a]) => a) }
+  #all(): AgencyAccount[] { return this.#m.entries().map(([, a]) => a) }
+  async all() { return this.#all() }
+  async count() { return this.#m.size }
 
-  put(a: AgencyAccount) { this.#m.set(`${a.bank}:${a.id}`, a) }
+  async put(a: AgencyAccount) { this.#m.set(`${a.bank}:${a.id}`, a) }
+
+  async setup(agent: CustomerKey) { return this.#setups.get(agentKey(agent)) ?? undefined }
+
+  async setSetup(agent: CustomerKey, setup: AgencySetup | undefined, o: { ifAbsent?: boolean } = {}) {
+    const k = agentKey(agent)
+    if (o.ifAbsent && this.#setups.has(k)) return
+    this.#setups.set(k, setup ?? null)
+  }
+
+  async setups() {
+    return new Map([...this.#setups].filter((e): e is [string, AgencySetup] => e[1] !== null))
+  }
 }
 
 /** Checks a set-up given in the seed or to /_sim/agency (decision 801); throws with the reason. */

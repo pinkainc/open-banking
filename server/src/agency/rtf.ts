@@ -10,7 +10,7 @@ import type { Customer, CustomerKey, Directory } from '../directory.js'
 import type { InboxStore, Message } from '../inbox.js'
 import type { Bank } from '../payments/engine.js'
 import { dateTallinn } from '../time.js'
-import type { RtfScheme } from './store.js'
+import { agentKey, type AgencyStore, type RtfScheme } from './store.js'
 
 export const AGENT_REPORT = 'AGENT_REPORT'
 
@@ -30,7 +30,7 @@ export class RtfError extends Error {
   constructor(readonly status: 400 | 404 | 409, message: string) { super(message) }
 }
 
-export interface RtfDeps { directory: Directory; inbox: InboxStore; clock: Clock; bank: Bank }
+export interface RtfDeps { directory: Directory; inbox: InboxStore; clock: Clock; bank: Bank; store: AgencyStore }
 
 const pad = (s: string, n: number) => s.slice(0, n).padEnd(n, ' ')
 const isGzip = (b: Buffer) => b.length >= 2 && b[0] === 0x1f && b[1] === 0x8b
@@ -52,8 +52,9 @@ export class RtfService {
   constructor(private deps: RtfDeps) {}
 
   /** Who receives a scheme's files: the agents that have it in their set-up. */
-  recipients(scheme: RtfScheme): Customer[] {
-    return this.deps.directory.all().filter((c) => c.agency?.agreement && c.agency.rtf?.includes(scheme))
+  async recipients(scheme: RtfScheme): Promise<Customer[]> {
+    const setups = await this.deps.store.setups()
+    return this.deps.directory.all().filter((c) => { const s = setups.get(agentKey(c)); return s?.agreement && s.rtf?.includes(scheme) })
   }
 
   /**
@@ -61,7 +62,7 @@ export class RtfService {
    * `content` only TARGET2 has a file of its own.
    */
   async deliver(o: { scheme: RtfScheme; content?: Buffer; customer?: CustomerKey }): Promise<Message[]> {
-    let to = this.recipients(o.scheme)
+    let to = await this.recipients(o.scheme)
     if (o.customer) {
       const c = this.deps.directory.get(o.customer)
       if (!c) throw new RtfError(404, `no customer ${o.customer.country}:${o.customer.code}`)

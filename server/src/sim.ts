@@ -111,7 +111,7 @@ export function simRoutes(emulator: Emulator) {
       // `iban` may also be an agency account: an IBAN or a sort code and account number (decision 835).
       const iban = normalizeIban(b.iban)
       const viban = emulator.viban.registry.get(iban)
-      const agency = !emulator.directory.ownerOf(iban) && !viban ? emulator.agency.accounts.find(iban)[0] : undefined
+      const agency = !emulator.directory.ownerOf(iban) && !viban ? (await emulator.agency.accounts.find(iban))[0] : undefined
       if (!emulator.directory.ownerOf(iban) && !viban && !agency) throw new ConnectError(404, 'NOT_FOUND', `no account ${iban}`)
       const scheme = b.scheme ?? 'SEPA'
       if (!['SEPA', 'INST', 'SWIFT', 'TARGET2', 'FAST'].includes(scheme)) throw bad(`unknown scheme ${scheme}`)
