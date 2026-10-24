@@ -54,7 +54,7 @@ const SCHEMES = ['SEPA', 'INST', 'SWIFT', 'TARGET2']
 export function accountsSimRoutes(emulator: Emulator) {
   const bad = (msg: string) => new ConnectError(400, 'BAD_REQUEST', msg)
   return async (app: FastifyInstance) => {
-    app.get('/incoming', async () => ({ incoming: emulator.accounts.held().map((p) => ({ ...p, amount: fromMinor(p.amount) })) }))
+    app.get('/incoming', async () => ({ incoming: (await emulator.accounts.held()).map((p) => ({ ...p, amount: fromMinor(p.amount) })) }))
 
     // Like /_sim/incoming, but the payment waits as Pending: no booking, no camt.054.
     app.post('/incoming', async (req, reply) => {

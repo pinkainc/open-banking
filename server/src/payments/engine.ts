@@ -66,7 +66,7 @@ export interface EngineOptions {
    */
   limits?: (c: Customer) => Promise<PaymentLimits>
   /** Incoming payments to a customer that are not (yet) booked: pending, rejected, then booked (UK /accounts, decision 711). */
-  onIncoming?: (e: IncomingEvent) => void
+  onIncoming?: (e: IncomingEvent) => void | Promise<void>
   /** Synchronised agency accounts (indirect scheme access, decisions 830–836): paid from and to via their master account. */
   agency?: () => AgencyStore | undefined
   /** Payments waiting at the rails (decision 948); default in memory. */
@@ -353,7 +353,7 @@ export class PaymentEngine {
     // A VIBAN creditor is credited on its master account, unless it is not ACTIVE.
     const creditorV = creditorIban ? (await this.opts.virtual?.resolve(creditorIban)) : undefined
     if (creditorV && creditorV.status !== 'ACTIVE') {
-      this.opts.onIncoming?.({ ref: servicerRef(), status: 'Rejected', account: creditorIban!, master: creditorV.master, amount, currency: tx.currency!,
+      await this.opts.onIncoming?.({ ref: servicerRef(), status: 'Rejected', account: creditorIban!, master: creditorV.master, amount, currency: tx.currency!,
         debtor: { name: block.debtorName ?? customer.name, iban: debtorIban } })
       return rj(inactiveCreditor(creditorV).reason, 'INTERNAL')
     }
@@ -361,7 +361,7 @@ export class PaymentEngine {
     const creditorId = creditorIban ?? (tx.creditorOther ? normalizeIban(tx.creditorOther) : undefined)
     const creditorA = !creditorV && creditorId && !(creditorIban && await this.directory.ownerOf(creditorIban)) ? (await this.#agency(creditorId))[0] : undefined
     if (creditorA && !receivable(creditorA, { instant: false })) {
-      this.opts.onIncoming?.({ ref: servicerRef(), status: 'Rejected', account: creditorId!, master: creditorA.master, amount, currency: tx.currency!,
+      await this.opts.onIncoming?.({ ref: servicerRef(), status: 'Rejected', account: creditorId!, master: creditorA.master, amount, currency: tx.currency!,
         debtor: { name: block.debtorName ?? customer.name, iban: debtorIban } })
       return rj(R.creditorClosed, 'INTERNAL')
     }
@@ -423,7 +423,7 @@ export class PaymentEngine {
     // Manual review (sanctions screening): accepted first, then PDNG until /_sim decides.
     if (review) {
       return { status: accepted, next: async () => {
-        this.#incomingOf(file, p, 'Pending')
+        await this.#incomingOf(file, p, 'Pending')
         return { status: await this.#park('REVIEW', file, p, { ...accepted, status: 'PDNG', reason: R.manualReview }) }
       } }
     }
@@ -563,9 +563,9 @@ export class PaymentEngine {
   }
 
   /** An internal payment as its creditor sees it (decision 711); nothing for an external creditor. */
-  #incomingOf(file: FileRef, p: Plan, status: IncomingEvent['status']) {
+  async #incomingOf(file: FileRef, p: Plan, status: IncomingEvent['status']) {
     if (!p.creditorOwner) return
-    this.opts.onIncoming?.({ ref: p.ref, status, account: p.creditorIban ?? normalizeIban(p.tx.creditorOther ?? ''), master: p.creditorAccount!, amount: p.amount, currency: p.currency,
+    await this.opts.onIncoming?.({ ref: p.ref, status, account: p.creditorIban ?? normalizeIban(p.tx.creditorOther ?? ''), master: p.creditorAccount!, amount: p.amount, currency: p.currency,
       debtor: { name: p.block.debtorName ?? file.customer.name, iban: p.debtorIban } })
   }
 
@@ -619,11 +619,11 @@ export class PaymentEngine {
         steps.push(approve ? await this.#execute(p.file, p.plan) : { status: { block, tx, status: 'RJCT', reason: reason ?? R.requestedByCustomer, scheme: p.status.scheme } })
       } else if (!approve) {
         await this.#release(p.plan)
-        this.#incomingOf(p.file, p.plan, 'Rejected')
+        await this.#incomingOf(p.file, p.plan, 'Rejected')
         steps.push({ status: { ...p.status, status: 'RJCT', reason: reason ?? R.regulatory } })
       } else if (p.plan.creditorOwner) {
         await this.ledger.commit(ref, p.plan.creditorAccount!)
-        this.#incomingOf(p.file, p.plan, 'Booked')
+        await this.#incomingOf(p.file, p.plan, 'Booked')
         steps.push(await this.#internalBooked(p.file, p.plan))
       } else {
         const s = await this.#rails(p.file, p.plan, { ...p.status, status: 'ACSP', reason: undefined })
@@ -762,14 +762,14 @@ export class PaymentEngine {
     const v = (await this.opts.virtual?.resolve(iban))
     // To a VIBAN that is not ACTIVE: returned to the sender, nothing booked or notified.
     if (v && v.status !== 'ACTIVE') {
-      this.opts.onIncoming?.({ ref: p.ref ?? servicerRef(), status: 'Rejected', account: iban, master: v.master, amount: p.amount, currency: p.currency,
+      await this.opts.onIncoming?.({ ref: p.ref ?? servicerRef(), status: 'Rejected', account: iban, master: v.master, amount: p.amount, currency: p.currency,
         debtor: { name: p.debtor.name, iban: p.debtor.iban ? normalizeIban(p.debtor.iban) : undefined } })
       return { returned: inactiveCreditor(v) }
     }
     // To an agency account: on its master account, refused when CLOSED, and when INST_RESTRICTED for SEPA Instant (decision 835).
     const a = !v && !await this.directory.ownerOf(iban) ? (await this.#agency(iban))[0] : undefined
     if (a && !receivable(a, { instant: p.scheme === 'INST' })) {
-      this.opts.onIncoming?.({ ref: p.ref ?? servicerRef(), status: 'Rejected', account: iban, master: a.master, amount: p.amount, currency: p.currency,
+      await this.opts.onIncoming?.({ ref: p.ref ?? servicerRef(), status: 'Rejected', account: iban, master: a.master, amount: p.amount, currency: p.currency,
         debtor: { name: p.debtor.name, iban: p.debtor.iban ? normalizeIban(p.debtor.iban) : undefined } })
       return { returned: a.status === 'CLOSED' ? { reason: R.creditorClosed, code: 'AC04' } : { reason: R.instantForbidden, code: 'AG01' } }
     }

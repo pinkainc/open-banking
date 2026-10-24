@@ -139,7 +139,7 @@ export class Emulator {
       schemas: opts.xsdDir ? new VibanSchemas(opts.xsdDir) : undefined, errors: opts.vibanErrors, keyed,
     })
     this.accounts = new AccountsService({
-      directory: this.directory, ledger: this.ledger, journal: this.journal, viban: this.viban.registry, clock: this.clock, bank: this.bank, engine: () => this.engine,
+      directory: this.directory, ledger: this.ledger, journal: this.journal, viban: this.viban.registry, clock: this.clock, bank: this.bank, engine: () => this.engine, keyed,
     }, { ...DEFAULT_INCOMING, ...opts.memory?.incoming })
     this.engine = new PaymentEngine(this.directory, this.ledger, this.rails, this.inbox, this.clock, this.bank, {
       strictIban: opts.strictIban, pain00103Until: opts.pain00103Until ?? '2026-11-15', xsd, virtual: this.viban.registry, msgIds,

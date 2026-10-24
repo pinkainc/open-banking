@@ -146,7 +146,7 @@ export interface BacsDeps {
   virtual: VirtualAccounts
   onBooking?: (customer: Customer, b: Booking) => void | Promise<void>
   /** Pending / rejected incoming payments for GET /accounts/{acc}/payments (decision 711). */
-  onIncoming?: (e: IncomingEvent) => void
+  onIncoming?: (e: IncomingEvent) => void | Promise<void>
   /** Books an incoming credit (the payment engine's, so VIBANs work as for any credit). */
   credit: (p: { iban: string; amount: bigint; currency: string; scheme: string; debtor: { name?: string; iban?: string; account?: string }; reference?: string; ref: string }) => Promise<{ returned?: unknown }>
   /** Where mandates, collections and credits are kept (decision 977); default in memory. */
@@ -222,7 +222,7 @@ export class BacsService {
     }
     await this.#credits.set(c.ref, encodeCredit(c))
     // Pending in /accounts/{acc}/payments until booked; the debtor is named by sort code + account number.
-    this.d.onIncoming?.({ ref: c.ref, status: 'Pending', account: c.iban, master: c.master, amount: c.amount, currency: 'GBP', debtor: { name: x.debtor.name, iban: `${x.debtor.sortCode}${x.debtor.accountNumber}` } })
+    await this.d.onIncoming?.({ ref: c.ref, status: 'Pending', account: c.iban, master: c.master, amount: c.amount, currency: 'GBP', debtor: { name: x.debtor.name, iban: `${x.debtor.sortCode}${x.debtor.accountNumber}` } })
     await this.d.inbox.add({
       customer: own.customer, type: BACS_TYPES.incoming, contentType: 'application/json',
       body: bacsIncoming({
@@ -488,7 +488,7 @@ export class BacsService {
       c.status = r.returned ? 'RETURNED' : 'BOOKED'
       if (!r.returned) c.bookedAt = this.d.clock.now()
       await this.#saveCredit(c)
-      if (!r.returned) this.d.onIncoming?.({ ref: c.ref, status: 'Booked', account: c.iban, master: c.master, amount: c.amount, currency: 'GBP', debtor: {} })
+      if (!r.returned) await this.d.onIncoming?.({ ref: c.ref, status: 'Booked', account: c.iban, master: c.master, amount: c.amount, currency: 'GBP', debtor: {} })
     }
   }
 

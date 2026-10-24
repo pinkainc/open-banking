@@ -3,10 +3,11 @@
 // incoming payments that are pending or rejected. Synchronous, OBIE-like PascalCase.
 // Data comes from the directory, the statement journal (booked), the payment engine
 // (reserved in manual review) and the incoming-payment states the engine reports.
-import { BoundedMap, type Bounds } from '../bounded.js'
+import type { Bounds } from '../bounded.js'
 import { DAY_MS, type Clock } from '../clock.js'
 import type { Customer, DirectoryStore } from '../directory.js'
 import { JsonBodyError } from '../errors.js'
+import { memoryKeyed, UNBOUNDED, type KeyedFactory, type KeyedStore } from '../keyed.js'
 import { normalizeIban } from '../iban.js'
 import { fromMinor, type Ledger } from '../ledger.js'
 import type { IncomingEvent, PaymentEngine } from '../payments/engine.js'
@@ -42,6 +43,12 @@ const bic11 = (bic: string) => (bic.length === 8 ? `${bic}XXX` : bic)
 export type { AccountInfo } from '../directory.js'
 
 interface IncomingEntry extends IncomingEvent { at: Date }
+// Stored forms (decision 988): amounts as decimal strings of minor units, times in ms.
+interface StoredIncoming extends Omit<IncomingEntry, 'amount' | 'at'> { amount: string; at: number }
+interface StoredHeld extends Omit<HeldIncoming, 'amount'> { amount: string }
+const encodeIncoming = (e: IncomingEntry): StoredIncoming => JSON.parse(JSON.stringify({ ...e, amount: e.amount.toString(), at: e.at.getTime() }))
+const decodeIncoming = (s: StoredIncoming): IncomingEntry => ({ ...s, debtor: { ...s.debtor }, amount: BigInt(s.amount), at: new Date(s.at) })
+const decodeHeld = (s: StoredHeld): HeldIncoming => ({ ...s, debtor: { ...s.debtor }, amount: BigInt(s.amount) })
 /** An incoming payment the simulator holds (/_sim/accounts/incoming, decision 712). */
 export interface HeldIncoming {
   ref: string; iban: string; amount: bigint; currency: string; scheme: string
@@ -51,6 +58,8 @@ export interface HeldIncoming {
 export interface AccountsDeps {
   directory: DirectoryStore; ledger: Ledger; journal: JournalStore; viban: VibanRegistry; clock: Clock; bank: { bic: string }
   engine: () => PaymentEngine
+  /** Where the incoming states and held payments are kept (decision 988); default in memory. */
+  keyed?: KeyedFactory
 }
 
 const intParam = (v: unknown, name: string, min: number, dflt?: number): number => {
@@ -74,11 +83,21 @@ const dateParam = (v: unknown, name: string, dflt: string): string => {
 const addDays = (date: string, days: number) => new Date(Date.parse(`${date}T00:00:00Z`) + days * DAY_MS).toISOString().slice(0, 10)
 
 export class AccountsService {
-  #incoming: BoundedMap<string, IncomingEntry>
-  #held = new Map<string, HeldIncoming>()
+  readonly #incoming: KeyedStore<StoredIncoming>
+  readonly #held: KeyedStore<StoredHeld>
+  #queue: Promise<unknown> = Promise.resolve()
 
   constructor(private deps: AccountsDeps, bounds: Bounds = DEFAULT_INCOMING) {
-    this.#incoming = new BoundedMap(deps.clock, bounds)
+    const keyed = deps.keyed ?? memoryKeyed(deps.clock)
+    this.#incoming = keyed('accounts-incoming', bounds)
+    this.#held = keyed('accounts-held', UNBOUNDED)
+  }
+
+  /** Changes of the incoming states run one after the other in this process (decision 988). */
+  #serial<T>(f: () => Promise<T>): Promise<T> {
+    const run = this.#queue.then(f, f)
+    this.#queue = run.catch(() => undefined)
+    return run
   }
 
   // --- Account details ------------------------------------------------------------
@@ -179,10 +198,14 @@ export class AccountsService {
   // --- Incoming pending and rejected ----------------------------------------------------
 
   /** The engine's report about an incoming payment (decision 711). Booked ones leave the list. */
-  onIncoming(e: IncomingEvent) {
-    if (e.status === 'Booked') { this.#incoming.delete(e.ref); return }
-    const before = this.#incoming.get(e.ref)
-    this.#incoming.set(e.ref, { ...e, account: normalizeIban(e.account), master: normalizeIban(e.master), at: before?.at ?? this.deps.clock.now() })
+  onIncoming(e: IncomingEvent): Promise<void> {
+    return this.#serial(async () => {
+      if (e.status === 'Booked') { await this.#incoming.take(e.ref); return }
+      const before = await this.#incoming.get(e.ref)
+      await this.#incoming.set(e.ref, encodeIncoming({
+        ...e, account: normalizeIban(e.account), master: normalizeIban(e.master), at: before ? new Date(before.at) : this.deps.clock.now(),
+      }))
+    })
   }
 
   /** The account a path names (IBAN or 14-digit sort code + account number), if the customer has it. */
@@ -218,7 +241,7 @@ export class AccountsService {
     if (size > 100) throw bad('size must be at most 100')
     const names = new Map<string, string>()
     const holder = (account: string) => names.get(account) ?? customer.name
-    const all = this.#incoming.entries().map(([, e]) => e)
+    const all = (await this.#incoming.entries()).map(([, e]) => decodeIncoming(e))
       .filter((e) => e.master === acc.master && (acc.account === acc.master || e.account === acc.account))
       .filter((e) => statuses.has(e.status))
       .filter((e) => { const d = dateLondon(e.at); return d >= fromDate && d <= toDate })
@@ -246,24 +269,27 @@ export class AccountsService {
   /** Holds an incoming payment as Pending (no booking, no notification) until decided. */
   async hold(p: HeldIncoming) {
     const v = await this.deps.viban.resolve(p.iban)
-    this.#held.set(p.ref, p)
-    this.onIncoming({ ref: p.ref, status: 'Pending', account: p.iban, master: v?.master ?? p.iban, amount: p.amount, currency: p.currency,
+    await this.#held.set(p.ref, JSON.parse(JSON.stringify({ ...p, amount: p.amount.toString() })))
+    await this.onIncoming({ ref: p.ref, status: 'Pending', account: p.iban, master: v?.master ?? p.iban, amount: p.amount, currency: p.currency,
       debtor: { name: p.debtor.name, iban: p.debtor.iban } })
   }
 
-  held(): HeldIncoming[] { return [...this.#held.values()] }
+  async held(): Promise<HeldIncoming[]> { return (await this.#held.entries()).map(([, p]) => decodeHeld(p)) }
 
   /** Books a held payment (the engine's incoming credit, same reference) or rejects it. */
   async decide(ref: string, approve: boolean) {
-    const p = this.#held.get(ref)
-    if (!p) return undefined
-    this.#held.delete(ref)
+    // Taken once: of two decisions at once, across emulators too, one books or rejects it.
+    const held = await this.#held.take(ref)
+    if (!held) return undefined
+    const p = decodeHeld(held)
     if (!approve) {
-      const e = this.#incoming.get(ref)
-      if (e) this.#incoming.set(ref, { ...e, status: 'Rejected' })
+      await this.#serial(async () => {
+        const e = await this.#incoming.get(ref)
+        if (e) await this.#incoming.set(ref, { ...e, status: 'Rejected' })
+      })
       return { ref, status: 'Rejected' as const }
     }
-    this.#incoming.delete(ref)
+    await this.#serial(async () => { await this.#incoming.take(ref) })
     const r = await this.deps.engine().incoming({ ...p })
     return r.returned ? { ref, status: 'Rejected' as const, reason: r.returned.code } : { ref, status: 'Booked' as const, accountServicerReference: r.servicerRef }
   }
