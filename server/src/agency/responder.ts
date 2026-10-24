@@ -8,7 +8,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Clock } from '../clock.js'
 import type { Bank } from '../payments/engine.js'
-import type { Customer, Directory } from '../directory.js'
+import type { Customer, DirectoryStore } from '../directory.js'
 import type { InboxStore, Message } from '../inbox.js'
 import { matchName } from '../payee/match.js'
 import { COP_REASONS, VOP_REASONS } from '../payee/service.js'
@@ -24,7 +24,7 @@ const COP_SAMPLE_REASONS: Record<string, string> = {
 }
 const CLOSE_COP = new Set(['MBAM', 'BAMM', 'PAMM'])
 
-export interface ResponderDeps { directory: Directory; inbox: InboxStore; clock: Clock; store: AgencyStore; bank: Bank }
+export interface ResponderDeps { directory: DirectoryStore; inbox: InboxStore; clock: Clock; store: AgencyStore; bank: Bank }
 
 export interface CopIncoming {
   sortCode: string; accountNumber: string; name: string; classification: AccountCategory
@@ -41,8 +41,8 @@ export class AgencyResponder {
   /** The agent an account belongs to: its owner, else the agent whose agreement range covers it. */
   async #agent(identifier: string, account?: AgencyAccount): Promise<{ agent?: Customer; setup?: AgencySetup }> {
     const setups = await this.deps.store.setups()
-    const agent = account ? this.deps.directory.get(account.agent)
-      : this.deps.directory.all().find((c) => rangeFor(setups.get(agentKey(c)), identifier) !== undefined)
+    const agent = account ? await this.deps.directory.get(account.agent)
+      : (await this.deps.directory.all()).find((c) => rangeFor(setups.get(agentKey(c)), identifier) !== undefined)
     return { agent, setup: agent && setups.get(agentKey(agent)) }
   }
 

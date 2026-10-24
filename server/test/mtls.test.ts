@@ -139,15 +139,14 @@ describe('mutual TLS', { skip: openssl ? false : 'openssl not available' }, () =
 
     test('a contract naming another certificate: 403 "different than expected"', async () => {
       const fp = (name: string) => new X509Certificate(read(dir, `${name}.crt`)).fingerprint256
-      const c1 = emulator.directory.get(C1)!
       try {
-        c1.certificates = [fp('client2')]
+        await emulator.directory.update(C1, { certificates: [fp('client2')] })
         const r = await get('/heartbeat', { dir, name: 'client1' })
         assert.equal(r.status, 403)
         assert.equal(parseXml(r.body).Errors.Error.Description, 'User authentication certificate is different than expected')
-        c1.certificates = [fp('client1')]
+        await emulator.directory.update(C1, { certificates: [fp('client1')] })
         assert.equal((await get('/heartbeat', { dir, name: 'client1' })).status, 200)
-      } finally { delete c1.certificates }
+      } finally { await emulator.directory.update(C1, { certificates: undefined }) }
     })
   })
 })

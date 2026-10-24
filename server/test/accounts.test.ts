@@ -67,10 +67,10 @@ async function pay(creditorIban: string, amount: string, creditorName = 'Katie B
   return e.length ? e[0].servicerRef : (await ctx.emulator.engine.parked()).find((p) => p.endToEndId === `E2E-${amount}`)!.ref
 }
 
-function addViban(master: string, status: 'ACTIVE' | 'CLOSED', name: string) {
+async function addViban(master: string, status: 'ACTIVE' | 'CLOSED', name: string) {
   const reg = ctx.emulator.viban.registry
   return reg.add({
-    iban: reg.generate(master), master, owner: { code: U1.code, country: 'GB' }, status, createdAt: ctx.clock.now(),
+    iban: await reg.generate(master), master, owner: { code: U1.code, country: 'GB' }, status, createdAt: ctx.clock.now(),
     user: { company: { Name: name } as never, address: { Country: 'GB', StreetNo: '1 High Street', CityCounty: 'London' } },
   }).iban
 }
@@ -172,7 +172,7 @@ describe('GET /accounts/{acc}/transactions/{ref}', () => {
   })
 
   test('a payment through a VIBAN: IsVirtualAccountPayment and the VIBAN', async () => {
-    const v = addViban(A, 'ACTIVE', 'Viban Holder Ltd')
+    const v = await addViban(A, 'ACTIVE', 'Viban Holder Ltd')
     const r = await call(ctx, { method: 'POST', url: '/_sim/incoming', as: null, body: { iban: v, amount: '3.00', currency: 'GBP' } })
     const t = await ok(`/accounts/${A}/transactions/${JSON.parse(r.body).accountServicerReference}`, 'accounts-transaction.response')
     assert.equal(t.IsVirtualAccountPayment, true)
@@ -234,8 +234,8 @@ describe('GET /accounts/{acc}/payments', () => {
   })
 
   test('a payment to a closed VIBAN is Rejected: listed under the VIBAN and its master account', async () => {
-    const closed = addViban(A, 'CLOSED', 'Gone Ltd')
-    const other = addViban(A, 'ACTIVE', 'Still Here Ltd')
+    const closed = await addViban(A, 'CLOSED', 'Gone Ltd')
+    const other = await addViban(A, 'ACTIVE', 'Still Here Ltd')
     const r = await call(ctx, { method: 'POST', url: '/_sim/incoming', as: null, body: { iban: closed, amount: '9.99', currency: 'GBP', debtor: { name: 'Payer', iban: C } } })
     assert.equal(JSON.parse(r.body).returned, true)
     const viaViban = await list(closed, '', U1.code)

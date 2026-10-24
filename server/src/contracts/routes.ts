@@ -23,9 +23,9 @@ function provider(c: Caller) {
   return c.user
 }
 
-export function registerContracts(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Caller) {
+export function registerContracts(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Promise<Caller>) {
   app.post('/contracts', async (req) => {
-    const sp = provider(caller(req))
+    const sp = provider(await caller(req))
     let b: Record<string, unknown> | undefined
     try { b = asObject(parseJsonBody(req.body)) } catch (e) {
       if (e instanceof JsonBodyError) throw jsonError(400, 'BAD_REQUEST', e.message)
@@ -39,7 +39,7 @@ export function registerContracts(app: FastifyInstance, emulator: Emulator, call
     const country = (b.companyCodeIssuer as string).trim().toUpperCase()
     if (!/^[A-Z]{2}$/.test(country)) throw jsonError(400, 'BAD_REQUEST', 'companyCodeIssuer must be a 2-letter country code')
     try {
-      const { contract, container } = emulator.contracts.create(sp, { code, country })
+      const { contract, container } = await emulator.contracts.create(sp, { code, country })
       return {
         companyCode: contract.customer.code, companyCodeIssuer: contract.customer.country,
         contractStatus: 'pending', contractId: contract.id, contractContainer: container,
@@ -51,12 +51,12 @@ export function registerContracts(app: FastifyInstance, emulator: Emulator, call
   })
 
   app.get('/contracts', async (req) => {
-    const sp = provider(caller(req))
+    const sp = provider(await caller(req))
     const q = req.query as Record<string, string | undefined>
     for (const k of ['createdAtMin', 'createdAtMax', 'changedAtMin', 'changedAtMax']) {
       if (q[k] !== undefined && !isDate(q[k])) throw jsonError(400, 'BAD_REQUEST', `${k} must be a date (YYYY-MM-DD)`)
     }
-    return emulator.contracts.list(sp, q)
+    return await emulator.contracts.list(sp, q)
   })
 }
 
@@ -69,8 +69,8 @@ function view(c: Contract) {
 
 export function contractsSimRoutes(emulator: Emulator) {
   const svc = emulator.contracts
-  const run = (f: () => Contract) => {
-    try { return view(f()) } catch (e) {
+  const run = async (f: () => Promise<Contract>) => {
+    try { return view(await f()) } catch (e) {
       if (e instanceof ContractError) throw new ConnectError(e.message.startsWith('no contract') ? 404 : 409, e.message.startsWith('no contract') ? 'NOT_FOUND' : 'CONFLICT', e.message)
       throw e
     }
@@ -78,7 +78,7 @@ export function contractsSimRoutes(emulator: Emulator) {
   return async (app: FastifyInstance) => {
     app.get('/', async () => {
       // Seeded connections become contracts on first look, for every provider.
-      for (const c of emulator.directory.all()) if (c.connected) svc.of(c)
+      for (const c of await emulator.directory.all()) if (c.connected) svc.of(c)
       return { contracts: svc.all.map(view) }
     })
     app.post('/:id/activate', async (req) => run(() => svc.activate((req.params as { id: string }).id)))

@@ -10,11 +10,11 @@ import { fromMinor } from '../ledger.js'
 import { jsonTextScope } from '../jsonbody.js'
 import { FX_TYPES, endOfDay, type Offer } from './service.js'
 
-export function registerFx(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Caller) {
+export function registerFx(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Promise<Caller>) {
   jsonTextScope(app, (scope) => {
     const route = (path: string, type: string, handle: (body: unknown, c: Caller, id: string) => Promise<void>) =>
       scope.post(path, async (req, reply) => {
-        const c = caller(req)
+        const c = await caller(req)
         const id = requestId()
         await handle(req.body, c, id)
         return accepted(emulator.requests, req, reply, c, id, type)

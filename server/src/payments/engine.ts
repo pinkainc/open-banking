@@ -24,7 +24,7 @@ import { DEFAULT_BOUNDS, type Bounds } from '../bounded.js'
 import { memoryKeyed, UNBOUNDED, type KeyedFactory, type KeyedStore } from '../keyed.js'
 import type { Clock } from '../clock.js'
 import { codePage, fold } from '../cp1257.js'
-import { keyOf, type Customer, type Directory } from '../directory.js'
+import { keyOf, type Customer, type DirectoryStore } from '../directory.js'
 import { ibanChecksumOk, ibanCountry, isSepaCountry, normalizeIban } from '../iban.js'
 import { servicerRef } from '../ids.js'
 import type { InboxStore } from '../inbox.js'
@@ -204,7 +204,7 @@ export class PaymentEngine {
   /** Credits being booked in this process: a concurrent repeat waits for the same result. */
   #crediting = new Map<string, Promise<CreditResult>>()
   constructor(
-    private directory: Directory, private ledger: Ledger, private rails: Rails, private inbox: InboxStore,
+    private directory: DirectoryStore, private ledger: Ledger, private rails: Rails, private inbox: InboxStore,
     private clock: Clock, private bank: Bank, private opts: EngineOptions = {},
   ) {
     const keyed = opts.keyed ?? memoryKeyed(clock)
@@ -258,7 +258,7 @@ export class PaymentEngine {
       if (b.ctrlSum !== undefined && !decimalEq(b.ctrlSum, decimalSum(b.txs.map((t) => t.amount!)))) return R.blockSum
     }
     for (const b of f.blocks) {
-      const owner = b.debtorOther ? undefined : this.directory.ownerOf(this.#account(b.debtorIban!))
+      const owner = b.debtorOther ? undefined : await this.directory.ownerOf(this.#account(b.debtorIban!))
       if (owner) {
         if (keyOf(owner) !== keyOf(customer)) return R.noRights
         continue
@@ -319,7 +319,7 @@ export class PaymentEngine {
   async #check(rawBlock: Block, rawTx: Tx, customer: Customer): Promise<{ status: TxStatus } | { plan: Plan }> {
     // Free text as the core keeps it, for the receiver bank's country (decision 526): what
     // the reports echo, the notifications book and the rails receive.
-    const country = this.#receiverCountry(rawTx)
+    const country = await this.#receiverCountry(rawTx)
     const block: Block = { ...rawBlock, debtorName: fold(rawBlock.debtorName, country) }
     const tx: Tx = { ...rawTx, creditorName: fold(rawTx.creditorName, country), ustrd: fold(rawTx.ustrd, country), reference: fold(rawTx.reference, country) }
     const rj = (reason: string, scheme?: string): { status: TxStatus } => ({ status: { block, tx, status: 'RJCT', reason, scheme } })
@@ -359,7 +359,7 @@ export class PaymentEngine {
     }
     // An agency account here is credited on its master account unless CLOSED (decision 833).
     const creditorId = creditorIban ?? (tx.creditorOther ? normalizeIban(tx.creditorOther) : undefined)
-    const creditorA = !creditorV && creditorId && !(creditorIban && this.directory.ownerOf(creditorIban)) ? (await this.#agency(creditorId))[0] : undefined
+    const creditorA = !creditorV && creditorId && !(creditorIban && await this.directory.ownerOf(creditorIban)) ? (await this.#agency(creditorId))[0] : undefined
     if (creditorA && !receivable(creditorA, { instant: false })) {
       this.opts.onIncoming?.({ ref: servicerRef(), status: 'Rejected', account: creditorId!, master: creditorA.master, amount, currency: tx.currency!,
         debtor: { name: block.debtorName ?? customer.name, iban: debtorIban } })
@@ -367,7 +367,7 @@ export class PaymentEngine {
     }
     if (creditorA && creditorA.master === debtorAccount && debtorA) return rj(R.sameAccount)
     const creditorAccount = creditorV?.master ?? creditorA?.master ?? creditorIban
-    const creditorOwner = creditorAccount ? this.directory.ownerOf(creditorAccount) : undefined
+    const creditorOwner = creditorAccount ? await this.directory.ownerOf(creditorAccount) : undefined
     const base = { block, tx, amount, currency: tx.currency!, debtorIban, debtorAccount, creditorIban, creditorAccount, creditorV, creditorA, debtorA, ref: servicerRef(), instrKey }
     const planned = async (plan: Plan) => {
       if (instrKey) await this.#instrIds.set(instrKey, plan.ref)
@@ -474,7 +474,7 @@ export class PaymentEngine {
    */
   async settle(ref: string, outcome: RailsOutcome): Promise<boolean> {
     const r = await this.#pending.take(ref)
-    const w = r && this.#decode(r)
+    const w = r && await this.#decode(r)
     if (!w) return false
     await this.#flow(w.file, [await this.#outcome(w.file, w.plan, w.accepted, outcome)], false)
     return true
@@ -489,17 +489,17 @@ export class PaymentEngine {
   }
 
   /** Undefined when the customer is gone from the directory (nothing to report to). */
-  #decode(r: PendingRecord): { file: FileRef; plan: Plan; accepted: TxStatus } | undefined {
-    const customer = this.directory.get(r.file.customer)
-    const plan = this.#decodePlan(r.plan)
+  async #decode(r: PendingRecord): Promise<{ file: FileRef; plan: Plan; accepted: TxStatus } | undefined> {
+    const customer = await this.directory.get(r.file.customer)
+    const plan = await this.#decodePlan(r.plan)
     if (!customer || !plan) return undefined
     return { file: { ...r.file, customer, version: r.file.version as PainVersion }, plan, accepted: r.accepted as unknown as TxStatus }
   }
 
   /** The plan encodePlan made, with the creditor customer from the directory; undefined when it is gone. */
-  #decodePlan(o: Record<string, unknown>): Plan | undefined {
+  async #decodePlan(o: Record<string, unknown>): Promise<Plan | undefined> {
     const { amount, debtorA, creditorA, creditorOwner, ...plan } = o as any
-    const owner = creditorOwner ? this.directory.get(creditorOwner) : undefined
+    const owner = creditorOwner ? await this.directory.get(creditorOwner) : undefined
     if (creditorOwner && !owner) return undefined
     return { ...plan, amount: BigInt(amount), creditorOwner: owner, debtorA: debtorA && agencyFromJson(debtorA), creditorA: creditorA && agencyFromJson(creditorA) }
   }
@@ -555,9 +555,9 @@ export class PaymentEngine {
   }
 
   /** A parked payment as the engine works with it; undefined when its customers are gone from the directory. */
-  #unpark(r: ParkedRecord): Parked | undefined {
-    const customer = this.directory.get(r.file.customer)
-    const plan = this.#decodePlan(r.plan)
+  async #unpark(r: ParkedRecord): Promise<Parked | undefined> {
+    const customer = await this.directory.get(r.file.customer)
+    const plan = await this.#decodePlan(r.plan)
     if (!customer || !plan) return undefined
     return { kind: r.kind, file: { ...r.file, customer, version: r.file.version as PainVersion }, plan, status: r.status as unknown as TxStatus }
   }
@@ -572,7 +572,7 @@ export class PaymentEngine {
   /** A payment in manual review: funds reserved, not booked (GET /accounts/{acc}/transactions/{ref}, decision 710). */
   async reserved(ref: string): Promise<ReservedPayment | undefined> {
     const r = await this.#parked.get(ref)
-    const p = r && r.kind === 'REVIEW' ? this.#unpark(r) : undefined
+    const p = r && r.kind === 'REVIEW' ? await this.#unpark(r) : undefined
     if (!p) return undefined
     const { plan } = p
     return {
@@ -583,7 +583,8 @@ export class PaymentEngine {
 
   /** Payments waiting for a decision (the internet bank's pending list, manual review). */
   async parked(): Promise<ParkedPayment[]> {
-    const all = (await this.#parked.entries()).map(([ref, r]) => [ref, this.#unpark(r)] as const)
+    const all: (readonly [string, Parked | undefined])[] = []
+    for (const [ref, r] of await this.#parked.entries()) all.push([ref, await this.#unpark(r)] as const)
     return all.filter((x): x is [string, Parked] => x[1] !== undefined).map(([ref, p]) => ({
       ref, kind: p.kind, customer: { code: p.file.customer.code, country: p.file.customer.country }, msgId: p.file.msgId,
       pmtInfId: p.plan.block.pmtInfId, instrId: p.plan.tx.instrId, endToEndId: p.plan.tx.endToEndId,
@@ -606,7 +607,7 @@ export class PaymentEngine {
     const byFile = new Map<string, { file: FileRef; steps: Step[] }>()
     for (const ref of refs) {
       const r = await this.#parked.take(ref) // at most once: listed twice, or decided by another process
-      const p = r && this.#unpark(r)
+      const p = r && await this.#unpark(r)
       if (!p) continue
       const fk = `${keyOf(p.file.customer)}|${p.file.requestId}|${p.file.msgId}`
       const group = byFile.get(fk) ?? { file: p.file, steps: [] }
@@ -669,9 +670,9 @@ export class PaymentEngine {
   }
 
   /** The receiver bank's country: LHV's own for an account here, else the BIC's, else the IBAN's. */
-  #receiverCountry(tx: Tx): string | undefined {
+  async #receiverCountry(tx: Tx): Promise<string | undefined> {
     const iban = tx.creditorIban ? normalizeIban(tx.creditorIban) : undefined
-    if (iban && this.directory.ownerOf(this.#account(iban))) return this.bank.bic.slice(4, 6).toUpperCase()
+    if (iban && await this.directory.ownerOf(this.#account(iban))) return this.bank.bic.slice(4, 6).toUpperCase()
     if (tx.creditorBic && tx.creditorBic.length >= 6) return tx.creditorBic.slice(4, 6).toUpperCase()
     return iban ? ibanCountry(iban) : undefined
   }
@@ -690,7 +691,7 @@ export class PaymentEngine {
   /** The agency account a block pays from, when the customer is its agent and it is no account of the customer's own. */
   async #agencyDebtor(block: Block, customer: Customer): Promise<AgencyAccount | undefined> {
     const id = normalizeIban(block.debtorIban!)
-    if (!block.debtorOther && this.directory.ownerOf(id)) return undefined
+    if (!block.debtorOther && await this.directory.ownerOf(id)) return undefined
     return (await this.#agency(id)).find((a) => keyOf(a.agent) === keyOf(customer))
   }
 
@@ -708,7 +709,7 @@ export class PaymentEngine {
     if (!b.debtorOther) {
       const v = this.opts.virtual?.resolve(id)
       if (v) return v.master
-      if (this.directory.ownerOf(id)) return id
+      if (await this.directory.ownerOf(id)) return id
     }
     return (await this.#agencyDebtor(b, customer))?.master ?? id
   }
@@ -744,7 +745,7 @@ export class PaymentEngine {
 
   async #receive(c: IncomingCredit): Promise<CreditResult> {
     const iban = normalizeIban(c.iban)
-    if (!this.opts.virtual?.resolve(iban) && !this.directory.ownerOf(iban) && !(await this.#agency(iban)).length) {
+    if (!this.opts.virtual?.resolve(iban) && !await this.directory.ownerOf(iban) && !(await this.#agency(iban)).length) {
       return { status: 'returned', code: 'AC01', reason: R.accountNumber }
     }
     const r = await this.incoming({
@@ -766,14 +767,14 @@ export class PaymentEngine {
       return { returned: inactiveCreditor(v) }
     }
     // To an agency account: on its master account, refused when CLOSED, and when INST_RESTRICTED for SEPA Instant (decision 835).
-    const a = !v && !this.directory.ownerOf(iban) ? (await this.#agency(iban))[0] : undefined
+    const a = !v && !await this.directory.ownerOf(iban) ? (await this.#agency(iban))[0] : undefined
     if (a && !receivable(a, { instant: p.scheme === 'INST' })) {
       this.opts.onIncoming?.({ ref: p.ref ?? servicerRef(), status: 'Rejected', account: iban, master: a.master, amount: p.amount, currency: p.currency,
         debtor: { name: p.debtor.name, iban: p.debtor.iban ? normalizeIban(p.debtor.iban) : undefined } })
       return { returned: a.status === 'CLOSED' ? { reason: R.creditorClosed, code: 'AC04' } : { reason: R.instantForbidden, code: 'AG01' } }
     }
     const account = v?.master ?? a?.master ?? iban
-    const owner = this.directory.ownerOf(account)
+    const owner = await this.directory.ownerOf(account)
     if (!owner) throw new Error(`no account ${iban}`)
     const ref = p.ref ?? servicerRef()
     await this.ledger.transfer({ ref, from: this.rails.settlementAccount(p.scheme), to: account, amount: p.amount, currency: p.currency })

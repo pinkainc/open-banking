@@ -99,7 +99,7 @@ if (url) test('an emulator restarted on the same namespace sees synced agency ac
     agency: { agreement: true, cop: true, ranges: [{ country: 'GB', sortCode: '401276', master: GBM }] },
   } as any)
   const a = await setup(opts, s)
-  const agent = a.emulator.directory.get(AG)!
+  const agent = (await a.emulator.directory.get(AG))!
   // The account manager turns on notifications; a restart must keep it over the seed's set-up.
   const put = await call(a, { method: 'PUT', url: `/_sim/agency/agents/GB/${AG.code}`, body: { agreement: true, cop: true, notifications: true, ranges: [{ country: 'GB', sortCode: '401276', master: GBM }] } })
   assert.equal(put.statusCode, 200)

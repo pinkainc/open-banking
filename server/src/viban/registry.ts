@@ -79,7 +79,7 @@ export class VibanRegistry implements VirtualAccounts {
   #agreements = new Set<string>()
   #serial = 0
 
-  constructor(private range: VibanRange = DEFAULT_RANGE, private taken: (iban: string) => boolean = () => false) {}
+  constructor(private range: VibanRange = DEFAULT_RANGE, private taken: (iban: string) => Promise<boolean> = async () => false) {}
 
   /** Signs (or ends) the master account agreement of an account. */
   agreement(iban: string, active = true) {
@@ -98,7 +98,7 @@ export class VibanRegistry implements VirtualAccounts {
   }
 
   /** A new number in the bank's VIBAN range, in the master account's country format. */
-  generate(master: string): string {
+  async generate(master: string): Promise<string> {
     const m = normalizeIban(master)
     for (;;) {
       const serial = ++this.#serial
@@ -113,7 +113,7 @@ export class VibanRegistry implements VirtualAccounts {
       } else {
         throw new Error(`no VIBAN format for ${m.slice(0, 2)} master accounts`)
       }
-      if (!this.#vibans.has(iban) && !this.taken(iban)) return iban
+      if (!this.#vibans.has(iban) && !(await this.taken(iban))) return iban
     }
   }
 

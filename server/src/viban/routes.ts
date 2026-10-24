@@ -12,10 +12,10 @@ import type { VibanStatus } from './registry.js'
 
 const OPS: Op[] = ['open', 'bulk', 'modify', 'info', 'close']
 
-export function registerViban(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Caller) {
+export function registerViban(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Promise<Caller>) {
   for (const op of OPS) {
     app.post(`/viban/${op}`, async (req, reply) => {
-      const c = caller(req)
+      const c = await caller(req)
       const body = typeof req.body === 'string' ? req.body : ''
       const out = await emulator.viban.handle(op, body, c.customer)
       if ('errors' in out && emulator.viban.errorDelivery === 'sync') {
@@ -67,7 +67,7 @@ export function vibanSimRoutes(emulator: Emulator) {
     app.post('/agreements', async (req) => {
       const b = (req.body ?? {}) as { iban?: string; active?: boolean }
       if (!b.iban) throw bad('iban is required')
-      if (!emulator.directory.ownerOf(b.iban)) throw new ConnectError(404, 'NOT_FOUND', `no account ${normalizeIban(b.iban)}`)
+      if (!await emulator.directory.ownerOf(b.iban)) throw new ConnectError(404, 'NOT_FOUND', `no account ${normalizeIban(b.iban)}`)
       svc.registry.agreement(b.iban, b.active !== false)
       return { iban: normalizeIban(b.iban), active: svc.registry.hasAgreement(b.iban) }
     })

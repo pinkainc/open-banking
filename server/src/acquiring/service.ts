@@ -4,7 +4,7 @@
 // camt.054.001.02 of the period's card transactions, or an <Errors> document.
 import type { Bounds } from '../bounded.js'
 import type { Clock } from '../clock.js'
-import { keyOf, type Customer, type CustomerKey, type Directory } from '../directory.js'
+import { keyOf, type Customer, type CustomerKey, type DirectoryStore } from '../directory.js'
 import { errorsXml } from '../errors.js'
 import type { InboxStore } from '../inbox.js'
 import { fromMinor, toMinor } from '../ledger.js'
@@ -88,7 +88,7 @@ export function maskPan(pan: string): string {
 /** Six decimals, as the sample's entry and fee amounts (decision 825). */
 const six = (n: bigint) => `${fromMinor(n)}0000`
 
-export interface AcquiringDeps { directory: Directory; inbox: InboxStore; clock: Clock }
+export interface AcquiringDeps { directory: DirectoryStore; inbox: InboxStore; clock: Clock }
 
 const merchantKey = (c: CustomerKey) => keyOf({ code: c.code, country: c.country.toUpperCase() })
 
@@ -121,7 +121,7 @@ export class Acquiring {
   /** A card transaction on a merchant's settlement account (the simulator's card scheme). */
   async addTransaction(i: CardTransactionInput): Promise<CardTransaction> {
     const account = String(i.account ?? '').replace(/\s+/g, '').toUpperCase()
-    const owner = this.d.directory.ownerOf(account)
+    const owner = await this.d.directory.ownerOf(account)
     if (!owner) throw new Error(`no account ${account}`)
     const m = await this.merchant(owner)
     if (!m) throw new Error(`${keyOf(owner)} has no acquiring set-up`)

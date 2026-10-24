@@ -10,9 +10,9 @@ import { dateLondon, isoLondon } from './time.js'
 
 type Query = Record<string, string | string[] | undefined>
 
-export function registerRequestsV2(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Caller) {
+export function registerRequestsV2(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Promise<Caller>) {
   app.get('/v2/requests', async (req, reply) => {
-    const c = caller(req)
+    const c = await caller(req)
     const q = req.query as Query
     const one = (name: string) => { const v = q[name]; return (Array.isArray(v) ? v[0] : v) || undefined }
     const p = pageParams(q)
@@ -46,7 +46,7 @@ export function registerRequestsV2(app: FastifyInstance, emulator: Emulator, cal
   })
 
   app.get('/v2/requests/:id', async (req, reply) => {
-    const c = caller(req)
+    const c = await caller(req)
     const r = emulator.requests.get(c.visible, (req.params as { id: string }).id)
     // G: "204 - no request: Request ID doesn't exist".
     if (!r) return reply.code(204).send()

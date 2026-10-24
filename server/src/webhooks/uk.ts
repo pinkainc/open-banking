@@ -14,7 +14,7 @@ import { createHmac, randomBytes, randomUUID } from 'node:crypto'
 import { gzipSync } from 'node:zlib'
 import { BoundedMap, type Bounds } from '../bounded.js'
 import { DAY_MS, type Clock } from '../clock.js'
-import { keyOf, type CustomerKey, type Directory } from '../directory.js'
+import { keyOf, type CustomerKey, type DirectoryStore } from '../directory.js'
 import type { InboxStore, Message } from '../inbox.js'
 import { messageMetadata } from '../metadata.js'
 import { isoLondon } from '../time.js'
@@ -180,7 +180,7 @@ export class UkWebhooks {
   readonly naming: Naming
   readonly #bankOf: (m: Message) => string
 
-  constructor(private inbox: InboxStore, private directory: Directory, private clock: Clock, opts: UkWebhookOptions = {}) {
+  constructor(private inbox: InboxStore, private directory: DirectoryStore, private clock: Clock, opts: UkWebhookOptions = {}) {
     this.deliver = opts.deliver ?? httpUkDeliver
     this.immediate = opts.immediate ?? true
     this.naming = opts.naming ?? 'regCode'
@@ -257,17 +257,18 @@ export class UkWebhooks {
   // --- Events --------------------------------------------------------------------------
 
   /** Active configurations a message goes to: its customer's, and its service providers'. */
-  #targets(m: Message): Config[] {
+  async #targets(m: Message): Promise<Config[]> {
     const k = keyOf({ code: m.clientCode, country: m.clientCountry })
-    return this.all().filter((c) => {
-      if (!c.active || c.messageType !== m.type) return false
-      if (keyOf(c.owner) === k) return true
-      return this.directory.get(c.owner)?.connected?.some((x) => keyOf(x) === k) ?? false
-    })
+    const out: Config[] = []
+    for (const c of this.all()) {
+      if (!c.active || c.messageType !== m.type) continue
+      if (keyOf(c.owner) === k || ((await this.directory.get(c.owner))?.connected?.some((x) => keyOf(x) === k) ?? false)) out.push(c)
+    }
+    return out
   }
 
-  #onMessage(m: Message) {
-    const targets = this.#targets(m)
+  async #onMessage(m: Message) {
+    const targets = await this.#targets(m)
     if (targets.length === 0) return
     for (const c of targets) this.#newEvent(c, m)
     if (this.immediate) this.#kick()

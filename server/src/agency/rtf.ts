@@ -6,7 +6,7 @@
 // password-protected zips, so their format is not known and nothing is made up for them.
 import { gzipSync } from 'node:zlib'
 import type { Clock } from '../clock.js'
-import type { Customer, CustomerKey, Directory } from '../directory.js'
+import { keyOf, type Customer, type CustomerKey, type DirectoryStore } from '../directory.js'
 import type { InboxStore, Message } from '../inbox.js'
 import type { Bank } from '../payments/engine.js'
 import { dateTallinn } from '../time.js'
@@ -30,7 +30,7 @@ export class RtfError extends Error {
   constructor(readonly status: 400 | 404 | 409, message: string) { super(message) }
 }
 
-export interface RtfDeps { directory: Directory; inbox: InboxStore; clock: Clock; bank: Bank; store: AgencyStore }
+export interface RtfDeps { directory: DirectoryStore; inbox: InboxStore; clock: Clock; bank: Bank; store: AgencyStore }
 
 const pad = (s: string, n: number) => s.slice(0, n).padEnd(n, ' ')
 const isGzip = (b: Buffer) => b.length >= 2 && b[0] === 0x1f && b[1] === 0x8b
@@ -54,7 +54,7 @@ export class RtfService {
   /** Who receives a scheme's files: the agents that have it in their set-up. */
   async recipients(scheme: RtfScheme): Promise<Customer[]> {
     const setups = await this.deps.store.setups()
-    return this.deps.directory.all().filter((c) => { const s = setups.get(agentKey(c)); return s?.agreement && s.rtf?.includes(scheme) })
+    return (await this.deps.directory.all()).filter((c) => { const s = setups.get(agentKey(c)); return s?.agreement && s.rtf?.includes(scheme) })
   }
 
   /**
@@ -64,9 +64,9 @@ export class RtfService {
   async deliver(o: { scheme: RtfScheme; content?: Buffer; customer?: CustomerKey }): Promise<Message[]> {
     let to = await this.recipients(o.scheme)
     if (o.customer) {
-      const c = this.deps.directory.get(o.customer)
+      const c = await this.deps.directory.get(o.customer)
       if (!c) throw new RtfError(404, `no customer ${o.customer.country}:${o.customer.code}`)
-      if (!to.includes(c)) throw new RtfError(409, `customer ${c.country}:${c.code} does not receive ${o.scheme} RTFs (agency.rtf)`)
+      if (!to.some((x) => keyOf(x) === keyOf(c))) throw new RtfError(409, `customer ${c.country}:${c.code} does not receive ${o.scheme} RTFs (agency.rtf)`)
       to = [c]
     }
     let file = o.content

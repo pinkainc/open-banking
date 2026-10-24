@@ -3,7 +3,7 @@
 // and rails are interfaces; the defaults are in memory and the simulator.
 import { DEFAULT_BOUNDS, type Bounds } from './bounded.js'
 import { systemClock, type Clock } from './clock.js'
-import { Directory, type CustomerInput } from './directory.js'
+import { keyOf, MemoryDirectory, type CustomerInput, type DirectoryStore } from './directory.js'
 import { MemoryInbox, type InboxStore } from './inbox.js'
 import { RequestLog } from './requests.js'
 import { MemoryLedger, toMinor, type Ledger } from './ledger.js'
@@ -73,6 +73,8 @@ export interface EmulatorOptions {
    * InstrId sets, parked payments, in-flight limit amounts; default in memory, pgKeyed (pg/keyed.ts) in Postgres.
    */
   keyed?: (clock: Clock) => KeyedFactory
+  /** Customers and their accounts (decision 970); default in memory, PgDirectory (pg/directory.ts) in Postgres. */
+  directory?: (clock: Clock) => DirectoryStore
   memory?: { tombstones?: Partial<Bounds>; msgIds?: Partial<Bounds>; processed?: Partial<Bounds>; requests?: Partial<Bounds>; incoming?: Partial<Bounds>; webhookEvents?: Partial<Bounds>; bacs?: Partial<typeof BACS_BOUNDS>; agency?: Partial<Bounds> }
 }
 
@@ -81,7 +83,7 @@ export const DEFAULT_BANK: Bank = { bic: 'LHVBEE22', name: 'open-banking emulato
 export const FUNDING = '@sim:funding'
 
 export class Emulator {
-  readonly directory = new Directory()
+  readonly directory: DirectoryStore
   readonly clock: Clock
   readonly ledger: Ledger
   readonly rails: Rails
@@ -111,6 +113,7 @@ export class Emulator {
 
   constructor(opts: EmulatorOptions & { bank?: Partial<Bank> } = {}) {
     this.clock = opts.clock ?? systemClock
+    this.directory = opts.directory?.(this.clock) ?? new MemoryDirectory(this.clock)
     this.ledger = typeof opts.ledger === 'function' ? opts.ledger(this.clock) : opts.ledger ?? new MemoryLedger()
     this.rails = opts.rails ?? new SimulatorRails()
     this.journal = opts.journal?.() ?? new MemoryJournal()
@@ -168,23 +171,27 @@ export class Emulator {
   static async fromSeed(seed: Seed, opts: EmulatorOptions = {}): Promise<Emulator> {
     const e = new Emulator({ ...opts, bank: seed.bank })
     // A persistent ledger (PgLedger) already holds the seed's money after a restart (decision 914).
-    for (const c of seed.customers) await e.addCustomer(c, { fundOnce: true })
+    // A customer the store held before this start is kept as stored (decision 972); a key
+    // the seed lists twice is replaced by its later entry, as before.
+    const stored = new Set<string>()
+    for (const c of seed.customers) if (await e.directory.get(c)) stored.add(keyOf({ code: c.code, country: c.country.toUpperCase() }))
+    for (const c of seed.customers) await e.addCustomer(c, { fundOnce: true, keepStored: stored.has(keyOf({ code: c.code, country: c.country.toUpperCase() })) })
     return e
   }
 
-  /** fundOnce: seed balances only for account currencies the ledger has no balance in yet. */
-  async addCustomer(c: CustomerInput, o: { fundOnce?: boolean } = {}) {
+  /**
+   * fundOnce: seed balances only for account currencies the ledger has no balance in yet.
+   * keepStored: a customer already in the directory stays as stored (decision 972).
+   */
+  async addCustomer(c: CustomerInput, o: { fundOnce?: boolean; keepStored?: boolean } = {}) {
     if (c.limits !== undefined) {
       for (const [k, v] of Object.entries(c.limits)) {
         if (k !== 'daily' && k !== 'monthly' && k !== 'instant') throw new Error(`unknown limit ${k}`)
         toMinor(v as string)
       }
     }
-    for (const a of c.accounts ?? []) {
-      if (typeof a === 'string') this.accounts.register(a)
-      else this.accounts.register(a.iban, { opened: a.opened, nickname: a.nickname, closed: a.closed })
-    }
-    const customer = this.directory.add(c)
+    // A persistent directory keeps a stored customer as it is over the seed's (decision 972).
+    const customer = await this.directory.add(c, { ifAbsent: o.keepStored })
     // The set-up lives in the agency store; a persistent one keeps what /_sim/agency changed
     // over the seed's after a restart (fundOnce, decision 941).
     if (c.agency !== undefined || !o.fundOnce) {
@@ -194,7 +201,8 @@ export class Emulator {
     // A persistent store keeps limits /_sim/reports changed over the seed's after a restart (decision 962).
     if (c.limits) await this.reports.configure(customer, { limits: { ...c.limits } }, { ifAbsent: o.fundOnce })
     for (const a of c.accounts ?? []) {
-      if (typeof a === 'string') continue
+      // A stored customer the seed lists more accounts for keeps its own (decision 972).
+      if (typeof a === 'string' || !customer.accounts.includes(normalizeIban(a.iban))) continue
       if (a.viban) this.viban.registry.agreement(a.iban)
       if (!a.balances) continue
       const held = o.fundOnce ? await this.ledger.balances(normalizeIban(a.iban)) : {}
@@ -209,7 +217,7 @@ export class Emulator {
    */
   async fund(iban: string, amount: string, currency: string) {
     const n = normalizeIban(iban)
-    const owner = this.directory.ownerOf(n)
+    const owner = await this.directory.ownerOf(n)
     if (!owner) throw new Error(`no account ${n}`)
     const ref = servicerRef()
     const minor = toMinor(amount)

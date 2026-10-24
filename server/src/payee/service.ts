@@ -9,7 +9,7 @@
 import type { AgencyStore } from '../agency/store.js'
 import { BoundedMap, type Bounds } from '../bounded.js'
 import type { Clock } from '../clock.js'
-import type { CustomerKey, Directory } from '../directory.js'
+import type { CustomerKey, DirectoryStore } from '../directory.js'
 import { errorsXml } from '../errors.js'
 import { ibanChecksumOk, ibanCountry, isSepaCountry, normalizeIban } from '../iban.js'
 import type { InboxStore } from '../inbox.js'
@@ -83,7 +83,7 @@ interface Holder { name: string; category: Category }
 interface Found { holder?: Holder; answer?: string }
 
 export interface PayeeDeps {
-  directory: Directory; viban: VibanRegistry; inbox: InboxStore; clock: Clock
+  directory: DirectoryStore; viban: VibanRegistry; inbox: InboxStore; clock: Clock
   /** Synchronised agency accounts: LHV answers for them too (decision 836). */
   agency?: () => AgencyStore | undefined
 }
@@ -112,7 +112,7 @@ export class PayeeService {
 
   /** The bank's own holder of an IBAN: a customer's account or an ACTIVE, named VIBAN. */
   async #ownHolder(iban: string): Promise<Holder | undefined> {
-    const owner = this.deps.directory.ownerOf(iban)
+    const owner = await this.deps.directory.ownerOf(iban)
     if (owner) return { name: owner.name, category: 'BUSINESS' }
     const v = this.deps.viban.get(iban)
     const name = v?.user?.person?.Name ?? v?.user?.company?.Name
@@ -135,7 +135,7 @@ export class PayeeService {
     let own = iban ? await this.#ownHolder(iban) : undefined
     if (!own && bban && !iban) {
       const match = (i: string) => gbBban(i) === bban
-      const acct = this.deps.directory.all().flatMap((c) => c.accounts).find(match) ?? this.deps.viban.all().map((v) => v.iban).find(match)
+      const acct = (await this.deps.directory.all()).flatMap((c) => c.accounts).find(match) ?? this.deps.viban.all().map((v) => v.iban).find(match)
       if (acct) own = await this.#ownHolder(acct)
       else own = await this.#agencyHolder(bban)
     }

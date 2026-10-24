@@ -20,9 +20,9 @@ async function agent(emulator: Emulator, c: Caller) {
   return c.customer
 }
 
-export function registerAgency(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Caller, flavour: Flavour, hostBank: string) {
+export function registerAgency(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Promise<Caller>, flavour: Flavour, hostBank: string) {
   app.post('/agent/account/synchronize', async (req, reply) => {
-    const c = caller(req)
+    const c = await caller(req)
     const a = await agent(emulator, c)
     const id = requestId()
     // BankCodes only count on the UK host, and not for a request handed to LHV EE (decision 804).
@@ -33,7 +33,7 @@ export function registerAgency(app: FastifyInstance, emulator: Emulator, caller:
   if (flavour !== 'UK') return
   jsonTextScope(app, (scope) => {
     scope.post('/v2/agent/account/synchronize', async (req, reply) => {
-      const c = caller(req)
+      const c = await caller(req)
       const a = await agent(emulator, c)
       const id = requestId()
       await emulator.agency.sync.syncJson(req.body, a, id)
@@ -62,9 +62,9 @@ export function agencySimRoutes(emulator: Emulator, flavour: Flavour) {
     if (typeof v !== 'string' || !v.trim()) throw bad(`${name} must be a non-empty string`)
     return v.trim()
   }
-  const customer = (req: FastifyRequest) => {
+  const customer = async (req: FastifyRequest) => {
     const p = req.params as { country: string; code: string }
-    const c = emulator.directory.get({ code: p.code, country: p.country })
+    const c = await emulator.directory.get({ code: p.code, country: p.country })
     if (!c) throw new ConnectError(404, 'NOT_FOUND', `no customer ${p.country.toUpperCase()}:${p.code}`)
     return c
   }
@@ -74,9 +74,9 @@ export function agencySimRoutes(emulator: Emulator, flavour: Flavour) {
 
   return async (app: FastifyInstance) => {
     // The account manager's set-up of a customer's agreement (replaces it; {} removes it).
-    app.get('/agents/:country/:code', async (req) => ({ agency: (await emulator.agency.accounts.setup(customer(req))) ?? null }))
+    app.get('/agents/:country/:code', async (req) => ({ agency: (await emulator.agency.accounts.setup(await customer(req))) ?? null }))
     app.put('/agents/:country/:code', async (req) => {
-      const c = customer(req)
+      const c = await customer(req)
       const b = body(req)
       let setup: AgencySetup | undefined
       try {

@@ -27,6 +27,8 @@ import { PgRailsPending } from '../src/pg/rails-pending.js'
 import { PgJournal } from '../src/pg/journal.js'
 import { pgKeyed } from '../src/pg/keyed.js'
 import { memoryKeyed } from '../src/keyed.js'
+import { MemoryDirectory } from '../src/directory.js'
+import { PgDirectory } from '../src/pg/directory.js'
 import { OpenLedgerLedger } from '../src/ledgers/open-ledger.js'
 import { openLedgerUrl } from './open-ledger-server.js'
 import { XsdValidator } from '../src/payments/xsd.js'
@@ -90,7 +92,7 @@ if (STORE !== 'memory' && STORE !== 'postgres' && STORE !== 'deferred') throw ne
 if (STORE === 'postgres' && !process.env.DATABASE_URL) throw new Error('OPEN_BANKING_STORE=postgres needs DATABASE_URL')
 /**
  * Emulator options with every store in Postgres (inbox, ledger, agency, acquiring, rails
- * pending, journal, keyed state), one fresh
+ * pending, journal, keyed state, directory), one fresh
  * namespace for all (or the one given: a restarted emulator on the same state).
  */
 export async function postgresStore(namespace: string = randomUUID()): Promise<EmulatorOptions> {
@@ -103,6 +105,7 @@ export async function postgresStore(namespace: string = randomUUID()): Promise<E
     railsPending: () => new PgRailsPending(db, { namespace }),
     journal: () => new PgJournal(db, { namespace }),
     keyed: (clock) => pgKeyed(db, clock, namespace),
+    directory: (clock) => new PgDirectory(db, clock, { namespace }),
   }
 }
 /**
@@ -128,6 +131,7 @@ export const deferredStore = (): EmulatorOptions => ({
   railsPending: () => deferred(new MemoryRailsPending()),
   journal: () => deferred(new MemoryJournal()),
   keyed: (clock) => (kind, bounds) => deferred(memoryKeyed(clock)(kind, bounds)),
+  directory: (clock) => deferred(new MemoryDirectory(clock)),
 })
 /** The options of the selected store (STORE), for every emulator a test builds. */
 export const storeOptions = async (): Promise<EmulatorOptions> => (STORE === 'postgres' ? postgresStore() : STORE === 'deferred' ? deferredStore() : {})

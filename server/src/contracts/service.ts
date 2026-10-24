@@ -10,7 +10,7 @@
 // emulator started; they are made the first time a provider's contracts are looked at.
 import { randomUUID } from 'node:crypto'
 import type { Clock } from '../clock.js'
-import { keyOf, type Customer, type CustomerKey, type Directory } from '../directory.js'
+import { keyOf, type Customer, type CustomerKey, type DirectoryStore } from '../directory.js'
 import { dateTallinn } from '../time.js'
 import { bdoc } from './bdoc.js'
 
@@ -42,7 +42,7 @@ export class Contracts {
   readonly all: Contract[] = []
   readonly #startedAt: Date
 
-  constructor(private directory: Directory, private clock: Clock) { this.#startedAt = clock.now() }
+  constructor(private directory: DirectoryStore, private clock: Clock) { this.#startedAt = clock.now() }
 
   /** ACTIVE contracts for the provider's seeded connections that have none yet. */
   #seed(provider: Customer) {
@@ -69,8 +69,8 @@ export class Contracts {
   }
 
   /** POST /contracts. Throws ContractError when the contract cannot be created. */
-  create(provider: Customer, customer: CustomerKey): { contract: Contract; container: string } {
-    const target = this.directory.get(customer)
+  async create(provider: Customer, customer: CustomerKey): Promise<{ contract: Contract; container: string }> {
+    const target = await this.directory.get(customer)
     if (!target) throw new ContractError(`no customer ${keyOf(customer)}`)
     if (keyOf(target) === keyOf(provider)) throw new ContractError('a service provider cannot contract with itself')
     if (this.of(provider).some((c) => keyOf(c.customer) === keyOf(target) && c.status === 'PENDING')) {
@@ -94,7 +94,7 @@ export class Contracts {
   }
 
   /** LHV Client Services activate a pending contract; an earlier active one is closed. */
-  activate(id: string): Contract {
+  async activate(id: string): Promise<Contract> {
     const c = this.get(id)
     if (!c) throw new ContractError(`no contract ${id}`)
     if (c.status !== 'PENDING') throw new ContractError(`contract ${id} is ${c.status}`)
@@ -105,21 +105,21 @@ export class Contracts {
       }
     }
     c.status = 'ACTIVE'; c.changedAt = now; c.startDate = dateTallinn(now)
-    const provider = this.directory.get(c.provider)!
-    provider.connected ??= []
-    if (!provider.connected.some((k) => keyOf(k) === keyOf(c.customer))) provider.connected.push({ ...c.customer })
+    const provider = (await this.directory.get(c.provider))!
+    const connected = provider.connected ?? []
+    if (!connected.some((k) => keyOf(k) === keyOf(c.customer))) await this.directory.update(provider, { connected: [...connected, { ...c.customer }] })
     return c
   }
 
   /** Ends a contract; without another active one the provider can no longer act for the customer. */
-  close(id: string): Contract {
+  async close(id: string): Promise<Contract> {
     const c = this.get(id)
     if (!c) throw new ContractError(`no contract ${id}`)
     if (c.status === 'CLOSED') throw new ContractError(`contract ${id} is CLOSED`)
     c.status = 'CLOSED'; c.changedAt = this.clock.now()
     const stillActive = this.all.some((o) => o.status === 'ACTIVE' && keyOf(o.provider) === keyOf(c.provider) && keyOf(o.customer) === keyOf(c.customer))
-    const provider = this.directory.get(c.provider)
-    if (!stillActive && provider?.connected) provider.connected = provider.connected.filter((k) => keyOf(k) !== keyOf(c.customer))
+    const provider = await this.directory.get(c.provider)
+    if (!stillActive && provider?.connected) await this.directory.update(provider, { connected: provider.connected.filter((k) => keyOf(k) !== keyOf(c.customer)) })
     return c
   }
 
@@ -128,7 +128,7 @@ export class Contracts {
    * inclusive Tallinn dates. Closed contracts appear only with a changedAt filter, and
    * then only for customers without an active contract (P 14).
    */
-  list(provider: Customer, q: { createdAtMin?: string; createdAtMax?: string; changedAtMin?: string; changedAtMax?: string }) {
+  async list(provider: Customer, q: { createdAtMin?: string; createdAtMax?: string; changedAtMin?: string; changedAtMax?: string }) {
     const within = (d: Date, min?: string, max?: string) => {
       const day = dateTallinn(d)
       return (!min || day >= min) && (!max || day <= max)
@@ -147,7 +147,7 @@ export class Contracts {
     }
     const customers = []
     for (const [, contracts] of [...byCustomer].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
-      const cust = this.directory.get(contracts[0].customer)
+      const cust = await this.directory.get(contracts[0].customer)
       if (!cust) continue
       contracts.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || this.all.indexOf(b) - this.all.indexOf(a))
       customers.push({

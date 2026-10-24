@@ -25,10 +25,10 @@ export function ukJsonErrors(err: any, _req: FastifyRequest, reply: FastifyReply
   return reply.code(status).type('application/json').send(JSON.stringify(text))
 }
 
-export function registerAccounts(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Caller) {
-  const customerOf = (req: FastifyRequest) => {
-    const c = caller(req)
-    const customer = emulator.directory.get(c.customer)
+export function registerAccounts(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Promise<Caller>) {
+  const customerOf = async (req: FastifyRequest) => {
+    const c = await caller(req)
+    const customer = await emulator.directory.get(c.customer)
     if (!customer) throw new ConnectError(403, 'FORBIDDEN', "User doesn't exist")
     return customer
   }
@@ -36,14 +36,14 @@ export function registerAccounts(app: FastifyInstance, emulator: Emulator, calle
   app.register(async (scope) => {
     scope.setErrorHandler(ukJsonErrors)
     scope.get('/accounts/list', async (req, reply) =>
-      json(reply, await emulator.accounts.list(customerOf(req), req.query as Record<string, unknown>)))
+      json(reply, await emulator.accounts.list(await customerOf(req), req.query as Record<string, unknown>)))
     scope.get('/accounts/:accountNumber/transactions/:reference', async (req, reply) => {
       const p = req.params as { accountNumber: string; reference: string }
-      return json(reply, await emulator.accounts.transaction(customerOf(req), p.accountNumber, p.reference))
+      return json(reply, await emulator.accounts.transaction(await customerOf(req), p.accountNumber, p.reference))
     })
     scope.get('/accounts/:accountNumber/payments', async (req, reply) => {
       const p = req.params as { accountNumber: string }
-      return json(reply, emulator.accounts.payments(customerOf(req), p.accountNumber, req.query as Record<string, unknown>))
+      return json(reply, emulator.accounts.payments(await customerOf(req), p.accountNumber, req.query as Record<string, unknown>))
     })
   })
 }
@@ -64,7 +64,7 @@ export function accountsSimRoutes(emulator: Emulator) {
       }
       if (!b.iban) throw bad('iban is required')
       const iban = normalizeIban(b.iban)
-      if (!emulator.directory.ownerOf(iban) && !emulator.viban.registry.get(iban)) throw new ConnectError(404, 'NOT_FOUND', `no account ${iban}`)
+      if (!await emulator.directory.ownerOf(iban) && !emulator.viban.registry.get(iban)) throw new ConnectError(404, 'NOT_FOUND', `no account ${iban}`)
       let amount: bigint
       try { amount = toMinor(String(b.amount ?? '')) } catch { throw bad('amount must be a positive number with at most two decimals') }
       if (amount <= 0n) throw bad('amount must be positive')

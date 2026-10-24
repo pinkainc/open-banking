@@ -102,7 +102,7 @@ describe('FX technical errors: trade offer', () => {
 
   test('Incorrect Account: unknown, another customer\'s, a VIBAN, missing (documented text)', async () => {
     const reg = (ctx.emulator as any).viban.registry
-    const viban = reg.generate(C1.iban)
+    const viban = await reg.generate(C1.iban)
     reg.add({ iban: viban, master: C1.iban, status: 'ACTIVE', owner: { code: C1.code, country: 'EE' } })
     const { accountIBAN: _, ...noIban } = deal('B0')
     for (const [ref, iban] of [['B1', 'EE017700770000000000'], ['B2', C2.iban], ['B3', viban], ['B4', 'not an iban']]) {

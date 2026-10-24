@@ -11,9 +11,9 @@ import { fromMinor } from '../ledger.js'
 import { accepted } from '../requests.js'
 import { ACQ_REPORT, type CardTransaction } from './service.js'
 
-export function registerAcquiring(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Caller) {
+export function registerAcquiring(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Promise<Caller>) {
   app.post('/acq/merchant-report', async (req, reply) => {
-    const c = caller(req)
+    const c = await caller(req)
     const id = requestId()
     await emulator.acquiring.report(typeof req.body === 'string' ? req.body : '', c.customer, id)
     return accepted(emulator.requests, req, reply, c, id, ACQ_REPORT)
@@ -35,17 +35,17 @@ export function acquiringSimRoutes(emulator: Emulator) {
     if (typeof b !== 'object' || Array.isArray(b)) throw bad('the body must be a JSON object')
     return b as Record<string, any>
   }
-  const customer = (req: FastifyRequest) => {
+  const customer = async (req: FastifyRequest) => {
     const p = req.params as { country: string; code: string }
-    const c = emulator.directory.get({ code: p.code, country: p.country })
+    const c = await emulator.directory.get({ code: p.code, country: p.country })
     if (!c) throw new ConnectError(404, 'NOT_FOUND', `no customer ${p.country.toUpperCase()}:${p.code}`)
     return c
   }
   return async (app: FastifyInstance) => {
-    app.get('/merchants/:country/:code', async (req) => ({ merchant: (await emulator.acquiring.merchant(customer(req))) ?? null }))
+    app.get('/merchants/:country/:code', async (req) => ({ merchant: (await emulator.acquiring.merchant(await customer(req))) ?? null }))
     // {userCode?, accounts?} replaces the set-up; {} removes it.
     app.put('/merchants/:country/:code', async (req) => {
-      const c = customer(req)
+      const c = await customer(req)
       const b = body(req)
       try {
         return { merchant: (await emulator.acquiring.setMerchant(c, Object.keys(b).length ? b : undefined)) ?? null }

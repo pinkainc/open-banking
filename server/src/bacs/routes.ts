@@ -13,11 +13,11 @@ import { BACS_TYPES, BacsRequestError, type Party } from './messages.js'
 import { BacsError, isAccountNumber, isServiceUserNumber, isSortCode, type BacsCollection, type IncomingCredit, type Mandate } from './service.js'
 
 /** POST /direct-debit/bacs-mandate-accept, -mandate-cancel, -collection-reject (UK host only, routing.ts). */
-export function registerBacs(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Caller) {
+export function registerBacs(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Promise<Caller>) {
   const svc = emulator.bacs
   const route = (path: string, what: string, type: string, handle: (xml: string, c: Caller, id: string) => Promise<void>) =>
     app.post(path, async (req, reply) => {
-      const c = caller(req)
+      const c = await caller(req)
       if (typeof req.body !== 'string' || !req.body.trim()) throw new ConnectError(400, 'BAD_REQUEST', `The request body must be a ${what} XML document`)
       const id = requestId()
       try {

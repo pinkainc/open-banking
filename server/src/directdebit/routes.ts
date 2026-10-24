@@ -15,10 +15,10 @@ import { XmlSyntaxError } from '../xml.js'
 import type { Collection } from './messages.js'
 import { DD_TYPES, DirectDebitError, type ExternalCollection } from './service.js'
 
-export function registerDirectDebit(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Caller) {
+export function registerDirectDebit(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Promise<Caller>) {
   const route = (path: string, handle: (xml: string, c: Caller, id: string) => Promise<void>, what: string, type: string) =>
     app.post(path, async (req, reply) => {
-      const c = caller(req)
+      const c = await caller(req)
       if (typeof req.body !== 'string' || !req.body.trim()) throw new ConnectError(400, 'BAD_REQUEST', `The request body must be a ${what} XML document`)
       const id = requestId()
       try {

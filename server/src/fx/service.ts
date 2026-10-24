@@ -16,7 +16,7 @@
 // every minute, tests and /_sim/fx/settle call it directly).
 import { randomUUID } from 'node:crypto'
 import type { Clock } from '../clock.js'
-import { keyOf, type Customer, type Directory } from '../directory.js'
+import { keyOf, type Customer, type DirectoryStore } from '../directory.js'
 import { normalizeIban } from '../iban.js'
 import { servicerRef } from '../ids.js'
 import type { InboxStore } from '../inbox.js'
@@ -102,7 +102,7 @@ let pmtInfSeq = 10_357_000
 const nextPmtInfId = () => ++pmtInfSeq
 
 export interface FxDeps {
-  directory: Directory
+  directory: DirectoryStore
   ledger: Ledger
   inbox: InboxStore
   clock: Clock

@@ -7,7 +7,7 @@
 import type { FastifyRequest } from 'fastify'
 import { X509Certificate } from 'node:crypto'
 import type { TLSSocket } from 'node:tls'
-import { keyOf, type Customer, type Directory } from './directory.js'
+import { keyOf, type Customer, type DirectoryStore } from './directory.js'
 import { forbidden } from './errors.js'
 
 /** What the transport tells us about the client certificate. */
@@ -114,7 +114,7 @@ const header = (req: FastifyRequest, name: string) => {
   return Array.isArray(v) ? v[0] : v
 }
 
-export function resolveCaller(req: FastifyRequest, directory: Directory, identify: Identify, now: Date = new Date()): Caller {
+export async function resolveCaller(req: FastifyRequest, directory: DirectoryStore, identify: Identify, now: Date = new Date()): Promise<Caller> {
   const cert = identify(req)
   if (!cert) throw forbidden('User authentication certificate is missing')
   let code: string
@@ -125,7 +125,7 @@ export function resolveCaller(req: FastifyRequest, directory: Directory, identif
     if (!cert.commonName) throw forbidden('Invalid certificate subject common name')
     code = cert.commonName
   }
-  const matches = directory.byCode(code)
+  const matches = await directory.byCode(code)
   if (matches.length === 0) throw forbidden("User doesn't exist")
   // A code registered in several countries: prefer the one holding a provider contract.
   const user = matches.find((c) => c.connected) ?? matches[0]
@@ -146,7 +146,7 @@ export function resolveCaller(req: FastifyRequest, directory: Directory, identif
       const visible = new Set([keyOf(user), ...(own ? [] : user.connected.map(keyOf))])
       return { user, customer: user, visible, cert }
     }
-    const customer = directory.get(wanted)
+    const customer = await directory.get(wanted)
     if (!customer) throw forbidden("User doesn't exist")
     if (!user.connected.some((k) => keyOf(k) === keyOf(customer))) throw forbidden("User doesn't have valid contract")
     return { user, customer, visible: new Set([keyOf(customer)]), cert }

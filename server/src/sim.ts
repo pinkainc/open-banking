@@ -2,7 +2,7 @@
 // up customers and money, injects incoming payments and steers the simulated rails.
 // Bodies and answers are JSON; amounts are decimal strings ("12.50").
 import type { FastifyInstance } from 'fastify'
-import type { Customer, CustomerInput } from './directory.js'
+import type { Customer, CustomerInput, CustomerPatch } from './directory.js'
 import { ConnectError } from './errors.js'
 import type { Emulator } from './emulator.js'
 import { fromMinor, toMinor } from './ledger.js'
@@ -32,7 +32,7 @@ export function simRoutes(emulator: Emulator) {
 
   return async (app: FastifyInstance) => {
     app.get('/customers', async () => ({
-      customers: await Promise.all(emulator.directory.all().map(async (c) => ({
+      customers: await Promise.all((await emulator.directory.all()).map(async (c) => ({
         ...customerSettings(c), name: c.name, camt054: c.camt054,
         ...(c.connected ? { connected: c.connected } : {}),
         accounts: await Promise.all(c.accounts.map(async (iban) => ({ iban, balances: await balances(iban) }))),
@@ -44,7 +44,7 @@ export function simRoutes(emulator: Emulator) {
       if (!b || typeof b.code !== 'string' || typeof b.country !== 'string' || typeof b.name !== 'string') {
         throw bad('code, country and name are required')
       }
-      if (emulator.directory.get(b)) throw new ConnectError(409, 'CONFLICT', 'customer exists')
+      if (await emulator.directory.get(b)) throw new ConnectError(409, 'CONFLICT', 'customer exists')
       try {
         const c = await emulator.addCustomer(b)
         return reply.code(201).send({ code: c.code, country: c.country, accounts: c.accounts })
@@ -58,7 +58,7 @@ export function simRoutes(emulator: Emulator) {
     })
     app.patch('/customers/:country/:code', async (req) => {
       const { country, code } = req.params as { country: string; code: string }
-      const c = emulator.directory.get({ code, country })
+      const c = await emulator.directory.get({ code, country })
       if (!c) throw new ConnectError(404, 'NOT_FOUND', `no customer ${country}/${code}`)
       const b = (req.body ?? {}) as { payments?: unknown; directDebit?: Record<string, unknown> }
       if (b.payments !== undefined && b.payments !== 'DIRECT' && b.payments !== 'PENDING') throw bad('payments must be DIRECT or PENDING')
@@ -66,9 +66,11 @@ export function simRoutes(emulator: Emulator) {
       if (dd !== undefined && (typeof dd !== 'object' || dd === null || Object.entries(dd).some(([k, v]) => (k !== 'agreement' && k !== 'debtorNotification') || typeof v !== 'boolean'))) {
         throw bad('directDebit takes the booleans agreement and debtorNotification')
       }
-      if (b.payments !== undefined) c.payments = b.payments as 'DIRECT' | 'PENDING'
-      if (dd !== undefined) c.directDebit = { ...c.directDebit, ...(dd as { agreement?: boolean; debtorNotification?: boolean }) }
-      return customerSettings(c)
+      const patch: CustomerPatch = {}
+      if (b.payments !== undefined) patch.payments = b.payments as 'DIRECT' | 'PENDING'
+      if (dd !== undefined) patch.directDebit = { ...c.directDebit, ...(dd as { agreement?: boolean; debtorNotification?: boolean }) }
+      // Stored at once (decision 970): a PENDING switch outlives a restart on a persistent directory.
+      return customerSettings((await emulator.directory.update(c, patch)) ?? c)
     })
 
     // Payments waiting in the internet bank (SCA) or in the bank's manual review.
@@ -86,7 +88,7 @@ export function simRoutes(emulator: Emulator) {
 
     app.get('/accounts/:iban', async (req) => {
       const iban = normalizeIban((req.params as { iban: string }).iban)
-      const owner = emulator.directory.ownerOf(iban)
+      const owner = await emulator.directory.ownerOf(iban)
       if (!owner) throw new ConnectError(404, 'NOT_FOUND', `no account ${iban}`)
       return { iban, owner: { code: owner.code, country: owner.country, name: owner.name }, balances: await balances(iban) }
     })
@@ -95,7 +97,7 @@ export function simRoutes(emulator: Emulator) {
       const iban = normalizeIban((req.params as { iban: string }).iban)
       const b = (req.body ?? {}) as { amount?: string; currency?: string }
       amount(b.amount)
-      if (!emulator.directory.ownerOf(iban)) throw new ConnectError(404, 'NOT_FOUND', `no account ${iban}`)
+      if (!await emulator.directory.ownerOf(iban)) throw new ConnectError(404, 'NOT_FOUND', `no account ${iban}`)
       await emulator.fund(iban, b.amount!, b.currency ?? 'EUR')
       return { iban, balances: await balances(iban) }
     })
@@ -111,8 +113,8 @@ export function simRoutes(emulator: Emulator) {
       // `iban` may also be an agency account: an IBAN or a sort code and account number (decision 835).
       const iban = normalizeIban(b.iban)
       const viban = emulator.viban.registry.get(iban)
-      const agency = !emulator.directory.ownerOf(iban) && !viban ? (await emulator.agency.accounts.find(iban))[0] : undefined
-      if (!emulator.directory.ownerOf(iban) && !viban && !agency) throw new ConnectError(404, 'NOT_FOUND', `no account ${iban}`)
+      const agency = !await emulator.directory.ownerOf(iban) && !viban ? (await emulator.agency.accounts.find(iban))[0] : undefined
+      if (!await emulator.directory.ownerOf(iban) && !viban && !agency) throw new ConnectError(404, 'NOT_FOUND', `no account ${iban}`)
       const scheme = b.scheme ?? 'SEPA'
       if (!['SEPA', 'INST', 'SWIFT', 'TARGET2', 'FAST'].includes(scheme)) throw bad(`unknown scheme ${scheme}`)
       const r = await emulator.engine.incoming({
@@ -127,9 +129,9 @@ export function simRoutes(emulator: Emulator) {
     })
 
     // Account reports: automatic end-of-day statement and payment limits per customer.
-    const reportCustomer = (req: { params: unknown }) => {
+    const reportCustomer = async (req: { params: unknown }) => {
       const { country, code } = req.params as { country: string; code: string }
-      const c = emulator.directory.get({ code, country: country.toUpperCase() })
+      const c = await emulator.directory.get({ code, country: country.toUpperCase() })
       if (!c) throw new ConnectError(404, 'NOT_FOUND', `no customer ${country}/${code}`)
       return c
     }
@@ -137,9 +139,9 @@ export function simRoutes(emulator: Emulator) {
       const s = await emulator.reports.settings(c)
       return { code: c.code, country: c.country, automaticStatement: s.automaticStatement ?? null, limits: { ...DEFAULT_LIMITS, ...s.limits } }
     }
-    app.get('/reports/:country/:code', async (req) => reportView(reportCustomer(req)))
+    app.get('/reports/:country/:code', async (req) => reportView(await reportCustomer(req)))
     app.put('/reports/:country/:code', async (req) => {
-      const c = reportCustomer(req)
+      const c = await reportCustomer(req)
       const b = (req.body ?? {}) as { automaticStatement?: unknown; limits?: Record<string, unknown> }
       const s: ReportSettings = {}
       if ('automaticStatement' in b) {

@@ -18,7 +18,7 @@ import { DEFAULT_BOUNDS, type Bounds } from '../bounded.js'
 import { memoryKeyed, type KeyedFactory, type KeyedStore } from '../keyed.js'
 import type { Clock } from '../clock.js'
 import { DAY_MS } from '../clock.js'
-import { keyOf, type Customer, type Directory } from '../directory.js'
+import { keyOf, type Customer, type DirectoryStore } from '../directory.js'
 import { ibanChecksumOk, normalizeIban } from '../iban.js'
 import { notificationMsgId, servicerRef } from '../ids.js'
 import type { InboxStore } from '../inbox.js'
@@ -96,7 +96,7 @@ export const REASONS: Record<string, string> = {
 export interface DirectDebitDeps {
   /** How many pain.008 / pain.007 MsgIds are remembered (decision 504). */
   msgIds?: Bounds
-  directory: Directory
+  directory: DirectoryStore
   ledger: Ledger
   rails: Rails
   inbox: InboxStore
@@ -168,7 +168,8 @@ export class DirectDebitService {
     const report: DdReport = { originalMsgId: file.msgId!, originalMsgName: PAIN008, blocks: [] }
     const accepted: Collection[] = []
     for (const b of file.blocks) {
-      const txs = b.txs.map((t) => this.#collection(file, b, t, customer, requestId))
+      const txs: DdStatus[] = []
+      for (const t of b.txs) txs.push(await this.#collection(file, b, t, customer, requestId))
       for (const s of txs) if (s.status === 'ACCP') accepted.push(s.collection!)
       report.blocks.push({ pmtInfId: b.pmtInfId!, status: aggregate(txs.map((s) => s.status)), txs })
     }
@@ -208,7 +209,7 @@ export class DirectDebitService {
       }
       if (!b.creditorName?.trim()) return E.creditorName
       const iban = normalizeIban(b.creditorIban!)
-      const owner = this.d.directory.ownerOf(iban)
+      const owner = await this.d.directory.ownerOf(iban)
       if (!owner) return E.creditorAccount(iban)
       if (keyOf(owner) !== keyOf(customer)) return E.noRights(iban)
       // Sending collections needs a Direct Debit agreement with the bank (decision 527).
@@ -218,9 +219,9 @@ export class DirectDebitService {
   }
 
   /** One collection of an accepted file: ACCP with the record, or RJCT with the reason. */
-  #collection(f: CollectionFile, b: DdBlock, t: DdTx, customer: Customer, requestId: string): DdStatus {
+  async #collection(f: CollectionFile, b: DdBlock, t: DdTx, customer: Customer, requestId: string): Promise<DdStatus> {
     const debtorIban = normalizeIban(t.debtorIban!)
-    const debtorCustomer = this.d.directory.ownerOf(debtorIban)
+    const debtorCustomer = await this.d.directory.ownerOf(debtorIban)
     const c: Collection = {
       id: servicerRef(), msgId: f.msgId!, pmtInfId: b.pmtInfId!, endToEndId: t.endToEndId!, instrId: t.instrId,
       amount: toMinor(t.amount!), currency: t.currency!, dueDate: b.dueDate!, settlementDate: settlementDate(b.dueDate!),
@@ -392,7 +393,7 @@ export class DirectDebitService {
     await this.tick()
     const debtorIban = normalizeIban(x.debtorIban)
     if (this.d.virtual?.resolve(debtorIban)) throw new DirectDebitError(409, 'collections from a virtual IBAN are refused (AG01)')
-    const owner = this.d.directory.ownerOf(debtorIban)
+    const owner = await this.d.directory.ownerOf(debtorIban)
     if (!owner) throw new DirectDebitError(404, `no account ${debtorIban}`)
     const today = dateTallinn(this.d.clock.now())
     const due = x.dueDate ?? settlementDate(addDays(today, 1))

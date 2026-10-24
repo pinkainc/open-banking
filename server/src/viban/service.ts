@@ -11,7 +11,7 @@
 // Anything unexpected is TECHNICAL_ERROR. Whether the errors reach the client in the
 // inbox or in the HTTP response is `errorDelivery` (docs/decisions.md 200).
 import type { Clock } from '../clock.js'
-import { keyOf, type CustomerKey, type Directory } from '../directory.js'
+import { keyOf, type CustomerKey, type DirectoryStore } from '../directory.js'
 import { normalizeIban } from '../iban.js'
 import type { InboxStore } from '../inbox.js'
 import { dateTallinn } from '../time.js'
@@ -66,8 +66,8 @@ export class VibanService {
   /** The next requests answered TECHNICAL_ERROR (simulator fault injection). */
   faults = 0
 
-  constructor(private directory: Directory, private inbox: InboxStore, private clock: Clock, private opts: VibanOptions = {}) {
-    this.registry = new VibanRegistry(opts.range ?? DEFAULT_RANGE, (iban) => !!directory.ownerOf(iban))
+  constructor(private directory: DirectoryStore, private inbox: InboxStore, private clock: Clock, private opts: VibanOptions = {}) {
+    this.registry = new VibanRegistry(opts.range ?? DEFAULT_RANGE, async (iban) => !!(await directory.ownerOf(iban)))
     this.errorDelivery = opts.errors ?? 'inbox'
   }
 
@@ -90,14 +90,14 @@ export class VibanService {
       if (op === 'bulk' && !(r.amount! >= 1 && r.amount! <= BULK_MAX)) return fail(E.request)
 
       const master = normalizeIban(r.masterAccount)
-      const owner = this.registry.get(master) ? undefined : this.directory.ownerOf(master)
+      const owner = this.registry.get(master) ? undefined : await this.directory.ownerOf(master)
       if (!owner) return fail(E.account)
       if (keyOf(owner) !== keyOf(customer)) return fail(E.masterForbidden)
       if ((op === 'open' || op === 'bulk' || op === 'modify') && !this.registry.hasAgreement(master)) return fail(E.agreement)
 
-      if (op === 'open') return this.#open(r, master, owner)
+      if (op === 'open') return await this.#open(r, master, owner)
       if (op === 'bulk') {
-        const ibans = this.#bulk(r.amount!, master, owner)
+        const ibans = await this.#bulk(r.amount!, master, owner)
         return { type, body: bulkResponse(master, ibans) }
       }
       const v = this.registry.get(r.virtualIban!)
@@ -133,23 +133,23 @@ export class VibanService {
     return names.some((n) => this.screening.has(n)) ? 'ON_HOLD' : 'ACTIVE'
   }
 
-  #open(r: VibanRequest, master: string, owner: CustomerKey): Outcome {
+  async #open(r: VibanRequest, master: string, owner: CustomerKey): Promise<Outcome> {
     const type = RESPONSE_TYPE.open
     if (r.clientReference && this.registry.byClientReference(owner, r.clientReference)) return { type, errors: [E.refUnique] }
     const now = this.clock.now()
     const v = this.registry.add({
-      iban: this.registry.generate(master), master, owner: { code: owner.code, country: owner.country },
+      iban: await this.registry.generate(master), master, owner: { code: owner.code, country: owner.country },
       status: 'PENDING', clientReference: r.clientReference, user: r.user, createdAt: now,
     })
     this.registry.setStatus(v, this.#screen(r.user!), now)
     return { type, body: openResponse(v) }
   }
 
-  #bulk(amount: number, master: string, owner: CustomerKey): string[] {
+  async #bulk(amount: number, master: string, owner: CustomerKey): Promise<string[]> {
     const now = this.clock.now()
     const out: string[] = []
     for (let i = 0; i < amount; i++) {
-      out.push(this.registry.add({ iban: this.registry.generate(master), master, owner: { code: owner.code, country: owner.country }, status: 'PENDING', createdAt: now }).iban)
+      out.push(this.registry.add({ iban: await this.registry.generate(master), master, owner: { code: owner.code, country: owner.country }, status: 'PENDING', createdAt: now }).iban)
     }
     return out
   }

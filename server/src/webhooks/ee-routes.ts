@@ -25,33 +25,33 @@ function subscriptionBody(raw: unknown): { url: string; eventType: string } {
   return { url: b.url.trim(), eventType: EVENT_TYPE }
 }
 
-export function registerEeWebhooks(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Caller) {
+export function registerEeWebhooks(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Promise<Caller>) {
   const hooks = emulator.webhooksEe
   const view = (s: { url: string; subscriptionReference: string; eventType: string }) =>
     ({ url: s.url, subscriptionReference: s.subscriptionReference, eventType: s.eventType })
   const ref = (req: FastifyRequest) => (req.params as { ref: string }).ref
 
   app.post('/notifications/subscribe', async (req) => {
-    const c = caller(req)
+    const c = await caller(req)
     const b = subscriptionBody(req.body)
     return { subscriptionReference: hooks.subscribe(c.customer, b.url, b.eventType).subscriptionReference }
   })
 
   app.get('/notifications/subscriptions', async (req, reply) => {
-    const subs = hooks.list(caller(req).customer)
+    const subs = hooks.list((await caller(req)).customer)
     if (subs.length === 0) return reply.code(204).send()
     return { subscriptions: subs.map(view) }
   })
 
   app.put('/notifications/subscriptions/:ref', async (req, reply) => {
-    const c = caller(req)
+    const c = await caller(req)
     const b = subscriptionBody(req.body)
     if (!hooks.update(c.customer, ref(req), b.url)) throw notFound()
     return reply.code(204).send()
   })
 
   app.delete('/notifications/subscriptions/:ref', async (req, reply) => {
-    const c = caller(req)
+    const c = await caller(req)
     if (!hooks.remove(c.customer, ref(req))) throw notFound()
     return reply.code(200).send()
   })

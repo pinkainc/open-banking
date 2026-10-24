@@ -74,7 +74,7 @@ if (process.env.DATABASE_URL) describe('PgInbox (Postgres)', () => {
   test('onAdd listeners run after the row is stored', async () => {
     const { inbox } = await make()
     const seen: Promise<Message | undefined>[] = []
-    inbox.onAdd((m) => seen.push(inbox.get(scope(C1), m.id)))
+    inbox.onAdd((m) => { seen.push(inbox.get(scope(C1), m.id)) })
     const m = await inbox.add({ customer: C1, type: 'HEARTBEAT', body: '<h/>' })
     assert.equal(seen.length, 1)
     assert.equal((await seen[0])?.id, m.id)

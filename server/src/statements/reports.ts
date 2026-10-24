@@ -4,7 +4,7 @@
 import { DEFAULT_BOUNDS, type Bounds } from '../bounded.js'
 import { memoryKeyed, UNBOUNDED, type KeyedFactory, type KeyedStore } from '../keyed.js'
 import type { Clock } from '../clock.js'
-import { keyOf, type Customer, type CustomerKey, type Directory } from '../directory.js'
+import { keyOf, type Customer, type CustomerKey, type DirectoryStore } from '../directory.js'
 import { errorsXml } from '../errors.js'
 import type { InboxStore } from '../inbox.js'
 import { toMinor, type Ledger } from '../ledger.js'
@@ -56,7 +56,7 @@ const signed = (e: JournalEntry) => (e.direction === 'CRDT' ? e.amount : -e.amou
 export interface ReportsDeps {
   /** How many camt.060 MsgIds are remembered (decision 504). */
   msgIds?: Bounds
-  directory: Directory
+  directory: DirectoryStore
   ledger: Ledger
   journal: JournalStore
   inbox: InboxStore
@@ -110,7 +110,7 @@ export class AccountReports {
       const req = await this.#parse(kind, xml)
       const seenKey = `${keyOf(customer)}|${kind}`
       if (await this.#seen.has(`${seenKey}|${req.msgId}`)) throw new StatementError(E.duplicate)
-      const owner = this.d.directory.ownerOf(req.iban!)
+      const owner = await this.d.directory.ownerOf(req.iban!)
       if (!owner || keyOf(owner) !== keyOf(customer)) throw new StatementError(E.noAccess)
       const bodies = kind === 'statement' ? await this.#statementRequest(req, owner) : [await this.#balanceRequest(req, owner)]
       await this.#seen.set(`${seenKey}|${req.msgId}`, true)
@@ -281,7 +281,7 @@ export class AccountReports {
     if (this.#eodDone.has(date)) return 0
     this.#eodDone.add(date)
     let n = 0
-    for (const c of this.d.directory.all()) {
+    for (const c of await this.d.directory.all()) {
       const version = (await this.settings(c)).automaticStatement
       if (!version) continue
       for (const iban of c.accounts) {

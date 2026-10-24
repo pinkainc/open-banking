@@ -9,7 +9,7 @@
 // (BACS_INCOMING) and booked on day 3 (camt.054). The scheme side is the /_sim control plane.
 import { BoundedMap, type Bounds } from '../bounded.js'
 import { DAY_MS, type Clock } from '../clock.js'
-import { keyOf, type Customer, type Directory } from '../directory.js'
+import { keyOf, type Customer, type DirectoryStore } from '../directory.js'
 import { normalizeIban } from '../iban.js'
 import { notificationMsgId, servicerRef } from '../ids.js'
 import type { InboxStore } from '../inbox.js'
@@ -134,7 +134,7 @@ export interface IncomingCredit {
 }
 
 export interface BacsDeps {
-  directory: Directory
+  directory: DirectoryStore
   ledger: Ledger
   rails: Rails
   inbox: InboxStore
@@ -173,11 +173,11 @@ export class BacsService {
   collection(id: string) { return this.#collections.get(id.toUpperCase()) }
 
   /** A GB account of ours (or a VIBAN on one) as a Bacs party: sort code and account number. */
-  #own(raw: string): { iban: string; master: string; customer: Customer; party: Party } {
+  async #own(raw: string): Promise<{ iban: string; master: string; customer: Customer; party: Party }> {
     const iban = normalizeIban(raw)
     const v = this.d.virtual.resolve(iban)
     const master = v?.master ?? iban
-    const customer = this.d.directory.ownerOf(master)
+    const customer = await this.d.directory.ownerOf(master)
     if (!customer) throw new BacsError(404, `no account ${iban}`)
     const b = gbBban(iban)
     if (!b) throw new BacsError(400, `${iban} is not a UK account (GB IBAN with sort code and account number); Bacs is in GBP between UK accounts`)
@@ -188,7 +188,7 @@ export class BacsService {
 
   /** An incoming Bacs credit: BACS_INCOMING now (day 2), booked on the entry day (decision 742). */
   async incoming(x: { iban: string; amount: bigint; debtor: Party; reference?: string; numericReference?: string; serviceUserNumber?: string }): Promise<IncomingCredit> {
-    const own = this.#own(x.iban)
+    const own = await this.#own(x.iban)
     const { processing, entry } = cycle(this.d.clock.now())
     const c: IncomingCredit = {
       ref: servicerRef(), iban: own.iban, master: own.master, customer: own.customer, amount: x.amount, beneficiary: own.party, debtor: x.debtor,
@@ -211,7 +211,7 @@ export class BacsService {
 
   /** A new mandate from a Service User for an account here: pain.009 to the account owner. */
   async newMandate(x: { debtorIban: string; creditor: Party; serviceUserNumber: string; reference?: string }): Promise<Mandate> {
-    const own = this.#own(x.debtorIban)
+    const own = await this.#own(x.debtorIban)
     if (own.iban !== own.master) throw new BacsError(400, 'Direct Debit mandates are held on the account itself, not on a VIBAN')
     const { processing, entry } = cycle(this.d.clock.now())
     const m: Mandate = {

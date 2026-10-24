@@ -63,9 +63,9 @@ export function v2Customers(c: Caller, serviceProvider: boolean): Set<string> {
   return new Set([...c.visible].filter((k) => k === own))
 }
 
-export function registerMessagesV2(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Caller, bankCode: string) {
+export function registerMessagesV2(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Promise<Caller>, bankCode: string) {
   app.get('/v2/messages', async (req, reply) => {
-    const c = caller(req)
+    const c = await caller(req)
     const q = req.query as Query
     const p = pageParams(q)
     const includeProcessed = boolParam(q, 'includeProcessed')
@@ -99,9 +99,9 @@ export function registerMessagesV2(app: FastifyInstance, emulator: Emulator, cal
 }
 
 /** PATCH /v2/messages/processed, in a scope whose JSON bodies arrive as text (jsonTextScope). */
-export function registerMessagesProcessed(scope: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Caller) {
+export function registerMessagesProcessed(scope: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Promise<Caller>) {
   scope.patch('/v2/messages/processed', async (req, reply) => {
-    const c = caller(req)
+    const c = await caller(req)
     let body: unknown
     try { body = parseJsonBody(req.body) } catch (e) {
       if (e instanceof JsonBodyError) throw bad(e.message)

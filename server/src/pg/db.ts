@@ -180,6 +180,30 @@ create table if not exists keyed_entries (
 create index if not exists keyed_entries_ord on keyed_entries (ns, kind, ord);
 `
 
+// Customers and their accounts (decision 973). The customer JSON holds everything but the
+// accounts; `ord` (dir_seq) is the order of first addition, of customers and of accounts.
+const DIRECTORY_SCHEMA = `
+create sequence if not exists dir_seq;
+create table if not exists dir_customers (
+  ns       text   not null,
+  key      text   not null,
+  code     text   not null,
+  customer jsonb  not null,
+  ord      bigint not null,
+  primary key (ns, key)
+);
+create index if not exists dir_customers_code on dir_customers (ns, code);
+create table if not exists dir_accounts (
+  ns    text   not null,
+  iban  text   not null,
+  owner text   not null,
+  info  jsonb  not null,
+  ord   bigint not null,
+  primary key (ns, iban)
+);
+create index if not exists dir_accounts_owner on dir_accounts (ns, owner, ord);
+`
+
 const SCHEMA_LOCK = 4410
 
 /** Statements one by one: `create index if not exists` locks its table even when the index exists. */
@@ -207,7 +231,7 @@ export class PgDb {
     const c = await pool.connect()
     try {
       await c.query('select pg_advisory_lock($1)', [SCHEMA_LOCK])
-      for (const s of [INBOX_SCHEMA, LEDGER_SCHEMA, AGENCY_SCHEMA, ACQUIRING_SCHEMA, RAILS_SCHEMA, JOURNAL_SCHEMA, KEYED_SCHEMA].flatMap(statements)) await c.query(s)
+      for (const s of [INBOX_SCHEMA, LEDGER_SCHEMA, AGENCY_SCHEMA, ACQUIRING_SCHEMA, RAILS_SCHEMA, JOURNAL_SCHEMA, KEYED_SCHEMA, DIRECTORY_SCHEMA].flatMap(statements)) await c.query(s)
     } finally {
       await c.query('select pg_advisory_unlock($1)', [SCHEMA_LOCK])
       c.release()

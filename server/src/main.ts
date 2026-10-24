@@ -13,6 +13,7 @@ import { PgAcquiringStore } from './pg/acquiring.js'
 import { PgRailsPending } from './pg/rails-pending.js'
 import { PgJournal } from './pg/journal.js'
 import { pgKeyed } from './pg/keyed.js'
+import { PgDirectory } from './pg/directory.js'
 import { OpenLedgerLedger } from './ledgers/open-ledger.js'
 import { HttpRails, railsCallbackApp } from './rails-http.js'
 import type { Scheme } from './rails.js'
@@ -34,8 +35,9 @@ const max = (v: string | undefined) => {
   if (!/^[1-9]\d*$/.test(v)) throw new Error(`a MAX_* setting must be a positive integer, not ${v}`)
   return { max: Number(v) }
 }
-// DATABASE_URL: the inbox, the ledger, agency accounts and set-ups, acquiring and the payments
-// waiting at the rails in Postgres (decisions 900, 910, 943, 946, 948), under STORE_NAMESPACE (the former INBOX_NAMESPACE still
+// DATABASE_URL: the inbox, the ledger, agency accounts and set-ups, acquiring, the payments
+// waiting at the rails, the journal, keyed state and the customers and accounts in Postgres
+// (decisions 900, 910, 943, 946, 948, 960, 961, 970), under STORE_NAMESPACE (the former INBOX_NAMESPACE still
 // works; default "default"), so a restart keeps them; without it, in memory. DATABASE_POOL_MAX: connections
 // (default 10).
 const pool = max(env.DATABASE_POOL_MAX)
@@ -77,6 +79,7 @@ const emulator = await Emulator.fromSeed(seed, {
   railsPending: db && (() => new PgRailsPending(db, { namespace })),
   journal: db && (() => new PgJournal(db, { namespace })),
   keyed: db && ((clock) => pgKeyed(db, clock, namespace)),
+  directory: db && ((clock) => new PgDirectory(db, clock, { namespace })),
   ledger: ledgerKind === 'open-ledger' ? new OpenLedgerLedger({ url: env.OPEN_LEDGER_URL!, namespace, secretKey: env.OPEN_LEDGER_KEY, timeoutMs })
     : ledgerKind === 'postgres' ? (clock) => new PgLedger(db!, { namespace, clock }) : undefined,
   xsdDir: existsSync(xsdDir) ? xsdDir : undefined,

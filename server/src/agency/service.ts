@@ -2,7 +2,7 @@
 // account synchronisation (v1 XML, v2 JSON), the CoP/VoP responder and the RTF deliveries.
 import type { Bounds } from '../bounded.js'
 import type { Clock } from '../clock.js'
-import type { Directory } from '../directory.js'
+import type { DirectoryStore } from '../directory.js'
 import type { InboxStore } from '../inbox.js'
 import type { Bank } from '../payments/engine.js'
 import { AgencyResponder } from './responder.js'
@@ -10,7 +10,7 @@ import { RtfService } from './rtf.js'
 import { AGENCY_BOUNDS, MemoryAgencyStore, type AgencyStore } from './store.js'
 import { AgencySync } from './sync.js'
 
-export interface AgencyDeps { directory: Directory; inbox: InboxStore; clock: Clock; bank: Bank }
+export interface AgencyDeps { directory: DirectoryStore; inbox: InboxStore; clock: Clock; bank: Bank }
 
 export class Agency {
   /** Synchronised agency accounts: the lookup API for payments (store.ts). */

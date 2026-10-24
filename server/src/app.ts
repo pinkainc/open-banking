@@ -91,14 +91,14 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     return sendError(reply, new ConnectError(status, status === 500 ? 'TECHNICAL_ERROR' : 'BAD_REQUEST', status === 500 ? 'Technical error' : err.message))
   })
 
-  const caller = (req: FastifyRequest): Caller => {
-    const c = resolveCaller(req, emulator.directory, identify, emulator.clock.now())
+  const caller = async (req: FastifyRequest): Promise<Caller> => {
+    const c = await resolveCaller(req, emulator.directory, identify, emulator.clock.now())
     c.services = keyOf(c.customer) === keyOf(c.user) ? c.user.services : emulator.contracts.servicesFor(c.user, c.customer)
     return c
   }
   /** The caller, once the contract is known to grant the service (decision 501). */
-  const granted = (req: FastifyRequest, service: string): Caller => {
-    const c = caller(req)
+  const granted = async (req: FastifyRequest, service: string): Promise<Caller> => {
+    const c = await caller(req)
     requireService(c, service)
     return c
   }
@@ -135,14 +135,14 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   // as the pain.001 MsgId): a key seen on a successful POST within 24 hours is answered 409.
   // Remembered for 24 h, the documented guarantee (DEFAULT_BOUNDS.idempotencyKeys).
   const idempotency = new BoundedSet<string>(emulator.clock, { ...DEFAULT_BOUNDS.idempotencyKeys, ...opts.idempotencyKeys })
-  const idemKey = (req: FastifyRequest) => {
+  const idemKey = async (req: FastifyRequest) => {
     const v = req.headers['x-idempotency-key']
     const key = Array.isArray(v) ? v[0] : v
     if (flavour !== 'UK' || key === undefined || req.method !== 'POST' || req.url.startsWith('/_sim')) return undefined
-    return `${keyOf(caller(req).user)}|${key.toLowerCase()}`
+    return `${keyOf((await caller(req)).user)}|${key.toLowerCase()}`
   }
   app.addHook('preHandler', async (req) => {
-    const k = idemKey(req)
+    const k = await idemKey(req)
     if (!k) return
     if (!UUID.test(k.slice(k.indexOf('|') + 1))) throw new ConnectError(400, 'BAD_REQUEST', 'X-Idempotency-Key must be a UUID')
     if (idempotency.has(k)) {
@@ -152,7 +152,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   app.addHook('onResponse', async (req, reply) => {
     if (reply.statusCode >= 300) return
     let k: string | undefined
-    try { k = idemKey(req) } catch { return }
+    try { k = await idemKey(req) } catch { return }
     if (k) idempotency.add(k)
   })
 
@@ -161,7 +161,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   const heartbeatTime = (req: FastifyRequest) =>
     (bankFor(req, flavour, bankCode) === 'LHVUK' ? heartbeatLondon : heartbeatTallinn)(emulator.clock.now())
   app.get('/heartbeat', async (req, reply) => {
-    granted(req, SERVICE.heartbeat)
+    await granted(req, SERVICE.heartbeat)
     return reply.type('application/xml').send(toXml(el('HeartBeatResponse', el('TimeStamp', heartbeatTime(req)))))
   })
 
@@ -176,14 +176,14 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     el('UserRequest', userRequest)))
 
   app.get('/heartbeat/mq', async (req, reply) => {
-    const c = granted(req, SERVICE.heartbeat)
+    const c = await granted(req, SERVICE.heartbeat)
     const id = requestId()
     await emulator.inbox.add({ customer: c.customer, type: 'HEARTBEAT', requestId: id, body: heartbeatMessage(req, c, '') })
     return accepted(req, reply, c, id, 'HEARTBEAT')
   })
 
   app.post('/heartbeat', async (req, reply) => {
-    const c = granted(req, SERVICE.heartbeat)
+    const c = await granted(req, SERVICE.heartbeat)
     const id = requestId()
     const body = typeof req.body === 'string' ? req.body : req.body ? JSON.stringify(req.body) : ''
     await emulator.inbox.add({ customer: c.customer, type: 'HEARTBEAT', requestId: id, body: heartbeatMessage(req, c, body) })
@@ -192,7 +192,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
 
   // --- Messages -----------------------------------------------------------------
   app.get('/messages/next', async (req, reply) => {
-    const c = caller(req)
+    const c = await caller(req)
     const m = await emulator.inbox.next(scope(req, c))
     return m ? sendMessage(req, reply, m) : reply.code(204).send()
   })
@@ -201,7 +201,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   // dummy transactions; without mockLargeMessage=true it is GET /messages/next.
   if (flavour === 'UK') {
     app.get('/messages/test/next', async (req, reply) => {
-      const c = caller(req)
+      const c = await caller(req)
       if (String((req.query as { mockLargeMessage?: string }).mockLargeMessage).toLowerCase() === 'true') {
         return sendBody(req, reply, 'application/xml', mockLargeStatement(emulator.clock.now(), emulator.bank))
       }
@@ -211,12 +211,12 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   }
 
   app.get('/messages/count', async (req) => {
-    const c = caller(req)
+    const c = await caller(req)
     return { count: await emulator.inbox.count(scope(req, c)) }
   })
 
   app.get('/messages', async (req, reply) => {
-    const c = caller(req)
+    const c = await caller(req)
     const q = req.query as { limit?: string }
     let limit = q.limit === undefined ? 10 : Number(q.limit)
     if (!/^\d+$/.test(q.limit ?? '10') || !Number.isInteger(limit) || limit < 1) throw jsonError(400, 'BAD_REQUEST', 'limit must be a positive integer')
@@ -237,21 +237,21 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   })
 
   app.get('/messages/:id', async (req, reply) => {
-    const c = caller(req)
+    const c = await caller(req)
     const m = await emulator.inbox.get(scope(req, c), (req.params as { id: string }).id)
     if (!m) throw notFound()
     return sendMessage(req, reply, m)
   })
 
   app.delete('/messages/:id', async (req, reply) => {
-    const c = caller(req)
+    const c = await caller(req)
     if (await emulator.inbox.delete(scope(req, c), (req.params as { id: string }).id) === 'unknown') throw notFound()
     return reply.code(200).send()
   })
 
   // Bulk confirm: 200 when every id was deleted, 207 when some were, 400 when none.
   app.post('/messages/delete', async (req, reply) => {
-    const c = caller(req)
+    const c = await caller(req)
     const ids = (req.body as { messageResponseIds?: unknown } | undefined)?.messageResponseIds
     if (!Array.isArray(ids) || ids.length === 0 || ids.some((i) => typeof i !== 'string')) {
       throw jsonError(400, 'BAD_REQUEST', 'messageResponseIds must be a non-empty array of strings')
@@ -280,7 +280,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
 
   // --- Payment initiation ---------------------------------------------------------
   app.post('/payment', async (req, reply) => {
-    const c = caller(req)
+    const c = await caller(req)
     const type = String(req.headers['content-type'] ?? '')
     if (type.startsWith('application/vnd.etsi.asic-e+zip')) {
       throw new ConnectError(415, 'UNSUPPORTED', 'Signed payment containers are not supported by this server')
@@ -302,7 +302,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   // of the same type) arrive in the inbox. A body that is not a camt.060 at all is
   // answered there too, as errStatement_RequestInvalid.
   const report = (kind: 'statement' | 'balance') => async (req: FastifyRequest, reply: FastifyReply) => {
-    const c = granted(req, kind === 'statement' ? SERVICE.statement : SERVICE.balance)
+    const c = await granted(req, kind === 'statement' ? SERVICE.statement : SERVICE.balance)
     const id = requestId()
     const body = typeof req.body === 'string' ? req.body : ''
     await (kind === 'statement' ? emulator.reports.statement(body, c.customer, id) : emulator.reports.balance(body, c.customer, id))

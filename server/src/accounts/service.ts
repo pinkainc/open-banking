@@ -5,7 +5,7 @@
 // (reserved in manual review) and the incoming-payment states the engine reports.
 import { BoundedMap, type Bounds } from '../bounded.js'
 import { DAY_MS, type Clock } from '../clock.js'
-import type { Customer, Directory } from '../directory.js'
+import type { Customer, DirectoryStore } from '../directory.js'
 import { JsonBodyError } from '../errors.js'
 import { normalizeIban } from '../iban.js'
 import { fromMinor, type Ledger } from '../ledger.js'
@@ -38,7 +38,8 @@ export const transactionId = (ref: string) =>
 /** An 8-character BIC with the branch code (G sample `LHVBGB2LXXX`). */
 const bic11 = (bic: string) => (bic.length === 8 ? `${bic}XXX` : bic)
 
-export interface AccountInfo { opened: string; nickname?: string; closed?: boolean }
+/** The list details are kept by the directory (decision 971). */
+export type { AccountInfo } from '../directory.js'
 
 interface IncomingEntry extends IncomingEvent { at: Date }
 /** An incoming payment the simulator holds (/_sim/accounts/incoming, decision 712). */
@@ -48,7 +49,7 @@ export interface HeldIncoming {
 }
 
 export interface AccountsDeps {
-  directory: Directory; ledger: Ledger; journal: JournalStore; viban: VibanRegistry; clock: Clock; bank: { bic: string }
+  directory: DirectoryStore; ledger: Ledger; journal: JournalStore; viban: VibanRegistry; clock: Clock; bank: { bic: string }
   engine: () => PaymentEngine
 }
 
@@ -73,7 +74,6 @@ const dateParam = (v: unknown, name: string, dflt: string): string => {
 const addDays = (date: string, days: number) => new Date(Date.parse(`${date}T00:00:00Z`) + days * DAY_MS).toISOString().slice(0, 10)
 
 export class AccountsService {
-  #info = new Map<string, AccountInfo>()
   #incoming: BoundedMap<string, IncomingEntry>
   #held = new Map<string, HeldIncoming>()
 
@@ -83,19 +83,6 @@ export class AccountsService {
 
   // --- Account details ------------------------------------------------------------
 
-  /** Records an account's list details when it is added (opening day: today, UK date, unless given). */
-  register(iban: string, info: { opened?: string; nickname?: string; closed?: boolean } = {}) {
-    if (info.opened !== undefined && (!DATE.test(info.opened) || Number.isNaN(Date.parse(info.opened)))) throw new Error(`opened must be YYYY-MM-DD, not ${info.opened}`)
-    if (info.nickname !== undefined && typeof info.nickname !== 'string') throw new Error('nickname must be a string')
-    if (info.closed !== undefined && typeof info.closed !== 'boolean') throw new Error('closed must be a boolean')
-    this.#info.set(normalizeIban(iban), {
-      opened: info.opened ?? dateLondon(this.deps.clock.now()),
-      ...(info.nickname ? { nickname: info.nickname } : {}), ...(info.closed ? { closed: true } : {}),
-    })
-  }
-
-  info(iban: string): AccountInfo | undefined { return this.#info.get(normalizeIban(iban)) }
-
   /** GET /accounts/list: the customer's UK current accounts (GB IBANs), VIBANs excluded. */
   async list(customer: Customer, q: Record<string, unknown>) {
     const pageNumber = intParam(q.pageNumber, 'pageNumber', 1)
@@ -103,11 +90,12 @@ export class AccountsService {
     const closedParam = String(q.includeClosedAccounts ?? 'true').toLowerCase()
     if (closedParam !== 'true' && closedParam !== 'false') throw bad('includeClosedAccounts must be true or false')
     const includeClosed = closedParam === 'true'
-    const accounts = customer.accounts.filter(isUkAccount).filter((a) => includeClosed || !this.info(a)?.closed)
+    const accounts: string[] = []
+    for (const a of customer.accounts.filter(isUkAccount)) if (includeClosed || !(await this.deps.directory.account(a))?.closed) accounts.push(a)
     const page = accounts.slice((pageNumber - 1) * pageSize, pageNumber * pageSize)
     const out = []
     for (const iban of page) {
-      const info = this.info(iban) ?? { opened: dateLondon(this.deps.clock.now()) }
+      const info = (await this.deps.directory.account(iban)) ?? { opened: dateLondon(this.deps.clock.now()) }
       const ids: { SchemeName: string; Identification: string; Name: string }[] = [{ SchemeName: 'IBAN', Identification: iban, Name: customer.name }]
       const bban = gbBban(iban)
       if (bban) ids.push({ SchemeName: 'SortCodeAccountNumber', Identification: bban, Name: customer.name })
@@ -140,7 +128,7 @@ export class AccountsService {
     if (!/^[0-9A-F]{32}$/.test(ref)) throw new JsonBodyError(404, NO_TRANSACTION)
     const now = this.deps.clock.now().getTime()
     const booked = (await this.deps.journal.entries(iban, now - LOOKBACK_DAYS * DAY_MS, now + 1)).filter((e) => e.servicerRef === ref)
-    if (booked.length) return this.#bookedView(booked[booked.length - 1])
+    if (booked.length) return await this.#bookedView(booked[booked.length - 1])
     const r = await this.deps.engine().reserved(ref)
     if (r && r.account === iban) {
       const creditorId = r.creditor.iban ?? r.creditor.account
@@ -150,7 +138,7 @@ export class AccountsService {
         Amount: { Amount: fromMinor(r.amount), Currency: r.currency },
         CreditDebitIndicator: 'Debit',
         Status: 'Pending',
-        ...(r.creditor.bic ? { CreditorAgent: { SchemeName: 'BIC', Identification: this.#agentBic(r.creditor.bic, creditorId) } } : {}),
+        ...(r.creditor.bic ? { CreditorAgent: { SchemeName: 'BIC', Identification: await this.#agentBic(r.creditor.bic, creditorId) } } : {}),
         ...(creditorId ? { CreditorAccount: { Identification: creditorId, ...(r.creditor.name ? { Name: r.creditor.name } : {}) } } : {}),
         TransactionId: transactionId(ref),
       }
@@ -159,18 +147,18 @@ export class AccountsService {
   }
 
   /** LHV's own BIC for an account here: LHV UK's for a GB account, else the given one. */
-  #agentBic(bic: string, account?: string) {
-    const own = account && this.deps.directory.ownerOf(this.#masterOf(account))
+  async #agentBic(bic: string, account?: string) {
+    const own = account && await this.deps.directory.ownerOf(this.#masterOf(account))
     return bic11(own && isUkAccount(account) ? LHV_UK_BIC : bic)
   }
 
   #masterOf(iban: string) { return this.deps.viban.resolve(iban)?.master ?? iban }
 
-  #bookedView(e: JournalEntry) {
+  async #bookedView(e: JournalEntry) {
     const debit = e.direction === 'DBIT'
     const id = e.counterparty.iban ?? e.counterparty.account
     const party = id ? { Identification: id, ...(e.counterparty.name ? { Name: e.counterparty.name } : {}) } : undefined
-    const agent = e.counterparty.bic ? { SchemeName: 'BIC', Identification: this.#agentBic(e.counterparty.bic, id) } : undefined
+    const agent = e.counterparty.bic ? { SchemeName: 'BIC', Identification: await this.#agentBic(e.counterparty.bic, id) } : undefined
     const date = dateLondon(e.bookedAt)
     return {
       ...(e.endToEndId ? { EndToEndId: e.endToEndId } : {}),

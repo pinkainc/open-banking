@@ -11,9 +11,9 @@ import { accepted } from '../requests.js'
 import { jsonTextScope } from '../jsonbody.js'
 import { ANSWERS, CATEGORIES, COP, VOP_EE, accountKey, type Category, type SimAccount } from './service.js'
 
-export function registerPayee(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Caller, flavour: 'EE' | 'UK') {
+export function registerPayee(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Promise<Caller>, flavour: 'EE' | 'UK') {
   app.post('/verification-of-payee', async (req, reply) => {
-    const c = caller(req)
+    const c = await caller(req)
     const id = requestId()
     await emulator.payee.requestEe(req.body, c.customer, id)
     // On the UK host the request is answered by LHV EE (decision 607).
@@ -24,13 +24,13 @@ export function registerPayee(app: FastifyInstance, emulator: Emulator, caller: 
   if (flavour === 'UK') {
     jsonTextScope(app, (scope) => {
       scope.post('/payment/vop-request', async (req, reply) => {
-        const c = caller(req)
+        const c = await caller(req)
         const id = requestId()
         await emulator.payee.requestUk(req.body, c.customer, id)
         return accepted(emulator.requests, req, reply, c, id, VOP_EE)
       })
       scope.post('/payment/cop-request', async (req, reply) => {
-        const c = caller(req)
+        const c = await caller(req)
         const id = requestId()
         await emulator.payee.requestCop(req.body, c.customer, id)
         return accepted(emulator.requests, req, reply, c, id, COP)
@@ -40,8 +40,8 @@ export function registerPayee(app: FastifyInstance, emulator: Emulator, caller: 
     // P 02 "Testing Environment Changes": the sandbox's account IBANs. Shape undocumented:
     // a JSON array of the selected customer's account IBANs (decision 608).
     app.get('/test/accounts/ibans', async (req, reply) => {
-      const c = caller(req)
-      const customer = emulator.directory.get(c.customer)
+      const c = await caller(req)
+      const customer = await emulator.directory.get(c.customer)
       return reply.code(200).type('application/json').send(JSON.stringify(customer?.accounts ?? []))
     })
   }

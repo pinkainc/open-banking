@@ -49,8 +49,8 @@ export interface InboxStore {
   tombstones(): Promise<number>
   /** Processed messages still kept (tests, diagnostics). */
   processedKept(): Promise<number>
-  /** Called with every new message, after it is stored (EE webhook delivery). */
-  onAdd(listener: (m: Message) => void): void
+  /** Called with every new message, after it is stored (webhook delivery); add() awaits it. */
+  onAdd(listener: (m: Message) => void | Promise<void>): void
   add(m: NewMessage): Promise<Message>
   /** Drops expired messages, archived processed ones and tombstones; returns how many messages expired. */
   purge(): Promise<number>
@@ -91,7 +91,7 @@ export class MemoryInbox implements InboxStore {
   /** Confirmed messages, kept for the v2 list and undelete until archived (decision 621). */
   #processed: BoundedMap<string, Message>
   #seq = 0
-  #listeners: ((m: Message) => void)[] = []
+  #listeners: ((m: Message) => void | Promise<void>)[] = []
   constructor(private clock: Clock, private retentionMs = RETENTION_MS, tombstones: Bounds = DEFAULT_BOUNDS.tombstones,
     processed: Bounds = DEFAULT_BOUNDS.processed) {
     this.#gone = new BoundedMap(clock, tombstones)
@@ -101,7 +101,7 @@ export class MemoryInbox implements InboxStore {
   async tombstones() { return this.#gone.size }
   async processedKept() { return this.#processed.size }
 
-  onAdd(listener: (m: Message) => void) { this.#listeners.push(listener) }
+  onAdd(listener: (m: Message) => void | Promise<void>) { this.#listeners.push(listener) }
 
   async add(m: NewMessage): Promise<Message> {
     const msg: Message = {
@@ -110,7 +110,7 @@ export class MemoryInbox implements InboxStore {
       createdAt: this.clock.now(), body: m.body, contentType: m.contentType ?? 'application/xml', seq: ++this.#seq,
     }
     this.#messages.set(msg.id, msg)
-    for (const l of this.#listeners) l(msg)
+    for (const l of this.#listeners) await l(msg)
     return msg
   }
 

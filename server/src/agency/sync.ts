@@ -5,7 +5,7 @@
 // every account is answered on its own (Confirmed, ErrorInfo), AcceptanceStatus
 // OK / PARTIAL / FAILED, in a JSON AGENT_ACCOUNT_SYNC message.
 import type { Clock } from '../clock.js'
-import { keyOf, type Customer, type Directory } from '../directory.js'
+import { keyOf, type Customer, type DirectoryStore } from '../directory.js'
 import { errorsXml } from '../errors.js'
 import { ibanChecksumOk, isSepaCountry, normalizeIban } from '../iban.js'
 import type { InboxStore } from '../inbox.js'
@@ -58,7 +58,7 @@ const IBAN_SHAPE = /^[A-Z]{2}[0-9]{2}[a-zA-Z0-9]{1,30}$/
 /** A region: GB or a SEPA scheme country (G "'GB' or ISO country code (SEPA Scheme Country)"). */
 const regionOk = (r: string) => r === 'GB' || isSepaCountry(r)
 
-export interface SyncDeps { directory: Directory; inbox: InboxStore; clock: Clock; store: AgencyStore }
+export interface SyncDeps { directory: DirectoryStore; inbox: InboxStore; clock: Clock; store: AgencyStore }
 
 /** One account to write: where, under which key, what was given. */
 interface Entry {

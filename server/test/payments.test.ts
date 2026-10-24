@@ -97,7 +97,7 @@ describe('internal payment', () => {
   })
 
   test('camt.054.001.08 for a customer set up for it', async () => {
-    ctx.emulator.directory.get(C1)!.camt054 = '08'
+    await ctx.emulator.directory.update(C1, { camt054: '08' })
     const { notes } = await pay(one({ amount: '1.00' }))
     assert.equal(notes[0].ns, 'camt.054.001.08')
     const credit = await drain(ctx, C2.code)

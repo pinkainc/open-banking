@@ -107,12 +107,12 @@ export function historyItem(emulator: Emulator, e: UkEvent) {
   }
 }
 
-export function registerUkWebhooks(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Caller) {
+export function registerUkWebhooks(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Promise<Caller>) {
   const hooks = emulator.webhooksUk
   const ref = (req: FastifyRequest) => (req.params as { ref: string }).ref
 
   app.post('/notifications/subscription', async (req, reply) => {
-    const c = caller(req)
+    const c = await caller(req)
     const input = configInput(objectBody(req.body))
     if (input.messageType === undefined) throw bad('messageType is mandatory')
     if (input.requestUrl === undefined) throw bad('requestUrl is mandatory')
@@ -122,16 +122,16 @@ export function registerUkWebhooks(app: FastifyInstance, emulator: Emulator, cal
     return json(reply, configView(cfg, true))
   })
 
-  app.get('/notifications/subscription', async (req, reply) => json(reply, hooks.list(caller(req).customer).map((x) => configView(x))))
+  app.get('/notifications/subscription', async (req, reply) => json(reply, hooks.list((await caller(req)).customer).map((x) => configView(x))))
 
   app.get('/notifications/subscription/:ref', async (req, reply) => {
-    const cfg = hooks.get(caller(req).customer, ref(req))
+    const cfg = hooks.get((await caller(req)).customer, ref(req))
     if (!cfg) throw notFound()
     return json(reply, configView(cfg))
   })
 
   app.put('/notifications/subscription/:ref', async (req, reply) => {
-    const c = caller(req)
+    const c = await caller(req)
     const cfg = hooks.get(c.customer, ref(req))
     if (!cfg) throw notFound()
     const b = objectBody(req.body)
@@ -146,14 +146,14 @@ export function registerUkWebhooks(app: FastifyInstance, emulator: Emulator, cal
   })
 
   app.delete('/notifications/subscription/:ref', async (req, reply) => {
-    const cfg = hooks.get(caller(req).customer, ref(req))
+    const cfg = hooks.get((await caller(req)).customer, ref(req))
     if (!cfg) throw notFound()
     hooks.remove(cfg)
     return reply.code(200).send()
   })
 
   app.get('/notifications/history', async (req, reply) => {
-    const c = caller(req)
+    const c = await caller(req)
     const q = (req.query ?? {}) as Record<string, unknown>
     const offset = intParam(q, 'offset', 0, 0, Number.MAX_SAFE_INTEGER)
     const limit = intParam(q, 'limit', 100, 1, MAX_HISTORY_LIMIT)
@@ -175,7 +175,7 @@ export function registerUkWebhooks(app: FastifyInstance, emulator: Emulator, cal
   })
 
   app.post('/notifications/replay', async (req, reply) => {
-    const c = caller(req)
+    const c = await caller(req)
     const b = objectBody(req.body)
     const ids = b.eventIds
     if (!Array.isArray(ids) || ids.some((x) => typeof x !== 'string')) throw bad('eventIds must be an array of event ids')

@@ -40,7 +40,7 @@ const COLS = 'id, request_id, type, client_code, client_country, created_at, res
 
 export class PgInbox implements InboxStore {
   readonly namespace: string
-  #listeners: ((m: Message) => void)[] = []
+  #listeners: ((m: Message) => void | Promise<void>)[] = []
   #retentionMs: number
   #gone: Bounds
   #processed: Bounds
@@ -92,7 +92,7 @@ export class PgInbox implements InboxStore {
     return rows[0].n as number
   }
 
-  onAdd(listener: (m: Message) => void) { this.#listeners.push(listener) }
+  onAdd(listener: (m: Message) => void | Promise<void>) { this.#listeners.push(listener) }
 
   async add(m: NewMessage): Promise<Message> {
     const msg: Message = {
@@ -106,7 +106,7 @@ export class PgInbox implements InboxStore {
       [this.namespace, msg.id, keyOf(m.customer), msg.requestId ?? null, msg.type, msg.clientCode, msg.clientCountry,
         msg.createdAt.getTime(), text ? Buffer.from(m.body as string, 'utf8') : m.body, text, msg.contentType])
     msg.seq = Number(rows[0].seq)
-    for (const l of this.#listeners) l(msg)
+    for (const l of this.#listeners) await l(msg)
     return msg
   }
 
