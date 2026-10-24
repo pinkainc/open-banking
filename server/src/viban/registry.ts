@@ -10,8 +10,13 @@
 //   bank decisions, each with a VIBAN_STATUS_NOTIFICATION:
 //     ON_HOLD ──▶ ACTIVE | REJECTED,  ACTIVE ──▶ BLOCKED,  BLOCKED ──▶ ACTIVE,
 //     any status but CLOSED / REJECTED ──▶ CLOSED
+//
+// VIBANs, the numbers given out and the master account agreements are kept in the
+// emulator's keyed store (decision 984), so they survive a restart; every lookup is async.
+import { systemClock } from '../clock.js'
 import { keyOf, type CustomerKey } from '../directory.js'
 import { makeIban, normalizeIban } from '../iban.js'
+import { memoryKeyed, UNBOUNDED, type KeyedFactory, type KeyedStore } from '../keyed.js'
 
 export type VibanStatus = 'ACTIVE' | 'PENDING' | 'ON_HOLD' | 'CLOSED' | 'REJECTED' | 'BLOCKED'
 
@@ -43,7 +48,7 @@ export interface VirtualAccount {
   status: VibanStatus
   holder?: { name: string; country: string; address: string }
 }
-export interface VirtualAccounts { resolve(iban: string): VirtualAccount | undefined }
+export interface VirtualAccounts { resolve(iban: string): Promise<VirtualAccount | undefined> }
 
 /** Status changes the bank may make on its own (each is notified). */
 export const BANK_TRANSITIONS: Record<VibanStatus, VibanStatus[]> = {
@@ -74,30 +79,62 @@ export interface VibanRange {
 }
 export const DEFAULT_RANGE: VibanRange = { ee: '7777', gb: '7' }
 
+/** A VIBAN as the keyed store keeps it (decision 984): JSON, times in ms. */
+type StoredViban = Omit<Viban, 'createdAt' | 'activatedAt' | 'closedAt'> & { createdAt: number; activatedAt?: number; closedAt?: number }
+
+const encode = (v: Viban): StoredViban => JSON.parse(JSON.stringify({
+  ...v, createdAt: v.createdAt.getTime(), activatedAt: v.activatedAt?.getTime(), closedAt: v.closedAt?.getTime(),
+}))
+const decode = (s: StoredViban): Viban => {
+  const { createdAt, activatedAt, closedAt, ...rest } = s
+  const v: Viban = { ...rest, createdAt: new Date(createdAt) }
+  if (activatedAt !== undefined) v.activatedAt = new Date(activatedAt)
+  if (closedAt !== undefined) v.closedAt = new Date(closedAt)
+  return v
+}
+
 export class VibanRegistry implements VirtualAccounts {
-  #vibans = new Map<string, Viban>()
-  #agreements = new Set<string>()
+  /** Every VIBAN by its IBAN, in the order they were made. */
+  #vibans: KeyedStore<StoredViban>
+  /** The numbers given out (one emulator of a namespace gets each). */
+  #numbers: KeyedStore<true>
+  /** The master account agreements: true signed, false ended (kept, so the seed does not sign it again). */
+  #agreements: KeyedStore<boolean>
   #serial = 0
 
-  constructor(private range: VibanRange = DEFAULT_RANGE, private taken: (iban: string) => Promise<boolean> = async () => false) {}
+  constructor(
+    private range: VibanRange = DEFAULT_RANGE, private taken: (iban: string) => Promise<boolean> = async () => false,
+    keyed: KeyedFactory = memoryKeyed(systemClock),
+  ) {
+    this.#vibans = keyed('vibans', UNBOUNDED)
+    this.#numbers = keyed('viban-numbers', UNBOUNDED)
+    this.#agreements = keyed('viban-agreements', UNBOUNDED)
+  }
 
-  /** Signs (or ends) the master account agreement of an account. */
-  agreement(iban: string, active = true) {
+  /**
+   * Signs (or ends) the master account agreement of an account. ifAbsent: only when the
+   * account never had one recorded (the seed after a restart, decision 984).
+   */
+  async agreement(iban: string, active = true, o: { ifAbsent?: boolean } = {}) {
     const n = normalizeIban(iban)
-    if (active) this.#agreements.add(n)
-    else this.#agreements.delete(n)
+    if (o.ifAbsent) await this.#agreements.add(n, active)
+    else await this.#agreements.set(n, active)
   }
-  hasAgreement(iban: string) { return this.#agreements.has(normalizeIban(iban)) }
+  async hasAgreement(iban: string) { return (await this.#agreements.get(normalizeIban(iban))) === true }
 
-  get(iban: string): Viban | undefined { return this.#vibans.get(normalizeIban(iban)) }
-  all(): Viban[] { return [...this.#vibans.values()] }
+  /** The VIBAN (a copy: change it with setStatus or save). */
+  async get(iban: string): Promise<Viban | undefined> {
+    const s = await this.#vibans.get(normalizeIban(iban))
+    return s && decode(s)
+  }
+  async all(): Promise<Viban[]> { return (await this.#vibans.entries()).map(([, s]) => decode(s)) }
 
-  byClientReference(owner: CustomerKey, ref: string): Viban | undefined {
+  async byClientReference(owner: CustomerKey, ref: string): Promise<Viban | undefined> {
     const k = keyOf(owner)
-    return this.all().find((v) => keyOf(v.owner) === k && v.clientReference === ref)
+    return (await this.all()).find((v) => keyOf(v.owner) === k && v.clientReference === ref)
   }
 
-  /** A new number in the bank's VIBAN range, in the master account's country format. */
+  /** A new number in the bank's VIBAN range, in the master account's country format; taken for good. */
   async generate(master: string): Promise<string> {
     const m = normalizeIban(master)
     for (;;) {
@@ -113,24 +150,29 @@ export class VibanRegistry implements VirtualAccounts {
       } else {
         throw new Error(`no VIBAN format for ${m.slice(0, 2)} master accounts`)
       }
-      if (!this.#vibans.has(iban) && !(await this.taken(iban))) return iban
+      // A restarted emulator's counter walks past the numbers given out before, once.
+      if (!(await this.taken(iban)) && (await this.#numbers.add(iban, true))) return iban
     }
   }
 
-  add(v: Viban): Viban {
-    this.#vibans.set(v.iban, v)
+  async add(v: Viban): Promise<Viban> {
+    await this.#vibans.set(v.iban, encode(v))
     return v
   }
 
-  /** Moves a VIBAN to a status, stamping the activation and closing dates. */
-  setStatus(v: Viban, status: VibanStatus, at: Date) {
+  /** Stores a changed VIBAN. */
+  async save(v: Viban) { await this.#vibans.replace(v.iban, encode(v)) }
+
+  /** Moves a VIBAN to a status, stamping the activation and closing dates, and stores it. */
+  async setStatus(v: Viban, status: VibanStatus, at: Date) {
     v.status = status
     if (status === 'ACTIVE' && !v.activatedAt) v.activatedAt = at
     if (status === 'CLOSED') v.closedAt = at
+    await this.save(v)
   }
 
-  resolve(iban: string): VirtualAccount | undefined {
-    const v = this.get(iban)
+  async resolve(iban: string): Promise<VirtualAccount | undefined> {
+    const v = await this.get(iban)
     if (!v) return undefined
     const name = holderName(v.user)
     return {

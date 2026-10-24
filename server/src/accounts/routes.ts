@@ -43,7 +43,7 @@ export function registerAccounts(app: FastifyInstance, emulator: Emulator, calle
     })
     scope.get('/accounts/:accountNumber/payments', async (req, reply) => {
       const p = req.params as { accountNumber: string }
-      return json(reply, emulator.accounts.payments(await customerOf(req), p.accountNumber, req.query as Record<string, unknown>))
+      return json(reply, await emulator.accounts.payments(await customerOf(req), p.accountNumber, req.query as Record<string, unknown>))
     })
   })
 }
@@ -64,14 +64,14 @@ export function accountsSimRoutes(emulator: Emulator) {
       }
       if (!b.iban) throw bad('iban is required')
       const iban = normalizeIban(b.iban)
-      if (!await emulator.directory.ownerOf(iban) && !emulator.viban.registry.get(iban)) throw new ConnectError(404, 'NOT_FOUND', `no account ${iban}`)
+      if (!await emulator.directory.ownerOf(iban) && !(await emulator.viban.registry.get(iban))) throw new ConnectError(404, 'NOT_FOUND', `no account ${iban}`)
       let amount: bigint
       try { amount = toMinor(String(b.amount ?? '')) } catch { throw bad('amount must be a positive number with at most two decimals') }
       if (amount <= 0n) throw bad('amount must be positive')
       const scheme = b.scheme ?? 'SEPA'
       if (!SCHEMES.includes(scheme)) throw bad(`unknown scheme ${scheme}`)
       const ref = servicerRef()
-      emulator.accounts.hold({
+      await emulator.accounts.hold({
         ref, iban, amount, currency: b.currency ?? 'GBP', scheme, debtor: b.debtor ?? { name: 'Simulated Debtor' },
         remittance: b.remittance, reference: b.reference, endToEndId: b.endToEndId,
       })

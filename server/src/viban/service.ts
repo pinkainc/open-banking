@@ -14,6 +14,7 @@ import type { Clock } from '../clock.js'
 import { keyOf, type CustomerKey, type DirectoryStore } from '../directory.js'
 import { normalizeIban } from '../iban.js'
 import type { InboxStore } from '../inbox.js'
+import { memoryKeyed, type KeyedFactory } from '../keyed.js'
 import { dateTallinn } from '../time.js'
 import { parseXml } from '../xml.js'
 import { isCountry } from './countries.js'
@@ -54,7 +55,7 @@ export type ErrorDelivery = 'inbox' | 'sync'
 
 export type Outcome = { type: string; body: string } | { type: string; errors: VibanError[] }
 
-export interface VibanOptions { schemas?: VibanSchemas; errors?: ErrorDelivery; range?: VibanRange }
+export interface VibanOptions { schemas?: VibanSchemas; errors?: ErrorDelivery; range?: VibanRange; keyed?: KeyedFactory }
 
 export const BULK_MAX = 1000
 
@@ -66,12 +67,23 @@ export class VibanService {
   /** The next requests answered TECHNICAL_ERROR (simulator fault injection). */
   faults = 0
 
+  /** The service's operations in this process, one after the other (decision 984). */
+  #queue: Promise<unknown> = Promise.resolve()
+
   constructor(private directory: DirectoryStore, private inbox: InboxStore, private clock: Clock, private opts: VibanOptions = {}) {
-    this.registry = new VibanRegistry(opts.range ?? DEFAULT_RANGE, async (iban) => !!(await directory.ownerOf(iban)))
+    this.registry = new VibanRegistry(opts.range ?? DEFAULT_RANGE, async (iban) => !!(await directory.ownerOf(iban)), opts.keyed ?? memoryKeyed(clock))
     this.errorDelivery = opts.errors ?? 'inbox'
   }
 
-  async handle(op: Op, body: string, customer: CustomerKey): Promise<Outcome> {
+  #serial<T>(f: () => Promise<T>): Promise<T> {
+    const run = this.#queue.then(f, f)
+    this.#queue = run.catch(() => undefined)
+    return run
+  }
+
+  handle(op: Op, body: string, customer: CustomerKey): Promise<Outcome> { return this.#serial(() => this.#handle(op, body, customer)) }
+
+  async #handle(op: Op, body: string, customer: CustomerKey): Promise<Outcome> {
     const type = RESPONSE_TYPE[op]
     const fail = (...errors: VibanError[]): Outcome => ({ type, errors })
     if (this.faults > 0) { this.faults--; return fail(E.technical) }
@@ -90,26 +102,26 @@ export class VibanService {
       if (op === 'bulk' && !(r.amount! >= 1 && r.amount! <= BULK_MAX)) return fail(E.request)
 
       const master = normalizeIban(r.masterAccount)
-      const owner = this.registry.get(master) ? undefined : await this.directory.ownerOf(master)
+      const owner = (await this.registry.get(master)) ? undefined : await this.directory.ownerOf(master)
       if (!owner) return fail(E.account)
       if (keyOf(owner) !== keyOf(customer)) return fail(E.masterForbidden)
-      if ((op === 'open' || op === 'bulk' || op === 'modify') && !this.registry.hasAgreement(master)) return fail(E.agreement)
+      if ((op === 'open' || op === 'bulk' || op === 'modify') && !(await this.registry.hasAgreement(master))) return fail(E.agreement)
 
       if (op === 'open') return await this.#open(r, master, owner)
       if (op === 'bulk') {
         const ibans = await this.#bulk(r.amount!, master, owner)
         return { type, body: bulkResponse(master, ibans) }
       }
-      const v = this.registry.get(r.virtualIban!)
+      const v = await this.registry.get(r.virtualIban!)
       if (!v) return fail(E.viban)
       if (v.master !== master) return fail(E.vibanForbidden)
       if (op === 'info') return { type, body: infoResponse(v) }
       if (op === 'close') {
         if (!['ACTIVE', 'PENDING', 'BLOCKED'].includes(v.status)) return fail(E.statusClose)
-        this.registry.setStatus(v, 'CLOSED', this.clock.now())
+        await this.registry.setStatus(v, 'CLOSED', this.clock.now())
         return { type, body: closeResponse(v) }
       }
-      return this.#modify(r, v)
+      return await this.#modify(r, v)
     } catch {
       return fail(E.technical)
     }
@@ -135,13 +147,13 @@ export class VibanService {
 
   async #open(r: VibanRequest, master: string, owner: CustomerKey): Promise<Outcome> {
     const type = RESPONSE_TYPE.open
-    if (r.clientReference && this.registry.byClientReference(owner, r.clientReference)) return { type, errors: [E.refUnique] }
+    if (r.clientReference && (await this.registry.byClientReference(owner, r.clientReference))) return { type, errors: [E.refUnique] }
     const now = this.clock.now()
-    const v = this.registry.add({
+    const v = await this.registry.add({
       iban: await this.registry.generate(master), master, owner: { code: owner.code, country: owner.country },
       status: 'PENDING', clientReference: r.clientReference, user: r.user, createdAt: now,
     })
-    this.registry.setStatus(v, this.#screen(r.user!), now)
+    await this.registry.setStatus(v, this.#screen(r.user!), now)
     return { type, body: openResponse(v) }
   }
 
@@ -149,12 +161,12 @@ export class VibanService {
     const now = this.clock.now()
     const out: string[] = []
     for (let i = 0; i < amount; i++) {
-      out.push(this.registry.add({ iban: await this.registry.generate(master), master, owner: { code: owner.code, country: owner.country }, status: 'PENDING', createdAt: now }).iban)
+      out.push((await this.registry.add({ iban: await this.registry.generate(master), master, owner: { code: owner.code, country: owner.country }, status: 'PENDING', createdAt: now })).iban)
     }
     return out
   }
 
-  #modify(r: VibanRequest, v: Viban): Outcome {
+  async #modify(r: VibanRequest, v: Viban): Promise<Outcome> {
     const type = RESPONSE_TYPE.modify
     const fail = (e: VibanError): Outcome => ({ type, errors: [e] })
     if (!['ACTIVE', 'PENDING', 'ON_HOLD'].includes(v.status)) return fail(E.statusModify)
@@ -163,11 +175,11 @@ export class VibanService {
     if (v.user && !!v.user.person !== !!r.user!.person) return fail(E.userType)
     if (r.clientReference && r.clientReference !== v.clientReference) {
       if (v.clientReference) return fail(E.refChange)
-      if (this.registry.byClientReference(v.owner, r.clientReference)) return fail(E.refUnique)
+      if (await this.registry.byClientReference(v.owner, r.clientReference)) return fail(E.refUnique)
       v.clientReference = r.clientReference
     }
     v.user = r.user // block replace
-    this.registry.setStatus(v, this.#screen(r.user!), this.clock.now())
+    await this.registry.setStatus(v, this.#screen(r.user!), this.clock.now())
     return { type, body: modifyResponse(v) }
   }
 
@@ -176,11 +188,13 @@ export class VibanService {
    * closure), notified to the master account owner with VIBAN_STATUS_NOTIFICATION.
    * Returns an explanation when the change is not one the bank makes from this status.
    */
-  async bankStatus(iban: string, status: VibanStatus): Promise<string | undefined> {
-    const v = this.registry.get(iban)
+  bankStatus(iban: string, status: VibanStatus): Promise<string | undefined> { return this.#serial(() => this.#bankStatus(iban, status)) }
+
+  async #bankStatus(iban: string, status: VibanStatus): Promise<string | undefined> {
+    const v = await this.registry.get(iban)
     if (!v) return `no VIBAN ${normalizeIban(iban)}`
     if (!BANK_TRANSITIONS[v.status].includes(status)) return `${v.status} cannot become ${status}`
-    this.registry.setStatus(v, status, this.clock.now())
+    await this.registry.setStatus(v, status, this.clock.now())
     await this.inbox.add({ customer: v.owner, type: STATUS_NOTIFICATION, body: statusNotification(v) })
     return undefined
   }

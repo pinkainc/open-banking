@@ -134,7 +134,7 @@ export class AccountsService {
       const creditorId = r.creditor.iban ?? r.creditor.account
       return {
         ...(r.endToEndId ? { EndToEndId: r.endToEndId } : {}),
-        IsVirtualAccountPayment: r.debtorIban !== iban || (!!r.creditor.iban && !!this.deps.viban.resolve(r.creditor.iban)),
+        IsVirtualAccountPayment: r.debtorIban !== iban || (!!r.creditor.iban && !!(await this.deps.viban.resolve(r.creditor.iban))),
         Amount: { Amount: fromMinor(r.amount), Currency: r.currency },
         CreditDebitIndicator: 'Debit',
         Status: 'Pending',
@@ -148,11 +148,11 @@ export class AccountsService {
 
   /** LHV's own BIC for an account here: LHV UK's for a GB account, else the given one. */
   async #agentBic(bic: string, account?: string) {
-    const own = account && await this.deps.directory.ownerOf(this.#masterOf(account))
+    const own = account && await this.deps.directory.ownerOf(await this.#masterOf(account))
     return bic11(own && isUkAccount(account) ? LHV_UK_BIC : bic)
   }
 
-  #masterOf(iban: string) { return this.deps.viban.resolve(iban)?.master ?? iban }
+  async #masterOf(iban: string) { return (await this.deps.viban.resolve(iban))?.master ?? iban }
 
   async #bookedView(e: JournalEntry) {
     const debit = e.direction === 'DBIT'
@@ -162,7 +162,7 @@ export class AccountsService {
     const date = dateLondon(e.bookedAt)
     return {
       ...(e.endToEndId ? { EndToEndId: e.endToEndId } : {}),
-      IsVirtualAccountPayment: (!!e.virtual && !e.virtual.agency) || (!!e.counterparty.iban && !!this.deps.viban.resolve(e.counterparty.iban)),
+      IsVirtualAccountPayment: (!!e.virtual && !e.virtual.agency) || (!!e.counterparty.iban && !!(await this.deps.viban.resolve(e.counterparty.iban))),
       Amount: { Amount: fromMinor(e.amount), Currency: e.currency },
       CreditDebitIndicator: debit ? 'Debit' : 'Credit',
       Status: 'Booked',
@@ -186,24 +186,24 @@ export class AccountsService {
   }
 
   /** The account a path names (IBAN or 14-digit sort code + account number), if the customer has it. */
-  #resolve(customer: Customer, raw: string): { account: string; master: string } | undefined {
+  async #resolve(customer: Customer, raw: string): Promise<{ account: string; master: string } | undefined> {
     const t = decodeURIComponent(raw).replace(/[\s-]+/g, '').toUpperCase()
     const own = (master: string) => customer.accounts.includes(master) && isUkAccount(master)
     if (/^[0-9]{14}$/.test(t)) {
       const master = customer.accounts.find((a) => gbBban(a) === t)
       if (master && own(master)) return { account: master, master }
-      const v = this.deps.viban.all().find((x) => gbBban(x.iban) === t && own(x.master))
+      const v = (await this.deps.viban.all()).find((x) => gbBban(x.iban) === t && own(x.master))
       return v ? { account: v.iban, master: v.master } : undefined
     }
     const iban = normalizeIban(t)
     if (own(iban)) return { account: iban, master: iban }
-    const v = this.deps.viban.resolve(iban)
+    const v = (await this.deps.viban.resolve(iban))
     return v && own(v.master) ? { account: v.iban, master: v.master } : undefined
   }
 
   /** GET /accounts/{accountNumber}/payments. */
-  payments(customer: Customer, accountNumber: string, q: Record<string, unknown>) {
-    const acc = this.#resolve(customer, accountNumber)
+  async payments(customer: Customer, accountNumber: string, q: Record<string, unknown>) {
+    const acc = await this.#resolve(customer, accountNumber)
     if (!acc) throw denied()
     const today = dateLondon(this.deps.clock.now())
     const toDate = dateParam(q.toDate, 'toDate', today)
@@ -216,13 +216,19 @@ export class AccountsService {
     const page = intParam(q.page, 'page', 0, 0)
     const size = intParam(q.size, 'size', 1, 20)
     if (size > 100) throw bad('size must be at most 100')
-    const holder = (account: string) => this.deps.viban.resolve(account)?.holder?.name ?? customer.name
+    const names = new Map<string, string>()
+    const holder = (account: string) => names.get(account) ?? customer.name
     const all = this.#incoming.entries().map(([, e]) => e)
       .filter((e) => e.master === acc.master && (acc.account === acc.master || e.account === acc.account))
       .filter((e) => statuses.has(e.status))
       .filter((e) => { const d = dateLondon(e.at); return d >= fromDate && d <= toDate })
       .sort((a, b) => a.at.getTime() - b.at.getTime())
-    const Transaction = all.slice(page * size, (page + 1) * size).map((e) => ({
+    const shown = all.slice(page * size, (page + 1) * size)
+    for (const e of shown) {
+      const name = (await this.deps.viban.resolve(e.account))?.holder?.name
+      if (name) names.set(e.account, name)
+    }
+    const Transaction = shown.map((e) => ({
       AccountId: e.master,
       Amount: { Amount: fromMinor(e.amount), Currency: e.currency },
       CreditDebitIndicator: 'Credit',
@@ -238,8 +244,8 @@ export class AccountsService {
   // --- Simulator: incoming payments held before booking (decision 712) -------------------
 
   /** Holds an incoming payment as Pending (no booking, no notification) until decided. */
-  hold(p: HeldIncoming) {
-    const v = this.deps.viban.resolve(p.iban)
+  async hold(p: HeldIncoming) {
+    const v = await this.deps.viban.resolve(p.iban)
     this.#held.set(p.ref, p)
     this.onIncoming({ ref: p.ref, status: 'Pending', account: p.iban, master: v?.master ?? p.iban, amount: p.amount, currency: p.currency,
       debtor: { name: p.debtor.name, iban: p.debtor.iban } })

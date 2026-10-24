@@ -69,10 +69,10 @@ async function pay(creditorIban: string, amount: string, creditorName = 'Katie B
 
 async function addViban(master: string, status: 'ACTIVE' | 'CLOSED', name: string) {
   const reg = ctx.emulator.viban.registry
-  return reg.add({
+  return (await reg.add({
     iban: await reg.generate(master), master, owner: { code: U1.code, country: 'GB' }, status, createdAt: ctx.clock.now(),
     user: { company: { Name: name } as never, address: { Country: 'GB', StreetNo: '1 High Street', CityCounty: 'London' } },
-  }).iban
+  })).iban
 }
 
 describe('G samples', () => {

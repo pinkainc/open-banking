@@ -258,7 +258,7 @@ export class PaymentEngine {
       if (b.ctrlSum !== undefined && !decimalEq(b.ctrlSum, decimalSum(b.txs.map((t) => t.amount!)))) return R.blockSum
     }
     for (const b of f.blocks) {
-      const owner = b.debtorOther ? undefined : await this.directory.ownerOf(this.#account(b.debtorIban!))
+      const owner = b.debtorOther ? undefined : await this.directory.ownerOf(await this.#account(b.debtorIban!))
       if (owner) {
         if (keyOf(owner) !== keyOf(customer)) return R.noRights
         continue
@@ -337,7 +337,7 @@ export class PaymentEngine {
       ? [keyOf(customer), tx.instrId, debtorIban, creditorIban ?? tx.creditorOther ?? '', tx.currency, amount].join('|') : undefined
     if (instrKey && (await this.#instrIds.has(instrKey))) return rj(R.duplicatePayment)
     // A VIBAN debtor must be ACTIVE and named as its holder; the master account pays.
-    const debtorV = block.debtorOther ? undefined : this.opts.virtual?.resolve(debtorIban)
+    const debtorV = block.debtorOther ? undefined : (await this.opts.virtual?.resolve(debtorIban))
     if (debtorV && debtorV.status !== 'ACTIVE') return rj(R.debtorInactive)
     if (debtorV && !sameName(rawBlock.debtorName, debtorV.holder?.name)) return rj(R.debtorName)
     // An agency debtor: named and addressed in the payment (LHV keeps neither), not CLOSED (decisions 830, 831).
@@ -351,7 +351,7 @@ export class PaymentEngine {
     }
     const debtorAccount = debtorV?.master ?? debtorA?.master ?? debtorIban
     // A VIBAN creditor is credited on its master account, unless it is not ACTIVE.
-    const creditorV = creditorIban ? this.opts.virtual?.resolve(creditorIban) : undefined
+    const creditorV = creditorIban ? (await this.opts.virtual?.resolve(creditorIban)) : undefined
     if (creditorV && creditorV.status !== 'ACTIVE') {
       this.opts.onIncoming?.({ ref: servicerRef(), status: 'Rejected', account: creditorIban!, master: creditorV.master, amount, currency: tx.currency!,
         debtor: { name: block.debtorName ?? customer.name, iban: debtorIban } })
@@ -410,7 +410,7 @@ export class PaymentEngine {
         throw e
       }
       await this.#hold(file.customer, p)
-      return this.#internalBooked(file, p)
+      return await this.#internalBooked(file, p)
     }
     try {
       await this.ledger.reserve({ ref: p.ref, account: p.debtorAccount, amount: p.amount, currency: p.currency })
@@ -431,10 +431,10 @@ export class PaymentEngine {
   }
 
   /** Booked internally: ACSC, camt.054 DBIT to the debtor and CRDT to the creditor. */
-  #internalBooked(file: FileRef, p: Plan): Step {
+  async #internalBooked(file: FileRef, p: Plan): Promise<Step> {
     const { block, tx, creditorOwner, creditorV } = p
     const customer = file.customer
-    const notices: Notice[] = [{ customer, booking: this.#debitBooking(customer, p, 'INTERNAL', this.bank.bic) }]
+    const notices: Notice[] = [{ customer, booking: await this.#debitBooking(customer, p, 'INTERNAL', this.bank.bic) }]
     notices.push({ customer: creditorOwner!, booking: {
       account: p.creditorAccount!, virtual: creditorV ? virtualParty(creditorV) : p.creditorA && agencyParty(p.creditorA, p.creditorIban ?? tx.creditorOther!, tx.creditorName),
       owner: { name: creditorOwner!.name, code: creditorOwner!.code }, direction: 'CRDT',
@@ -512,7 +512,7 @@ export class PaymentEngine {
       await this.ledger.commit(p.ref, this.rails.settlementAccount(scheme))
       return {
         status: { ...accepted, status: 'ACSC', reason: undefined, scheme },
-        notices: [{ customer: file.customer, booking: this.#debitBooking(file.customer, p, scheme) }],
+        notices: [{ customer: file.customer, booking: await this.#debitBooking(file.customer, p, scheme) }],
       }
     }
     // SEPA Instant attempted and failed: an automatic choice goes on as SEPA (ACWC first).
@@ -624,7 +624,7 @@ export class PaymentEngine {
       } else if (p.plan.creditorOwner) {
         await this.ledger.commit(ref, p.plan.creditorAccount!)
         this.#incomingOf(p.file, p.plan, 'Booked')
-        steps.push(this.#internalBooked(p.file, p.plan))
+        steps.push(await this.#internalBooked(p.file, p.plan))
       } else {
         const s = await this.#rails(p.file, p.plan, { ...p.status, status: 'ACSP', reason: undefined })
         if (s) steps.push(s)
@@ -651,10 +651,10 @@ export class PaymentEngine {
   }
 
   /** The debit of a planned payment; an agency debtor as found when it was checked. */
-  #debitBooking(customer: Customer, p: Plan, scheme: string, creditorBic?: string): Booking {
+  async #debitBooking(customer: Customer, p: Plan, scheme: string, creditorBic?: string): Promise<Booking> {
     const { block, tx, ref } = p
     const iban = normalizeIban(block.debtorIban!)
-    const v = block.debtorOther ? undefined : this.opts.virtual?.resolve(iban)
+    const v = block.debtorOther ? undefined : (await this.opts.virtual?.resolve(iban))
     const a = v ? undefined : p.debtorA
     const party = v ? virtualParty(v) : a ? {
       ...(block.debtorOther ? { account: iban } : { iban }), name: block.debtorName, country: block.debtorAddress?.country, address: block.debtorAddress?.town, agency: true,
@@ -672,15 +672,15 @@ export class PaymentEngine {
   /** The receiver bank's country: LHV's own for an account here, else the BIC's, else the IBAN's. */
   async #receiverCountry(tx: Tx): Promise<string | undefined> {
     const iban = tx.creditorIban ? normalizeIban(tx.creditorIban) : undefined
-    if (iban && await this.directory.ownerOf(this.#account(iban))) return this.bank.bic.slice(4, 6).toUpperCase()
+    if (iban && await this.directory.ownerOf(await this.#account(iban))) return this.bank.bic.slice(4, 6).toUpperCase()
     if (tx.creditorBic && tx.creditorBic.length >= 6) return tx.creditorBic.slice(4, 6).toUpperCase()
     return iban ? ibanCountry(iban) : undefined
   }
 
   /** The ledger account behind an IBAN: a VIBAN's master account, else the IBAN itself. */
-  #account(iban: string) {
+  async #account(iban: string) {
     const n = normalizeIban(iban)
-    return this.opts.virtual?.resolve(n)?.master ?? n
+    return (await this.opts.virtual?.resolve(n))?.master ?? n
   }
 
   /** The synchronised agency accounts with this identifier (IBAN, GB IBAN or sort code + account number), LHV EE first. */
@@ -707,7 +707,7 @@ export class PaymentEngine {
   async #ledgerAccount(b: Block, customer: Customer): Promise<string> {
     const id = normalizeIban(b.debtorIban ?? '')
     if (!b.debtorOther) {
-      const v = this.opts.virtual?.resolve(id)
+      const v = (await this.opts.virtual?.resolve(id))
       if (v) return v.master
       if (await this.directory.ownerOf(id)) return id
     }
@@ -745,7 +745,7 @@ export class PaymentEngine {
 
   async #receive(c: IncomingCredit): Promise<CreditResult> {
     const iban = normalizeIban(c.iban)
-    if (!this.opts.virtual?.resolve(iban) && !await this.directory.ownerOf(iban) && !(await this.#agency(iban)).length) {
+    if (!(await this.opts.virtual?.resolve(iban)) && !await this.directory.ownerOf(iban) && !(await this.#agency(iban)).length) {
       return { status: 'returned', code: 'AC01', reason: R.accountNumber }
     }
     const r = await this.incoming({
@@ -759,7 +759,7 @@ export class PaymentEngine {
   async incoming(p: { iban: string; amount: bigint; currency: string; scheme: string; debtor: { name?: string; iban?: string; bic?: string; /** A non-IBAN account (Bacs: sort code + account number). */ account?: string }; remittance?: string; reference?: string; endToEndId?: string; /** Reuse a reference (a held payment, decision 712). */ ref?: string; /** The creditor's name as the payment gives it. */ creditorName?: string
     /** The sender's references, shown in Refs as the G use case 7 sample (decision 847). */ pmtInfId?: string; instrId?: string }) {
     const iban = normalizeIban(p.iban)
-    const v = this.opts.virtual?.resolve(iban)
+    const v = (await this.opts.virtual?.resolve(iban))
     // To a VIBAN that is not ACTIVE: returned to the sender, nothing booked or notified.
     if (v && v.status !== 'ACTIVE') {
       this.opts.onIncoming?.({ ref: p.ref ?? servicerRef(), status: 'Rejected', account: iban, master: v.master, amount: p.amount, currency: p.currency,

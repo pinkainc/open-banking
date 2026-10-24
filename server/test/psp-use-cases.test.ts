@@ -108,8 +108,8 @@ async function uk(customers: any[]): Promise<Ctx> {
   return setup({}, s, { flavour: 'UK' })
 }
 /** A VIBAN of the master account with a company holder. */
-function viban(ctx: Ctx, iban: string, master: string, holder: { name: string; country: string; street: string }) {
-  ctx.emulator.viban.registry.add({
+async function viban(ctx: Ctx, iban: string, master: string, holder: { name: string; country: string; street: string }) {
+  await ctx.emulator.viban.registry.add({
     iban, master, owner: { code: PSP.code, country: 'GB' }, status: 'ACTIVE', createdAt: ctx.clock.now(), activatedAt: ctx.clock.now(),
     user: { company: { Name: holder.name } as any, address: { Country: holder.country, StreetNo: holder.street, CityCounty: 'City' } },
   })
@@ -161,8 +161,8 @@ describe('PSP use cases (G payment examples)', { skip: NO_PAGES }, () => {
   for (const n of [4, 5, 6]) {
     test(`use case ${n}: ${n === 4 ? 'VIBAN payment' : n === 5 ? 'level-2 VIBAN payment' : 'level-2 VIBAN payment with an Ultimate Debtor'}`, async () => {
       const ctx = await uk([{ ...PAUL, accounts: [{ iban: VIBAN_MASTER, balances: { GBP: '10.00' }, viban: true }] }])
-      if (n === 6) viban(ctx, 'GB49LHVB04030600272224', VIBAN_MASTER, { name: 'Shanghai Tech Innovations Co., Ltd.', country: 'CN', street: '88 Zhangjiang Road' })
-      else viban(ctx, 'GB42LHVB04030600271186', VIBAN_MASTER, { name: 'Salman Limited', country: 'PT', street: 'Rua do Comércio 25' })
+      if (n === 6) await viban(ctx, 'GB49LHVB04030600272224', VIBAN_MASTER, { name: 'Shanghai Tech Innovations Co., Ltd.', country: 'CN', street: '88 Zhangjiang Road' })
+      else await viban(ctx, 'GB42LHVB04030600271186', VIBAN_MASTER, { name: 'Salman Limited', country: 'PT', street: 'Rua do Comércio 25' })
       const d = await outgoing({ ctx, as: PAUL.code, tabs: tabs(n) })
       // Use case 4's sample carries the address double-encoded (UTF-8 read as Latin-1); use case 5's has it right.
       same(d, n === 4 ? { ...NONE, camt: ['~BkToCstmrDbtCdtNtfctn/Ntfctn/Ntry/NtryDtls/TxDtls/RltdPties/Dbtr/PstlAdr/AdrLine: "Rua do ComÃ©rcio 25" != "Rua do Comércio 25"'] } : NONE)

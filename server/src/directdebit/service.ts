@@ -267,7 +267,7 @@ export class DirectDebitService {
     if (c.amount <= 0n) return rj(REASONS.AM02, 'AM02')
     if (!c.mandateId?.trim()) return rj(E.mandate)
     if (!/^[A-Z]{2}\d{2}[A-Z0-9]{1,30}$/.test(debtorIban) || (this.d.strictIban !== false && !ibanChecksumOk(debtorIban))) return rj(E.ibanFormat)
-    if (debtorIban === c.creditor.iban || this.d.virtual?.resolve(debtorIban)) return rj(REASONS.AG01, 'AG01')
+    if (debtorIban === c.creditor.iban || (await this.d.virtual?.resolve(debtorIban))) return rj(REASONS.AG01, 'AG01')
     const now = this.d.clock.now()
     if (now.getTime() > submissionCutoff(c.settlementDate) || dateTallinn(now) < addDays(c.dueDate, -EARLIEST_DAYS)) return rj(E.date)
     return { ...base, status: 'ACCP' }
@@ -460,7 +460,7 @@ export class DirectDebitService {
   async #incoming(x: ExternalCollection): Promise<Collection> {
     await this.#tick()
     const debtorIban = normalizeIban(x.debtorIban)
-    if (this.d.virtual?.resolve(debtorIban)) throw new DirectDebitError(409, 'collections from a virtual IBAN are refused (AG01)')
+    if ((await this.d.virtual?.resolve(debtorIban))) throw new DirectDebitError(409, 'collections from a virtual IBAN are refused (AG01)')
     const owner = await this.d.directory.ownerOf(debtorIban)
     if (!owner) throw new DirectDebitError(404, `no account ${debtorIban}`)
     const today = dateTallinn(this.d.clock.now())

@@ -75,7 +75,7 @@ describe('EE Verification of Payee (XML)', () => {
   let ctx: Ctx
   before(async () => {
     ctx = await setup()
-    ctx.emulator.viban.registry.add({
+    await ctx.emulator.viban.registry.add({
       iban: VIBAN, master: C1.iban, owner: { code: C1.code, country: 'EE' }, status: 'ACTIVE', createdAt: new Date(),
       user: { person: { Name: 'Mari Maasikas', BirthDate: '1990-01-01', Residency: 'EE' }, address: { Country: 'EE', StreetNo: 'x', CityCounty: 'Tallinn' } },
     })

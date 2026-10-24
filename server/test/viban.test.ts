@@ -707,9 +707,10 @@ describe('published samples (P 10)', { skip: HAVE_DOC ? false : 'docs mirror not
   /** Puts a published VIBAN under the sample master, as the open sample of that variant would have. */
   const register = async (iban: string, variant: string, status: Viban['status'] = 'ACTIVE') => {
     const a = await ok('open', S.get(`open/request/${variant}`)!, who)
-    const v = ctx.emulator.viban.registry.get(a.root.VirtualIBAN)!
-    ctx.emulator.viban.registry.add({ ...v, iban, status })
+    const v = (await ctx.emulator.viban.registry.get(a.root.VirtualIBAN))!
+    await ctx.emulator.viban.registry.add({ ...v, iban, status })
     v.clientReference = undefined // the generated one gives its reference to the published number
+    await ctx.emulator.viban.registry.save(v)
   }
 
   test('the document has every request and response sample', () => {
@@ -740,7 +741,9 @@ describe('published samples (P 10)', { skip: HAVE_DOC ? false : 'docs mirror not
 
     test(`status notification, ${variant}: the published shape`, async () => {
       await register('EE717777000200014007', variant, 'ON_HOLD')
-      ctx.emulator.viban.registry.get('EE717777000200014007')!.clientReference = '12345678'
+      const v = (await ctx.emulator.viban.registry.get('EE717777000200014007'))!
+      v.clientReference = '12345678'
+      await ctx.emulator.viban.registry.save(v)
       await bankStatus('EE717777000200014007', 'ACTIVE')
       await bankStatus('EE717777000200014007', 'CLOSED')
       const ns = await notifications(PSP)
@@ -798,7 +801,7 @@ describe('PAYMENT_VIBAN_SEPA sample', { skip: sample('PAYMENT_VIBAN_SEPA', 'PAYM
       company: { Name: 'Company of John', CountryOfOrigin: 'GB', TaxResidency: 'GB', RegistrationNumber: '0000', Representative: { Name: 'John', BirthDate: '1980-09-24', Residency: 'GB' } },
       address: { Country: 'GB', StreetNo: 'ADDRESS', CityCounty: 'London' },
     }
-    ctx.emulator.viban.registry.add({ iban: VIBAN, master: C1.iban, owner: { code: C1.code, country: 'EE' }, status: 'ACTIVE', user, createdAt: new Date() })
+    await ctx.emulator.viban.registry.add({ iban: VIBAN, master: C1.iban, owner: { code: C1.code, country: 'EE' }, status: 'ACTIVE', user, createdAt: new Date() })
     await call(ctx, { method: 'POST', url: '/_sim/rails/no-instant', body: { account: 'ES0000000000000000000000' } })
     const r = await pay(xml)
     const statuses = (doc: string) => [...doc.matchAll(/<(GrpSts|TxSts)>([A-Z]+)</g)].map((m) => `${m[1]}=${m[2]}`)

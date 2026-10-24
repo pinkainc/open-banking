@@ -112,7 +112,7 @@ export function simRoutes(emulator: Emulator) {
       if (!b.iban) throw bad('iban is required')
       // `iban` may also be an agency account: an IBAN or a sort code and account number (decision 835).
       const iban = normalizeIban(b.iban)
-      const viban = emulator.viban.registry.get(iban)
+      const viban = await emulator.viban.registry.get(iban)
       const agency = !await emulator.directory.ownerOf(iban) && !viban ? (await emulator.agency.accounts.find(iban))[0] : undefined
       if (!await emulator.directory.ownerOf(iban) && !viban && !agency) throw new ConnectError(404, 'NOT_FOUND', `no account ${iban}`)
       const scheme = b.scheme ?? 'SEPA'

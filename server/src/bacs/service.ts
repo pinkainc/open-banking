@@ -198,7 +198,7 @@ export class BacsService {
   /** A GB account of ours (or a VIBAN on one) as a Bacs party: sort code and account number. */
   async #own(raw: string): Promise<{ iban: string; master: string; customer: Customer; party: Party }> {
     const iban = normalizeIban(raw)
-    const v = this.d.virtual.resolve(iban)
+    const v = (await this.d.virtual.resolve(iban))
     const master = v?.master ?? iban
     const customer = await this.d.directory.ownerOf(master)
     if (!customer) throw new BacsError(404, `no account ${iban}`)

@@ -134,7 +134,7 @@ export class Emulator {
     else if (this.bank.address) checkBankAddress(this.bank.address)
     const xsd = opts.xsdDir ? new XsdValidator(opts.xsdDir) : undefined
     this.viban = new VibanService(this.directory, this.inbox, this.clock, {
-      schemas: opts.xsdDir ? new VibanSchemas(opts.xsdDir) : undefined, errors: opts.vibanErrors,
+      schemas: opts.xsdDir ? new VibanSchemas(opts.xsdDir) : undefined, errors: opts.vibanErrors, keyed,
     })
     this.accounts = new AccountsService({
       directory: this.directory, ledger: this.ledger, journal: this.journal, viban: this.viban.registry, clock: this.clock, bank: this.bank, engine: () => this.engine,
@@ -203,7 +203,8 @@ export class Emulator {
     for (const a of c.accounts ?? []) {
       // A stored customer the seed lists more accounts for keeps its own (decision 972).
       if (typeof a === 'string' || !customer.accounts.includes(normalizeIban(a.iban))) continue
-      if (a.viban) this.viban.registry.agreement(a.iban)
+      // Recorded once: a stored agreement, signed or ended over /_sim, is kept after a restart (decision 984).
+      if (a.viban) await this.viban.registry.agreement(a.iban, true, { ifAbsent: o.fundOnce })
       if (!a.balances) continue
       const held = o.fundOnce ? await this.ledger.balances(normalizeIban(a.iban)) : {}
       for (const [ccy, amount] of Object.entries(a.balances)) if (!held[ccy]) await this.fund(a.iban, amount, ccy)

@@ -114,7 +114,7 @@ export class PayeeService {
   async #ownHolder(iban: string): Promise<Holder | undefined> {
     const owner = await this.deps.directory.ownerOf(iban)
     if (owner) return { name: owner.name, category: 'BUSINESS' }
-    const v = this.deps.viban.get(iban)
+    const v = await this.deps.viban.get(iban)
     const name = v?.user?.person?.Name ?? v?.user?.company?.Name
     if (v && v.status === 'ACTIVE' && name) return { name, category: v.user?.person ? 'PERSONAL' : 'BUSINESS' }
     return this.#agencyHolder(iban)
@@ -135,7 +135,7 @@ export class PayeeService {
     let own = iban ? await this.#ownHolder(iban) : undefined
     if (!own && bban && !iban) {
       const match = (i: string) => gbBban(i) === bban
-      const acct = (await this.deps.directory.all()).flatMap((c) => c.accounts).find(match) ?? this.deps.viban.all().map((v) => v.iban).find(match)
+      const acct = (await this.deps.directory.all()).flatMap((c) => c.accounts).find(match) ?? (await this.deps.viban.all()).map((v) => v.iban).find(match)
       if (acct) own = await this.#ownHolder(acct)
       else own = await this.#agencyHolder(bban)
     }

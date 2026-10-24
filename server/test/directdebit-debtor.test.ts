@@ -287,7 +287,7 @@ describe('a creditor at another bank (/_sim/direct-debit/incoming)', () => {
     assert.equal((await incoming({ amount: '1.00' })).statusCode, 400)
     assert.equal((await incoming({ debtorIban: C2.iban, amount: '1.00', dueDate: '12.03.2026' })).statusCode, 400)
     const VIBAN = 'EE467777000010897825'
-    ctx.emulator.viban.registry.add({ iban: VIBAN, master: C1.iban, owner: { code: C1.code, country: 'EE' }, status: 'ACTIVE', user: { address: { Country: 'EE', StreetNo: 'x', CityCounty: 'Tallinn' } } as any, createdAt: new Date() })
+    await ctx.emulator.viban.registry.add({ iban: VIBAN, master: C1.iban, owner: { code: C1.code, country: 'EE' }, status: 'ACTIVE', user: { address: { Country: 'EE', StreetNo: 'x', CityCounty: 'Tallinn' } } as any, createdAt: new Date() })
     const v = await incoming({ debtorIban: VIBAN, amount: '1.00' })
     assert.equal(v.statusCode, 409, v.body)
   })
@@ -343,7 +343,7 @@ describe('R-transactions from the debtor bank (/_sim/direct-debit/return)', () =
 describe('a VIBAN as the debtor account', () => {
   test('rejected with AG01 (docs/decisions.md 312)', async () => {
     const VIBAN = 'EE467777000010897825'
-    ctx.emulator.viban.registry.add({ iban: VIBAN, master: C1.iban, owner: { code: C1.code, country: 'EE' }, status: 'ACTIVE', user: { address: { Country: 'EE', StreetNo: 'x', CityCounty: 'Tallinn' } } as any, createdAt: new Date() })
+    await ctx.emulator.viban.registry.add({ iban: VIBAN, master: C1.iban, owner: { code: C1.code, country: 'EE' }, status: 'ACTIVE', user: { address: { Country: 'EE', StreetNo: 'x', CityCounty: 'Tallinn' } } as any, createdAt: new Date() })
     const res = await call(ctx, { method: 'POST', url: '/direct-debit/collection', body: pain008([{ creditorIban: C2.iban, txs: [{ debtorIban: VIBAN, debtorName: 'Demo Customer 1' }] }]), as: C2.code })
     assert.equal(res.statusCode, 202)
     const t = ddStatus((await ddDrain(ctx, C2.code))[0]).blocks[0].txs[0]
