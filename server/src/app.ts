@@ -141,6 +141,10 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     if (flavour !== 'UK' || key === undefined || req.method !== 'POST' || req.url.startsWith('/_sim')) return undefined
     return `${keyOf((await caller(req)).user)}|${key.toLowerCase()}`
   }
+  // The key is resolved once, before the handler, and remembered before the answer is sent
+  // (onSend): resolving it again after the response (the directory is async, decision 970)
+  // let a repeat sent right after the first answer through (decision 979).
+  const idemKeys = new WeakMap<FastifyRequest, string>()
   app.addHook('preHandler', async (req) => {
     const k = await idemKey(req)
     if (!k) return
@@ -148,12 +152,12 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     if (idempotency.has(k)) {
       throw new ConnectError(409, 'CONFLICT', 'Request with this X-Idempotency-Key has already been received')
     }
+    idemKeys.set(req, k)
   })
-  app.addHook('onResponse', async (req, reply) => {
-    if (reply.statusCode >= 300) return
-    let k: string | undefined
-    try { k = await idemKey(req) } catch { return }
-    if (k) idempotency.add(k)
+  app.addHook('onSend', async (req, reply, payload) => {
+    const k = idemKeys.get(req)
+    if (k && reply.statusCode < 300) idempotency.add(k)
+    return payload
   })
 
   // --- Communication test -------------------------------------------------------
