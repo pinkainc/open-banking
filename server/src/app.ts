@@ -21,6 +21,7 @@ import { BoundedSet, DEFAULT_BOUNDS, type Bounds } from './bounded.js'
 import { COMPRESSION_THRESHOLD, compress, negotiate } from './compression.js'
 import { mockLargeStatement } from './statements/mock-large.js'
 import { eeWebhookSimRoutes, registerEeWebhooks } from './webhooks/ee-routes.js'
+import { registerUkWebhooks, ukWebhookSimRoutes } from './webhooks/uk-routes.js'
 import { payeeSimRoutes, registerPayee } from './payee/routes.js'
 import { accepted as acceptedFor } from './requests.js'
 import { BALANCE_TYPE, STATEMENT_TYPE } from './statements/reports.js'
@@ -266,6 +267,8 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     registerRequestsV2(app, emulator, caller)
     // Account reports in JSON: list, transaction by reference, incoming pending/rejected (decisions 705–713).
     registerAccounts(app, emulator, caller)
+    // Webhooks, LHV UK: per-type configurations, history and replay (decisions 720–729).
+    jsonTextScope(app, (scope) => registerUkWebhooks(scope, emulator, caller))
   }
 
   // --- Payment initiation ---------------------------------------------------------
@@ -326,6 +329,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     app.register(fxSimRoutes(emulator), { prefix: '/_sim/fx' })
     app.register(contractsSimRoutes(emulator), { prefix: '/_sim/contracts' })
     app.register(eeWebhookSimRoutes(emulator), { prefix: '/_sim/webhooks/ee' })
+    app.register(ukWebhookSimRoutes(emulator), { prefix: '/_sim/webhooks/uk' })
     app.register(payeeSimRoutes(emulator), { prefix: '/_sim/payee' })
     app.register(accountsSimRoutes(emulator), { prefix: '/_sim/accounts' })
   }

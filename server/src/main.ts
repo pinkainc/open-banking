@@ -47,6 +47,8 @@ setInterval(() => { emulator.directDebit.tick().catch((e) => console.error('dire
 setInterval(() => { emulator.fx.tick().catch((e) => console.error('FX settlement failed:', e)) }, 60 * 1000).unref()
 // EE webhooks: retries fall due on the clock; checked every 15 seconds.
 setInterval(() => { emulator.webhooksEe.tick().catch((e) => console.error('EE webhook delivery failed:', e)) }, 15 * 1000).unref()
+// UK webhooks: retries for up to 24 h, due on the clock; checked every 15 seconds.
+setInterval(() => { emulator.webhooksUk.tick().catch((e) => console.error('UK webhook delivery failed:', e)) }, 15 * 1000).unref()
 for (const signal of ['SIGTERM', 'SIGINT'] as const) process.on(signal, () => process.exit(0))
 const port = Number(env.PORT ?? 8443)
 await app.listen({ port, host: env.HOST ?? '127.0.0.1' })

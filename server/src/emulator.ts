@@ -1,5 +1,5 @@
 // The parts of the bank wired together: directory, ledger, rails, inbox, the payment
-// engine, SEPA Direct Debit, FX, service provider contracts and the EE webhooks. Ledger
+// engine, SEPA Direct Debit, FX, service provider contracts and the EE and UK webhooks. Ledger
 // and rails are interfaces; the defaults are in memory and the simulator.
 import { DEFAULT_BOUNDS, type Bounds } from './bounded.js'
 import { systemClock, type Clock } from './clock.js'
@@ -13,6 +13,7 @@ import { DirectDebitService } from './directdebit/service.js'
 import { FxService } from './fx/service.js'
 import { Contracts } from './contracts/service.js'
 import { EeWebhooks, type Deliver } from './webhooks/ee.js'
+import { DEFAULT_EVENT_BOUNDS, UkWebhooks, type UkDeliver } from './webhooks/uk.js'
 import { SimulatorRails, type Rails } from './rails.js'
 import { normalizeIban } from './iban.js'
 import { servicerRef } from './ids.js'
@@ -43,8 +44,10 @@ export interface EmulatorOptions {
   vibanErrors?: ErrorDelivery
   /** How EE webhook payloads are sent (default HTTP POST); tests record them instead. */
   webhookDeliver?: Deliver
+  /** How UK webhooks are sent (default HTTP POST); tests record them instead. */
+  ukWebhookDeliver?: UkDeliver
   /** Limits of what is remembered (decision 504); each part overrides DEFAULT_BOUNDS. */
-  memory?: { tombstones?: Partial<Bounds>; msgIds?: Partial<Bounds>; processed?: Partial<Bounds>; requests?: Partial<Bounds>; incoming?: Partial<Bounds> }
+  memory?: { tombstones?: Partial<Bounds>; msgIds?: Partial<Bounds>; processed?: Partial<Bounds>; requests?: Partial<Bounds>; incoming?: Partial<Bounds>; webhookEvents?: Partial<Bounds> }
 }
 
 export const DEFAULT_BANK: Bank = { bic: 'LHVBEE22', name: 'open-banking emulator' }
@@ -68,6 +71,8 @@ export class Emulator {
   readonly fx: FxService
   readonly contracts: Contracts
   readonly webhooksEe: EeWebhooks
+  /** LHV UK webhooks: per-type configurations, HMAC, retries, history and replay. */
+  readonly webhooksUk: UkWebhooks
   readonly payee: PayeeService
   /** UK account reports: account list, transaction by reference, incoming pending and rejected. */
   readonly accounts: AccountsService
@@ -81,6 +86,11 @@ export class Emulator {
     this.inbox = new Inbox(this.clock, undefined, tombstones, { ...DEFAULT_BOUNDS.processed, ...opts.memory?.processed })
     this.requests = new RequestLog(this.clock, { ...DEFAULT_BOUNDS.requests, ...opts.memory?.requests })
     this.webhooksEe = new EeWebhooks(this.inbox, this.clock, { deliver: opts.webhookDeliver })
+    this.webhooksUk = new UkWebhooks(this.inbox, this.directory, this.clock, {
+      deliver: opts.ukWebhookDeliver, events: { ...DEFAULT_EVENT_BOUNDS, ...opts.memory?.webhookEvents },
+      // The entity that processed the request behind the message; notifications are LHV UK's (decision 724).
+      bankOf: (m) => (m.requestId && this.requests.bankCodeOf(m.requestId)) || 'LHVUK',
+    })
     this.bank = { ...DEFAULT_BANK, ...opts.bank }
     if (this.bank.address === undefined) this.bank.address = defaultBankAddress(this.bank.bic)
     else if (this.bank.address) checkBankAddress(this.bank.address)
