@@ -60,7 +60,7 @@ Legend: `[x]` done · `[ ]` open · `[~]` in progress · `(?)` needs a sandbox r
 
 - [x] FX trade offers and confirmations (TODAY / SPOT on the ledger), contract management, EE webhooks with delivery and retries; every JSON body schema-validated (decisions 400–424)
 - [ ] FX: currency holiday calendars, TODAY cut-off, zero-decimal currencies (JPY); `contractStatus: failed` never produced; 10 s webhook delivery timeout untested
-- [ ] Route EE webhooks / EE services on the UK host by `x-bank-code: LHVEE` → S5
+- [x] Route EE webhooks / EE services on the UK host by `x-bank-code: LHVEE` (decision 701, S5)
 - [ ] (?) FX: one or two confirmations for TODAY, rates, error texts; contracts status codes; EE webhook retries and ownership (sandbox q35–42) → S8
 - [x] VoP / CoP requester (EE XML both hosts, UK JSON VoP and CoP), `GET /test/accounts/ibans` (decisions 600–610, S4)
 - [x] Messages v2 (list, metadata, processed / undelete) on the shared inbox, requests API, `/messages/test/next` (decisions 620–632, S4)
@@ -68,11 +68,17 @@ Legend: `[x]` done · `[ ]` open · `[~]` in progress · `(?)` needs a sandbox r
 - [ ] (?) VoP/CoP error delivery, matching rules, service grant, EE VoP via UK host; v2 archive and EE messages in v2 (sandbox q52–61) → S8
 - [ ] Signed payments: `heartbeat.post` + BDOC/ASiC-E on `/payment`
 
-## UK flavour → S5
+## UK flavour
 
-- [ ] `/accounts/*` (PascalCase JSON, AWS-style error bodies), `x-bank-code: LHVEE` routing to EE services
-- [ ] UK webhooks with X-LHV-HMAC (golden value in the mirror), history, replay
-- [ ] Bacs: incoming notification, mandates, collection reject
+- [x] `X-Bank-Code` routing on the UK host (`LHVEE` → EE-only services, UK-only services 404 for LHV EE), heartbeat in UK time (decisions 700–704, S5)
+- [x] `/accounts/*` (PascalCase JSON, AWS-style and bare-string errors, incoming pending / rejected, `/_sim/accounts/incoming`) (decisions 705–714, S5)
+- [x] UK webhooks with X-LHV-HMAC (golden vector reproduced), 24 h retries, history, replay (decisions 720–729, S5)
+- [x] Bacs: incoming credits, mandate accept / cancel, collection reject, unsolicited mandate initiation / scheme cancel / collection notification / reversal, 3-day cycle (decisions 740–749, S5)
+- [ ] `CreDtTm` and other timestamps in pain/camt from the UK host are still Tallinn time (decision 704)
+- [ ] Bank BIC `LHVBGB2L` only in `/accounts/*`; pain/camt keep `LHVBEE22` (decision 714)
+- [ ] Content routing (pain.001 / camt.060 account decides LHV EE vs UK without the header) not modelled (decision 700)
+- [ ] Bacs: unpaid collections send no message, mandate amendments not modelled, no outgoing Bacs / Faster Payments (LHV as originator)
+- [ ] (?) Routing, `/accounts/*` shapes, UK webhook payload names (`regCode` vs `clientCode`), gzip + HMAC, retries, Bacs flows (sandbox q62–76) → S8
 
 ## L6 — agency / indirect scheme access → S6
 
@@ -112,3 +118,16 @@ Odluke iz noćnog rada S4 (2026-10-24), označene „(noćni rad, potvrditi)”:
 - [ ] 621 obrađene poruke čuvaju se tjedan dana od nastanka; **ponovljeni v1 DELETE sad daje 200 do 7 dana** (mijenja ponašanje iz 504)
 - [ ] 622–624 parametri `/v2/messages`, metapodaci, validacija PATCH-a
 - [ ] 630, 632 dnevnik zahtjeva (5 d / 10 000), datumi `/v2/requests` po UK kalendaru
+
+Odluke iz noćnog rada S5 (2026-10-24), označene „(noćni rad, potvrditi)”:
+
+- [ ] 700–702 routing: `X-Bank-Code` bira entitet samo na UK hostu; EE-only servisi (FX, ugovori, SEPA DD, `POST /heartbeat`, EE webhookovi) na UK hostu **bez `LHVEE` sad daju 404** (dosad su radili); UK-only servisi 404 za LHV EE
+- [ ] 706–709 `/accounts/*`: oblik liste i straničenje, samo GB računi klijenta, AWS `{"Message"}` samo za identitet (inače goli JSON string), `TransactionId` i ime polja `VirtualAccount` su pretpostavka
+- [ ] 711, 713 odakle dolaze dolazni pending / rejected; parametri `/accounts/{acc}/payments` (`size` > 100 → 400)
+- [ ] 720 UK webhook konfiguracije: jedna po messageType po klijentu, tajna samo na POST/PUT, PUT bez tajne je rotira, konfiguracija pružatelja pokriva povezane klijente
+- [ ] 721 polja payloada: zadano `regCode`/`regCodeIssuer` (svi JSON primjeri), a golden HMAC vektor daje tek `clientCode`/`clientCountry` (opcija); dokumentacija je proturječna
+- [ ] 723, 725–728 retry raspored (12 pokušaja u 24 h), HMAC nad nekomprimiranim JSON-om, povijest 7 d / 10 000, greške JSON (403 ostaje XML), replay 200/400
+- [ ] 740–742 Bacs samo na UK hostu, bez gatea; kalendar Engleske i Walesa; dolazni kredit Pending pa knjižen 3. dan u 06:00
+- [ ] 743, 746 naplate: odbijena naplata se i dalje tereti (G use case 5), retry 11:30/15:00/18:30, mapiranje kodova
+- [ ] 744 mandati: G primjer koristi `Accptd` „0” za prihvat (obrnuto od XSD booleana) — mi tako čitamo
+- [ ] 745, 747, 749 sinkroni 400 `<Errors>` za loše dokumente; pravila otkaza i reversala; granice memorije Bacsa

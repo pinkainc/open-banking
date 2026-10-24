@@ -176,3 +176,31 @@ Nalazi:
    uštedjelo istraživanje.
 3. Jedno stanje za v1 i v2 promijenilo je v1 ponašanje: ponovljeni DELETE daje 200 dok
    je poruka u tjednoj arhivi obrađenih (odluka 621).
+
+## S5: UK flavour (2026-10-24, noćni rad)
+
+Tri agenta strogo jedan za drugim, bez worktreeja, svaki implementacija i testovi zajedno.
+Bacs je stao u istu sesiju, pa S5b nije trebao.
+
+| Agent | Effort | Poziva | Tokena konteksta | Ishod |
+|---|---|---|---|---|
+| accounts + routing | high | 73 | 212k | 3 operacije, `routing.ts`, UK vrijeme heartbeata; +24 testa, odluke 700–714, pitanja 62–66 |
+| UK webhookovi | high | 43 | 180k | 8 operacija, HMAC jednak golden vektoru; +31, odluke 720–729, pitanja 67–70 |
+| Bacs | high | 82 | 244k | 5 operacija, kalendar Engleske i Walesa, Bacs XSD-ovi u `fetch-reference.sh`; +17, odluke 740–749, pitanja 71–76 |
+
+Nalazi:
+
+1. **Routing kao `onRoute` pravilo** umjesto provjera po servisu: prvi agent je unaprijed
+   upisao putanje sljedećih dvaju agenata u `UK_ONLY`, pa webhookovi i Bacs nisu morali
+   dirati routing. Cijena: EE-only servisi na UK hostu bez `LHVEE` sad su 404, pa su tri
+   stara testa dobila header.
+2. **Predaja između agenata kroz izvještaj** opet je radila: tipovi poruka i `inbox.add`
+   okidač za webhookove, koje je drugi agent javio, trećem su uštedjeli istraživanje.
+3. **Dokumentacija za UK webhookove je proturječna**: JSON primjeri koriste
+   `regCode`/`regCodeIssuer`, a HMAC vektor iz webhook-security.md `clientCode`/`clientCountry`.
+   Golden vrijednost daje samo druga varijanta (odluka 721).
+4. **G-ovi primjeri nisu uvijek valjani**: JSON bez zareza, pain.012 bez `OrgnlMsgInf/MsgNmId`,
+   `Accptd` „0” za prihvat. Testovi popravljaju primjer i zapisuju odstupanje.
+5. Mirror je imao necommitana pitanja 52–61 iz S4; orkestrator ih je commitao lokalno
+   (zajedno sa 62–66). Agente treba izričito pustiti da commitaju u mirror.
+

@@ -31,7 +31,7 @@ povijest.
 | S2 | L5a JSON servisi (EE) | gotovo | 550836f | 26/58 | 342 | odluke 400–424, sandbox pitanja 35–42; camt.053 sad nosi BkTxCd knjiženja (i za DD) |
 | S3 | Dugovi L0–L3 + pending | gotovo | 338f0a7 | 26/58 | 429 | noćni rad; odluke 500–504, 520–527, 550–553 (većina „potvrditi”), pitanja 43–51; `payment.oneoff` uklonjen kod LHV-a (520), pa operacija ostaje 404 |
 | S4 | VoP/CoP + messages v2 | gotovo | abca222 | 35/58 | 483 | noćni rad; odluke 600–610, 620–632 (većina „potvrditi”), pitanja 52–61; potpisani zahtjevi (BDOC) i strana odgovaratelja (VoP/CoP responder) nisu dio paketa |
-| S5 | UK flavour | čeka | | | | |
+| S5 | UK flavour | gotovo | 81caade | 51/58 | 555 | noćni rad; odluke 700–714, 720–729, 740–749 (većina „potvrditi”), pitanja 62–76; plan je brojio 52 jer je `payment.oneoff` (404) računao kao pokriven |
 | S6 | L6 agency + ostatak | čeka | | | | |
 | S7 | Trajnost i jezgra | čeka | | | | |
 | S8 | Conformance harness | blokirano | | | | treba sandbox certifikat |
