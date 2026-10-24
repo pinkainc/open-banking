@@ -6,11 +6,16 @@ import type pg from 'pg'
 import type { PgDb } from './db.js'
 import type { OutboxItem, OutboxStore } from '../outbox.js'
 
+/** One statement for all items; an item whose key is stored already is left as stored (a rerun's deterministic key, decision 1007). */
 export async function insertOutbox(q: pg.Pool | pg.PoolClient, ns: string, items: OutboxItem[]) {
-  for (const i of items) {
-    await q.query(`insert into outbox_items (ns, key, kind, payload, at, intent, ord) values ($1, $2, $3, $4, $5, $6, nextval('outbox_seq'))`,
-      [ns, i.key, i.kind, JSON.stringify(i.payload), i.at, i.intent ?? null])
-  }
+  if (!items.length) return
+  const values: unknown[] = []
+  const rows = items.map((i, n) => {
+    values.push(i.key, i.kind, JSON.stringify(i.payload), i.at, i.intent ?? null)
+    const b = n * 5
+    return `($1, $${b + 2}, $${b + 3}, $${b + 4}, $${b + 5}, $${b + 6}, nextval('outbox_seq'))`
+  })
+  await q.query(`insert into outbox_items (ns, key, kind, payload, at, intent, ord) values ${rows.join(', ')} on conflict (ns, key) do nothing`, [ns, ...values])
 }
 
 export class PgOutbox implements OutboxStore {

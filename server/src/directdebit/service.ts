@@ -182,10 +182,13 @@ export class DirectDebitService {
       for (const e of entries) {
         const o = await this.#collections.get(e.id)
         const collection = o && (await this.#decode(o))
+        // A rejection whose collection was not saved REJECTED (a crash in between): the next tick decides it again (decision 1007).
+        if (e.status.status === 'RJCT' && collection?.status !== 'REJECTED') continue
         let b = report.blocks.find((x) => x.pmtInfId === e.status.pmtInfId)
         if (!b) report.blocks.push((b = { pmtInfId: e.status.pmtInfId, txs: [] }))
         b.txs.push({ ...e.status, ...(collection ? { collection } : {}) })
       }
+      if (!report.blocks.length) continue
       // Once by the group: two deliveries of it (a recovery racing the tick) add one message.
       await this.d.inbox.add({ customer: entries[0].customer, type: DD_TYPES.outgoing, requestId: entries[0].requestId, body: ddStatusReport(report, this.d.bank.bic, this.d.clock.now()), key: group })
     }
@@ -324,7 +327,7 @@ export class DirectDebitService {
     const due: Collection[] = []
     // Creditor reports of one tick: one pain.002 per original file (a group, decision 999). An
     // ACSC entry is kept with its booking; a repeat's was (its group is recovered); an RJCT,
-    // booked nothing, is delivered with them.
+    // booked nothing, is kept before its collection is saved REJECTED (decision 1007).
     const groups = new Map<string, string>()
     const groupOf = (c: Collection) => {
       const k = `${keyOf(c.creditorCustomer!)}|${c.msgId}|${c.requestId}`
@@ -370,11 +373,17 @@ export class DirectDebitService {
   async #settle(c: Collection, groupOf: (c: Collection) => string): Promise<{ status: DdStatus; report?: OutboxItem; repeat?: boolean }> {
     const base = { pmtInfId: c.pmtInfId, endToEndId: c.endToEndId, instrId: c.instrId, collection: c }
     const settlement = this.d.rails.settlementAccount(DD_SCHEME)
+    // A rejection books nothing: its report entry is kept before the collection is saved
+    // REJECTED (decision 1007), keyed by the collection, so a rerun after a crash in between
+    // keeps one; delivered while the collection is not REJECTED it is dropped (#deliverReports).
     const fail = async (code: string) => {
+      const status = { ...base, status: 'RJCT', code, text: REASONS[code] } as DdStatus
+      const report = c.creditorCustomer ? { ...this.#reportItem(c, status, groupOf(c)), key: `dd-rjct:${c.id}` } : undefined
+      if (report) await this.d.ledger.outbox.put([report])
       c.status = 'REJECTED'
       c.reason = code
       await this.#save(c)
-      return { status: { ...base, status: 'RJCT', code, text: REASONS[code] } as DdStatus }
+      return { status, report }
     }
     const acsc: DdStatus = { ...base, status: 'ACSC' }
     const report = c.creditorCustomer ? [this.#reportItem(c, acsc, groupOf(c))] : []

@@ -15,7 +15,7 @@
 //   item is (the customer's camt.054 settings of that moment); `message`, an inbox message
 //   made before the booking it reports (an FX confirmation, decision 999). A kind may be a
 //   group (`onGroup`): its items are delivered together, so one message can report several
-//   bookings (the DD status report of a file, decision 999).
+//   bookings (the DD status report of a file, decision 999; a payment round's pain.002, 1005).
 import { randomUUID } from 'node:crypto'
 import type { Clock } from './clock.js'
 import type { Customer, CustomerKey } from './directory.js'
@@ -45,8 +45,8 @@ export interface OutboxStore {
 
 export class MemoryOutbox implements OutboxStore {
   #items = new Map<string, OutboxItem>()
-  /** Synchronous, for MemoryLedger to write with the booking. */
-  putNow(items: OutboxItem[]) { for (const i of items) this.#items.set(i.key, structuredClone(i)) }
+  /** Synchronous, for MemoryLedger to write with the booking. A key stored already stays as stored (as in Postgres). */
+  putNow(items: OutboxItem[]) { for (const i of items) if (!this.#items.has(i.key)) this.#items.set(i.key, structuredClone(i)) }
   async put(items: OutboxItem[]) { this.putNow(items) }
   async pending() { return [...this.#items.values()].map((i) => structuredClone(i)) }
   async remove(keys: string[]) { for (const k of keys) this.#items.delete(k) }
@@ -71,11 +71,20 @@ export interface MessagePayload { customer: CustomerKey; type: string; body: str
 export class Outbox {
   #handlers = new Map<string, Handler>()
   #groups = new Map<string, GroupHandler>()
+  #minAge = new Map<string, number>()
   constructor(private ledger: Ledger, private clock: Clock, private bank: Bank) {}
 
   on(kind: string, handler: Handler) { this.#handlers.set(kind, handler) }
-  /** A kind whose items one delivery hands over together (after the other kinds'); recover hands over all pending ones together. */
-  onGroup(kind: string, handler: GroupHandler) { this.#groups.set(kind, handler) }
+  /**
+   * A kind whose items one delivery hands over together (after the other kinds'); recover
+   * hands over all pending ones together. `minAgeMs`: a recovery with an age limit (the
+   * timer in main.ts) leaves the kind's items younger than this, the process that wrote
+   * them still working on them (a payment round, decision 1005); one at start takes all.
+   */
+  onGroup(kind: string, handler: GroupHandler, o: { minAgeMs?: number } = {}) {
+    this.#groups.set(kind, handler)
+    if (o.minAgeMs) this.#minAge.set(kind, o.minAgeMs)
+  }
 
   /** Any item: the payload as given (JSON-safe). */
   item(kind: string, payload: unknown): OutboxItem { return { key: randomUUID(), kind, payload, at: this.clock.now().getTime() } }
@@ -116,7 +125,7 @@ export class Outbox {
     const grouped: OutboxItem[] = []
     for (const i of await this.ledger.outbox.pending()) {
       // minAgeMs 0 (at start) takes all, also an item another process's clock dates later (decision 998).
-      if ((o.minAgeMs && now - i.at < o.minAgeMs) || !(this.#handlers.has(i.kind) || this.#groups.has(i.kind))) continue
+      if ((o.minAgeMs && now - i.at < Math.max(o.minAgeMs, this.#minAge.get(i.kind) ?? 0)) || !(this.#handlers.has(i.kind) || this.#groups.has(i.kind))) continue
       if (i.intent !== undefined && !(await this.ledger.booked?.(i.intent))) {
         if (now - i.at >= INTENT_GRACE_MS) await this.ledger.outbox.remove([i.key])
         continue

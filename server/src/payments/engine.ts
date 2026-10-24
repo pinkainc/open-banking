@@ -20,6 +20,7 @@
 // exists by the time POST /payment returns. Rails that answer `accepted` (a real scheme,
 // decision 930) leave the payment ACSP with its funds reserved; the outcome arrives later
 // through settle() and is reported then, the same reports and notifications as at once.
+import { randomUUID } from 'node:crypto'
 import { DEFAULT_BOUNDS, type Bounds } from '../bounded.js'
 import { memoryKeyed, UNBOUNDED, type KeyedFactory, type KeyedStore } from '../keyed.js'
 import type { Clock } from '../clock.js'
@@ -143,9 +144,31 @@ export const inactiveCreditor = (v: VirtualAccount) =>
 export const MANUAL_REVIEW = new Set(['Robba Bank', 'Steela Koinz', 'Laundra Cashwell', 'Frauda Lott', 'Skimmi Cardar'].map((n) => n.toLowerCase()))
 const normName = (n?: string) => (n ?? '').replace(/\s+/g, ' ').trim().toLowerCase()
 
-/** One status of one payment; `next` yields its following status (a later report). */
-/** `reported`: its pain.002 went with its booking's first call (decision 999), the round leaves it out. */
-interface Step { status: TxStatus; notices?: OutboxItem[]; next?: () => Promise<Step | undefined>; reported?: boolean }
+/**
+ * One status of one payment; `next` yields its following status (a later report), given
+ * the maker of its entry there. `reported`: its pain.002 went with its booking's first call
+ * (decision 999), the round leaves it out. `i`: its place in the round; `entry`: its entry
+ * in the round's report, kept with its booking (decision 1005).
+ */
+interface Step { status: TxStatus; notices?: OutboxItem[]; next?: (entry: EntryOf) => Promise<Step | undefined>; reported?: boolean; i?: number; entry?: OutboxItem }
+/** Makes a payment's entry in its round's report, to be kept with the booking that settles it. */
+type EntryOf = (status: TxStatus) => OutboxItem
+/** A round of a file's status reports: one pain.002, group and block statuses in the first. */
+interface Round { id: string; file: FileRef; first: boolean }
+/** The outbox kind of a round's pain.002 (decision 1005): a group per round. */
+const ROUND_KIND = 'pain002'
+/** The timer's recovery leaves a round this long to the process running it (decision 1005). */
+export const ROUND_RECOVER_MIN_AGE_MS = 10 * 60 * 1000
+type StoredFile = PendingRecord['file']
+/** A payment's entry in its round's report; no status when the round reports nothing for it now. */
+interface RoundEntry { type: 'entry'; round: string; file: StoredFile; first: boolean; i: number; status?: Record<string, unknown> }
+/**
+ * A transaction of a round planned before anything books (decision 1005): a status from the
+ * checks, a checked plan to execute (or park for SCA), or a parked payment decided (1006).
+ */
+type PlannedTx = { i: number; status: Record<string, unknown> } | { i: number; plan: Record<string, unknown>; park?: boolean } | { i: number; ref: string; parked: ParkedRecord }
+interface RoundPlan { type: 'plan'; round: string; file: StoredFile; first: boolean; txs: PlannedTx[]; decision?: { approve: boolean; reason?: string } }
+const json = <T>(v: T): T => JSON.parse(JSON.stringify(v))
 interface FileRef { customer: Customer; requestId: string; version: PainVersion; msgId: string }
 /** A payment that passed the checks that need no money. */
 interface Plan {
@@ -207,6 +230,8 @@ export class PaymentEngine {
   #credits: KeyedStore<CreditRecord>
   /** Credits being booked in this process: a concurrent repeat waits for the same result. */
   #crediting = new Map<string, Promise<CreditResult>>()
+  /** Parked payments claimed by a decision's round (decision 1006): the round's id, so a resumed round knows its own. */
+  #decided: KeyedStore<string>
   constructor(
     private directory: DirectoryStore, private ledger: Ledger, private rails: Rails, private inbox: InboxStore,
     private clock: Clock, private bank: Bank, private opts: EngineOptions,
@@ -219,6 +244,9 @@ export class PaymentEngine {
     this.#inflight = keyed('payment-inflight', UNBOUNDED)
     this.#parked = keyed('payment-parked', UNBOUNDED)
     this.#pending = opts.pending ?? new MemoryRailsPending()
+    this.#decided = keyed('payment-decided', msgIds)
+    // A round's pain.002 (decision 1005): delivered by the round, or after a crash resumed and delivered by recover.
+    opts.outbox.onGroup(ROUND_KIND, (items) => this.#roundReports(items), { minAgeMs: ROUND_RECOVER_MIN_AGE_MS })
   }
 
   /** Handles one POST /payment body. Throws XmlSyntaxError when the body is not XML at all. */
@@ -278,46 +306,213 @@ export class PaymentEngine {
   async #process(f: PaymentFile, customer: Customer, requestId: string) {
     const file: FileRef = { customer, requestId, version: f.version, msgId: f.msgId! }
     const pending = customer.payments === 'PENDING'
-    const steps: Step[] = []
+    // Checked, then planned in the outbox before anything books (decision 1005): a crash
+    // after any booking resumes the round from the plan and reports it once.
+    const txs: PlannedTx[] = []
+    const plans: (Plan | undefined)[] = []
     for (const block of f.blocks) {
       for (const tx of block.txs) {
         const c = await this.#check(block, tx, customer)
-        if ('status' in c) steps.push({ status: c.status })
-        else if (pending) steps.push({ status: await this.#park('SCA', file, c.plan) })
-        else steps.push(await this.#execute(file, c.plan))
+        const i = txs.length
+        plans.push('plan' in c ? c.plan : undefined)
+        txs.push('status' in c ? { i, status: json(c.status) as unknown as Record<string, unknown> } : { i, plan: encodePlan(c.plan), ...(pending ? { park: true } : {}) })
       }
     }
-    await this.#flow(file, steps, true)
+    const round: Round = { id: randomUUID(), file, first: true }
+    const plan = this.#planItem(round, txs)
+    await this.ledger.outbox.put([plan])
+    const steps: Step[] = []
+    for (const t of txs) {
+      const s = await this.#runPlanned(round, t, { live: plans[t.i] })
+      if (s) steps.push(s)
+    }
+    await this.#flow(steps, round, [plan])
+  }
+
+  #planItem(round: Round, txs: PlannedTx[], decision?: RoundPlan['decision']): OutboxItem {
+    const payload: RoundPlan = { type: 'plan', round: round.id, file: fileKey(round.file), first: round.first, txs, ...(decision ? { decision } : {}) }
+    return this.opts.outbox.item(ROUND_KIND, json(payload))
+  }
+
+  #entry(round: Round, i: number, status?: TxStatus): OutboxItem {
+    const payload: RoundEntry = { type: 'entry', round: round.id, file: fileKey(round.file), first: round.first, i, ...(status ? { status: json(status) as unknown as Record<string, unknown> } : {}) }
+    return this.opts.outbox.item(ROUND_KIND, json(payload))
+  }
+
+  #entryOf(round: Round, i: number): EntryOf { return (status) => this.#entry(round, i, status) }
+
+  /**
+   * Runs one planned transaction of a round; `live` the plan as checked (not read back),
+   * `resume` after a crash, when a reservation of a transaction without an entry was not
+   * reported and is made again (decision 1005).
+   */
+  async #runPlanned(round: Round, t: PlannedTx, o: { live?: Plan; decision?: RoundPlan['decision']; resume?: boolean } = {}): Promise<Step | undefined> {
+    const file = round.file
+    const entryOf = this.#entryOf(round, t.i)
+    const at = (s: Step | undefined): Step | undefined => s && { ...s, i: t.i }
+    if ('status' in t) return at({ status: t.status as unknown as TxStatus })
+    if ('plan' in t) {
+      const plan = o.live ?? (await this.#decodePlan(t.plan))
+      if (!plan) return undefined
+      if (t.park) return at({ status: await this.#park('SCA', file, plan) })
+      if (o.resume) await this.ledger.release(plan.ref)
+      return at(await this.#execute(file, plan, entryOf))
+    }
+    // A parked payment decided (decision 1006): claimed by this round once, also when the
+    // round is resumed after a crash (the claim names it); another round's claim skips it.
+    if (!(await this.#decided.add(t.ref, round.id)) && (await this.#decided.get(t.ref)) !== round.id) return undefined
+    await this.#parked.take(t.ref)
+    const p = await this.#unpark(t.parked)
+    if (!p) return undefined
+    const { approve, reason } = o.decision!
+    const { block, tx } = p.plan
+    if (p.kind === 'SCA') {
+      if (!approve) {
+        await this.#forget(p.plan)
+        return at({ status: { block, tx, status: 'RJCT', reason: reason ?? R.requestedByCustomer, scheme: p.status.scheme } })
+      }
+      if (o.resume) await this.ledger.release(p.plan.ref)
+      return at(await this.#execute(p.file, p.plan, entryOf))
+    }
+    if (!approve) {
+      await this.#release(p.plan)
+      await this.#incomingOf(p.file, p.plan, 'Rejected')
+      return at({ status: { ...p.status, status: 'RJCT', reason: reason ?? R.regulatory } })
+    }
+    if (p.plan.creditorOwner) {
+      const booked = await this.#internalBooked(p.file, p.plan)
+      const entry = entryOf(booked.status)
+      if ((await this.ledger.commit(t.ref, p.plan.creditorAccount!, [...booked.notices!, entry])).repeat) booked.notices = []
+      else booked.entry = entry
+      await this.#incomingOf(p.file, p.plan, 'Booked')
+      return at(booked)
+    }
+    // Sent before the crash: waiting at the rails, settled from there (reconcile).
+    if (o.resume && (await this.#pending.get(t.ref))) return undefined
+    return at(await this.#rails(p.file, p.plan, { ...p.status, status: 'ACSP', reason: undefined }, entryOf))
   }
 
   /**
    * Reports rounds of steps: one pain.002 per round (group and block statuses only in the
    * first report about a file), then the round's camt.054s, then the steps that follow.
+   * The pain.002 goes through the outbox (decision 1005): each step's entry, kept with its
+   * booking or written now, and `carried` (the round's plan, entries a crash left) are
+   * delivered together; the group's handler (#roundReports) adds the report, once by the round.
    */
-  async #flow(file: FileRef, steps: Step[], first: boolean) {
-    let round = steps
-    while (round.length) {
-      const r: StatusReport = { version: file.version, originalMsgId: file.msgId, blocks: [] }
-      for (const s of round) {
-        if (s.reported) continue
-        let b = r.blocks.find((x) => x.pmtInfId === s.status.block.pmtInfId)
-        if (!b) r.blocks.push((b = { pmtInfId: s.status.block.pmtInfId!, txs: [] }))
-        b.txs.push(s.status)
+  async #flow(steps: Step[], round: Round, carried: OutboxItem[] = []) {
+    for (;;) {
+      const plan = carried.map((c) => c.payload as RoundPlan | RoundEntry).find((c): c is RoundPlan => c.type === 'plan')
+      const have = new Set(carried.map((c) => c.payload as RoundPlan | RoundEntry).flatMap((c) => (c.type === 'entry' ? [c.i] : [])))
+      const entries = [...carried]
+      const put: OutboxItem[] = []
+      const fresh = (i: number, status?: TxStatus) => { const e = this.#entry(round, i, status); put.push(e); entries.push(e) }
+      for (const s of steps) {
+        if (s.entry) entries.push(s.entry)
+        else if (!have.has(s.i!)) fresh(s.i!, s.reported ? undefined : s.status)
       }
-      if (first) {
+      // A planned transaction without a step reports nothing now; its empty entry completes the round.
+      for (const t of plan?.txs ?? []) if (!have.has(t.i) && !steps.some((s) => s.i === t.i)) fresh(t.i)
+      await this.ledger.outbox.put(put)
+      await this.opts.outbox.deliver(entries)
+      for (const s of steps) await this.opts.outbox.deliver(s.notices ?? [])
+      const next: Round = { id: randomUUID(), file: round.file, first: false }
+      const following: Step[] = []
+      for (const s of steps) {
+        const n = s.next && (await s.next(this.#entryOf(next, s.i!)))
+        if (n) following.push({ ...n, i: s.i })
+      }
+      if (!following.length) return
+      steps = following
+      round = next
+      carried = []
+    }
+  }
+
+  /**
+   * The outbox group of rounds' entries: one pain.002 per round, its message keyed by the
+   * round (a recovery racing the round adds one). A planned round with a transaction
+   * without an entry was cut by a crash: it is resumed first (decision 1005).
+   */
+  async #roundReports(items: OutboxItem[]) {
+    const rounds = new Map<string, OutboxItem[]>()
+    for (const i of items) {
+      const id = (i.payload as RoundEntry).round
+      rounds.set(id, [...(rounds.get(id) ?? []), i])
+    }
+    for (const [id, group] of rounds) {
+      const planItem = group.find((i) => (i.payload as RoundPlan).type === 'plan')
+      const plan = planItem?.payload as RoundPlan | undefined
+      // One entry per transaction; of two (a resumed booking found booked), one with a status.
+      const entries = new Map<number, OutboxItem>()
+      for (const i of group) {
+        const e = i.payload as RoundEntry
+        if (e.type === 'entry' && (!entries.has(e.i) || e.status)) entries.set(e.i, i)
+      }
+      const head = group[0].payload as RoundEntry
+      const file = await this.#fileOf(head.file)
+      if (!file) continue // the customer is gone: nothing to report to
+      const round: Round = { id, file, first: head.first }
+      if (plan && plan.txs.some((t) => !entries.has(t.i))) {
+        await this.#resume(round, plan, planItem!, entries)
+        continue
+      }
+      const r: StatusReport = { version: file.version, originalMsgId: file.msgId, blocks: [] }
+      for (const e of [...entries.values()].map((i) => i.payload as RoundEntry).sort((a, b) => a.i - b.i)) {
+        if (!e.status) continue
+        const st = e.status as unknown as TxStatus
+        let b = r.blocks.find((x) => x.pmtInfId === st.block.pmtInfId)
+        if (!b) r.blocks.push((b = { pmtInfId: st.block.pmtInfId!, txs: [] }))
+        b.txs.push(st)
+      }
+      if (round.first) {
         for (const b of r.blocks) b.status = aggregate(b.txs.map((t) => t.status))
         r.groupStatus = aggregate(r.blocks.flatMap((b) => b.txs.map((t) => t.status)))
       }
-      if (r.blocks.length) await this.#report(file.customer, file.requestId, r)
-      for (const s of round) await this.opts.outbox.deliver(s.notices ?? [])
-      const next: Step[] = []
-      for (const s of round) {
-        const n = s.next && (await s.next())
-        if (n) next.push(n)
-      }
-      round = next
-      first = false
+      if (r.blocks.length) await this.inbox.add({ ...(await this.#reportMessage(file.customer, file.requestId, r)), key: id })
     }
+  }
+
+  /**
+   * A round a crash cut (decision 1005): the transactions with an entry keep it (booked, or
+   * decided before the crash; their next steps did not run, the round was not reported),
+   * the others run again, then the round goes on as it would have.
+   */
+  async #resume(round: Round, plan: RoundPlan, planItem: OutboxItem, entries: Map<number, OutboxItem>) {
+    const steps: Step[] = []
+    for (const t of plan.txs) {
+      const e = entries.get(t.i)?.payload as RoundEntry | undefined
+      if (!e) {
+        const s = await this.#runPlanned(round, t, { decision: plan.decision, resume: true })
+        if (s) steps.push(s)
+        continue
+      }
+      if (!e.status) continue
+      const status = e.status as unknown as TxStatus
+      const p = 'plan' in t ? await this.#decodePlan(t.plan) : 'parked' in t ? (await this.#unpark(t.parked))?.plan : undefined
+      steps.push({ status, i: t.i, ...(p ? { next: this.#nextOf(round.file, p, status) } : {}) })
+    }
+    await this.#flow(steps, round, [planItem, ...entries.values()])
+  }
+
+  /** What follows a status in a later round: the rails for an accepted external payment (SEPA after ACWC), manual review's PDNG. */
+  #nextOf(file: FileRef, p: Plan, s: TxStatus): Step['next'] {
+    if (s.status === 'ACWC') {
+      const sepa: Plan = { ...p, scheme: 'SEPA' }
+      return (e) => this.#rails(file, sepa, { ...s, status: 'ACSP', reason: undefined }, e)
+    }
+    if (s.status !== 'ACSP') return undefined
+    if (MANUAL_REVIEW.has(normName(p.tx.creditorName))) {
+      return async () => {
+        await this.#incomingOf(file, p, 'Pending')
+        return { status: await this.#park('REVIEW', file, p, { ...s, status: 'PDNG', reason: R.manualReview }) }
+      }
+    }
+    return (e) => this.#rails(file, p, s, e)
+  }
+
+  async #fileOf(f: StoredFile): Promise<FileRef | undefined> {
+    const customer = await this.directory.get(f.customer)
+    return customer && { ...f, customer, version: f.version as PainVersion }
   }
 
   /** The checks that need no money: a rejection, or what to execute. */
@@ -391,7 +586,7 @@ export class PaymentEngine {
   }
 
   /** A checked payment goes ahead: funds, then booking (internal) or the rails (external). */
-  async #execute(file: FileRef, p: Plan): Promise<Step> {
+  async #execute(file: FileRef, p: Plan, entryOf?: EntryOf): Promise<Step> {
     const { block, tx } = p
     const rj = async (reason: string, scheme?: string): Promise<Step> => {
       await this.#forget(p)
@@ -409,9 +604,12 @@ export class PaymentEngine {
     const review = MANUAL_REVIEW.has(normName(tx.creditorName))
     if (p.creditorOwner && !review) {
       const booked = await this.#internalBooked(file, p)
+      // Its entry in the round's report goes with the booking (decision 1005).
+      const entry = entryOf?.(booked.status)
       try {
         // A repeat of the ref (decision 995) delivers nothing again.
-        if ((await this.ledger.transfer({ ref: p.ref, from: p.debtorAccount, to: p.creditorAccount!, amount: p.amount, currency: p.currency }, booked.notices)).repeat) booked.notices = []
+        if ((await this.ledger.transfer({ ref: p.ref, from: p.debtorAccount, to: p.creditorAccount!, amount: p.amount, currency: p.currency }, [...booked.notices!, ...(entry ? [entry] : [])])).repeat) booked.notices = []
+        else booked.entry = entry
       } catch (e) {
         if (e instanceof InsufficientFunds) return rj(R.funds, scheme)
         throw e
@@ -427,14 +625,8 @@ export class PaymentEngine {
     }
     await this.#hold(file.customer, p)
     const accepted: TxStatus = { block, tx, status: 'ACSP', servicerRef: p.ref, scheme, ...(p.creditorOwner ? { creditorBic: this.bank.bic } : {}) }
-    // Manual review (sanctions screening): accepted first, then PDNG until /_sim decides.
-    if (review) {
-      return { status: accepted, next: async () => {
-        await this.#incomingOf(file, p, 'Pending')
-        return { status: await this.#park('REVIEW', file, p, { ...accepted, status: 'PDNG', reason: R.manualReview }) }
-      } }
-    }
-    return { status: accepted, next: () => this.#rails(file, p, accepted) }
+    // Manual review (sanctions screening): accepted first, then PDNG until /_sim decides; else the rails.
+    return { status: accepted, next: this.#nextOf(file, p, accepted) }
   }
 
   /** Booked internally: ACSC, camt.054 DBIT to the debtor and CRDT to the creditor (made before the booking, which carries them). */
@@ -457,7 +649,7 @@ export class PaymentEngine {
    * Sends a reserved external payment to the rails. An immediate outcome is the step that
    * follows; `accepted` leaves it waiting for settle() (nothing more is reported now).
    */
-  async #rails(file: FileRef, p: Plan, accepted: TxStatus): Promise<Step | undefined> {
+  async #rails(file: FileRef, p: Plan, accepted: TxStatus, entryOf?: EntryOf): Promise<Step | undefined> {
     const { block, tx } = p
     // Registered before sending: a bridge may call back before its answer arrives.
     await this.#pending.put(this.#encode(file, p, accepted))
@@ -479,7 +671,7 @@ export class PaymentEngine {
     // Settled through the events while the answer was on its way: already reported (and a
     // SEPA fallback of it waits under the same ref with another scheme).
     if (!(await this.#pending.take(p.ref, p.scheme))) return undefined
-    return this.#outcome(file, p, accepted, answer)
+    return this.#outcome(file, p, accepted, answer, { entryOf })
   }
 
   /**
@@ -514,7 +706,7 @@ export class PaymentEngine {
       await this.opts.outbox.deliver(step.notices ?? [])
       return false
     }
-    await this.#flow(w.file, [step], false)
+    await this.#flow([{ ...step, i: 0 }], { id: randomUUID(), file: w.file, first: false })
     return true
   }
 
@@ -567,7 +759,7 @@ export class PaymentEngine {
   }
 
   /** The rails' outcome of a reserved external payment: booked, rejected, or on to SEPA. */
-  async #outcome(file: FileRef, p: Plan, accepted: TxStatus, outcome: RailsOutcome, o: { report?: boolean } = {}): Promise<Step> {
+  async #outcome(file: FileRef, p: Plan, accepted: TxStatus, outcome: RailsOutcome, o: { report?: boolean; entryOf?: EntryOf } = {}): Promise<Step> {
     const { block, tx } = p
     const scheme = p.scheme!
     if (outcome.status === 'settled') {
@@ -575,15 +767,16 @@ export class PaymentEngine {
       // `report`: its pain.002 goes with the commit too, before the camt.054 (decision 999).
       const status: TxStatus = { ...accepted, status: 'ACSC', reason: undefined, scheme }
       if (o.report) notices.unshift(this.opts.outbox.message(await this.#reportMessage(file.customer, file.requestId, { version: file.version, originalMsgId: file.msgId, blocks: [{ pmtInfId: block.pmtInfId!, txs: [status] }] })))
-      const b = await this.ledger.commit(p.ref, this.rails.settlementAccount(scheme), notices)
+      // `entryOf`: its entry in the round's report goes with the commit (decision 1005).
+      const entry = o.entryOf?.(status)
+      const b = await this.ledger.commit(p.ref, this.rails.settlementAccount(scheme), [...notices, ...(entry ? [entry] : [])])
       // A repeat: booked by an outcome from the rails' events at the same time, which reported it.
-      return b.repeat ? { status, notices: [], reported: true } : { status, notices }
+      return b.repeat ? { status, notices: [], reported: true } : { status, notices, entry }
     }
     // SEPA Instant attempted and failed: an automatic choice goes on as SEPA (ACWC first).
     if (outcome.status === 'unavailable' && scheme === 'INST' && p.automatic) {
-      const sepa: Plan = { ...p, scheme: 'SEPA' }
       const changed: TxStatus = { ...accepted, status: 'ACWC', reason: R.europeanPayment, scheme: 'SEPA' }
-      return { status: changed, next: () => this.#rails(file, sepa, { ...changed, status: 'ACSP', reason: undefined }) }
+      return { status: changed, next: this.#nextOf(file, p, changed) }
     }
     await this.#release(p)
     const reason = outcome.status === 'rejected' ? outcome.reason : scheme === 'INST' ? R.declinedTryEuropean : R.technical
@@ -667,35 +860,38 @@ export class PaymentEngine {
     const unknown: string[] = []
     for (const r of refs) if (!(await this.#parked.has(r))) unknown.push(r)
     if (unknown.length) return unknown
-    // One report per original file: grouped by its key (a parked payment comes back from the store as a new object).
-    const byFile = new Map<string, { file: FileRef; steps: Step[] }>()
-    for (const ref of refs) {
-      const r = await this.#parked.take(ref) // at most once: listed twice, or decided by another process
-      const p = r && await this.#unpark(r)
-      if (!p) continue
-      const fk = `${keyOf(p.file.customer)}|${p.file.requestId}|${p.file.msgId}`
-      const group = byFile.get(fk) ?? { file: p.file, steps: [] }
-      byFile.set(fk, group)
-      const steps = group.steps
-      const { block, tx } = p.plan
-      if (p.kind === 'SCA') {
-        if (!approve) await this.#forget(p.plan)
-        steps.push(approve ? await this.#execute(p.file, p.plan) : { status: { block, tx, status: 'RJCT', reason: reason ?? R.requestedByCustomer, scheme: p.status.scheme } })
-      } else if (!approve) {
-        await this.#release(p.plan)
-        await this.#incomingOf(p.file, p.plan, 'Rejected')
-        steps.push({ status: { ...p.status, status: 'RJCT', reason: reason ?? R.regulatory } })
-      } else if (p.plan.creditorOwner) {
-        const booked = await this.#internalBooked(p.file, p.plan)
-        if ((await this.ledger.commit(ref, p.plan.creditorAccount!, booked.notices)).repeat) booked.notices = []
-        await this.#incomingOf(p.file, p.plan, 'Booked')
-        steps.push(booked)
-      } else {
-        const s = await this.#rails(p.file, p.plan, { ...p.status, status: 'ACSP', reason: undefined })
+    // One report per original file: a round per file (a parked payment comes back from the
+    // store as a new object, grouped by its key), planned in the outbox before any payment
+    // is claimed (decision 1006); each payment is claimed by its round in #runPlanned.
+    const byFile = new Map<string, { file: StoredFile; txs: PlannedTx[] }>()
+    for (const ref of new Set(refs)) {
+      const r = await this.#parked.get(ref)
+      if (!r) continue
+      const fk = `${keyOf(r.file.customer)}|${r.file.requestId}|${r.file.msgId}`
+      const g = byFile.get(fk) ?? { file: r.file, txs: [] }
+      byFile.set(fk, g)
+      g.txs.push({ i: g.txs.length, ref, parked: r })
+    }
+    const decision = { approve, ...(reason !== undefined ? { reason } : {}) }
+    const rounds: { round: Round; txs: PlannedTx[]; plan: OutboxItem }[] = []
+    for (const g of byFile.values()) {
+      // A customer gone from the directory: nothing to decide for or report to (as #unpark).
+      const file = await this.#fileOf(g.file)
+      if (!file) { for (const t of g.txs) await this.#parked.take((t as { ref: string }).ref); continue }
+      const round: Round = { id: randomUUID(), file, first: false }
+      rounds.push({ round, txs: g.txs, plan: this.#planItem(round, g.txs, decision) })
+    }
+    await this.ledger.outbox.put(rounds.map((r) => r.plan))
+    const runs: { round: Round; steps: Step[]; plan: OutboxItem }[] = []
+    for (const { round, txs, plan } of rounds) {
+      const steps: Step[] = []
+      for (const t of txs) {
+        const s = await this.#runPlanned(round, t, { decision })
         if (s) steps.push(s)
       }
+      runs.push({ round, steps, plan })
     }
-    for (const { file, steps } of byFile.values()) await this.#flow(file, steps, false)
+    for (const { round, steps, plan } of runs) await this.#flow(steps, round, [plan])
     return []
   }
 
