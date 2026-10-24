@@ -105,66 +105,68 @@ Legend: `[x]` done · `[ ]` open · `[~]` in progress · `(?)` needs a sandbox r
 
 ## Za pregled ujutro
 
-Odluke iz noćnog rada S3 (2026-10-24), sve označene „(noćni rad, potvrditi)” u `docs/decisions.md`:
+Sve noćne odluke 500–968 korisnik je potvrdio 2026-10-24 (937 i 925 izričito, kako su zapisane); oznaka u `docs/decisions.md` je sad „(noćni rad, potvrđeno 2026-10-24)”. Novi noćni rad dodaje stavke ovdje.
 
-- [ ] 500 host flavour (EE default, `CONNECT_FLAVOUR`)
-- [ ] 501 service grants: seed `services` (bez polja = sve usluge), provodi se samo za HEARTBEAT, ACCOUNT_STATEMENT, ACCOUNT_BALANCE, PAYMENTS_WITHOUT_SIGNATURE
-- [ ] 502 certifikati: seed `certificates` (SHA-256), mijenja odluku 2 (TLS greške samo zbog datuma dolaze do aplikacije)
-- [ ] 503 kompresija samo na UK hostu; `/messages/test/next?mockLargeMessage=true` već postoji (dio `messages.test.next` iz S4)
-- [ ] 504 granice memorije (5 d / 24 h / 100k / 200k MsgId bez vremenskog limita)
-- [ ] 521–522 pending i ručni pregled (seed `payments: DIRECT|PENDING`)
-- [ ] 523 ACWC fallback
-- [ ] 524 limiti se sad **provode** (mijenja odluku 109 „samo se javljaju”)
-- [ ] 525 duplikat = isti InstrId + računi + valuta + iznos (PAYMENT_MULTI ponavlja InstrId)
-- [ ] 526 cp1257 doslovno po dokumentaciji, uključujući `;` → `č`
-- [ ] 527 DD: klijent bez `directDebit` polja više ne može slati naplate ni primati obavijest (zamjenjuje 310)
-- [ ] 551 VIBAN kao vlastita strana u camt.053 mastera; 553 adresa banke po zemlji BIC-a
+Odluke iz noćnog rada S3 (2026-10-24), sve označene „(noćni rad, potvrđeno 2026-10-24)” u `docs/decisions.md`:
 
-Odluke iz noćnog rada S4 (2026-10-24), označene „(noćni rad, potvrditi)”:
+- [x] 500 host flavour (EE default, `CONNECT_FLAVOUR`)
+- [x] 501 service grants: seed `services` (bez polja = sve usluge), provodi se samo za HEARTBEAT, ACCOUNT_STATEMENT, ACCOUNT_BALANCE, PAYMENTS_WITHOUT_SIGNATURE
+- [x] 502 certifikati: seed `certificates` (SHA-256), mijenja odluku 2 (TLS greške samo zbog datuma dolaze do aplikacije)
+- [x] 503 kompresija samo na UK hostu; `/messages/test/next?mockLargeMessage=true` već postoji (dio `messages.test.next` iz S4)
+- [x] 504 granice memorije (5 d / 24 h / 100k / 200k MsgId bez vremenskog limita)
+- [x] 521–522 pending i ručni pregled (seed `payments: DIRECT|PENDING`)
+- [x] 523 ACWC fallback
+- [x] 524 limiti se sad **provode** (mijenja odluku 109 „samo se javljaju”)
+- [x] 525 duplikat = isti InstrId + računi + valuta + iznos (PAYMENT_MULTI ponavlja InstrId)
+- [x] 526 cp1257 doslovno po dokumentaciji, uključujući `;` → `č`
+- [x] 527 DD: klijent bez `directDebit` polja više ne može slati naplate ni primati obavijest (zamjenjuje 310)
+- [x] 551 VIBAN kao vlastita strana u camt.053 mastera; 553 adresa banke po zemlji BIC-a
 
-- [ ] 601 pravila usporedbe imena (FULL / CLOSE) u `payee/match.ts`
-- [ ] 602 vlasnik računa: klijenti su uvijek BUSINESS, ACTIVE VIBAN odgovara imenom vlasnika; nepoznat račun NOT_APPLICABLE / NOAP / AC01
-- [ ] 603 greške EE VoP zahtjeva idu u inbox kao `<Errors>` (kao odluka 200), ne kao HTTP 4xx
-- [ ] 604–606 oblik UK VoP/CoP odgovora po G primjerima, greške u inboxu s `Data: null`, CoP ishod po kategoriji
-- [ ] 608 oblik `GET /test/accounts/ibans` (JSON polje IBAN-ova klijenta)
-- [ ] 609 VoP/CoP bez service granta
-- [ ] 620 v2 samo na UK hostu, jedno stanje za v1 i v2
-- [ ] 621 obrađene poruke čuvaju se tjedan dana od nastanka; **ponovljeni v1 DELETE sad daje 200 do 7 dana** (mijenja ponašanje iz 504)
-- [ ] 622–624 parametri `/v2/messages`, metapodaci, validacija PATCH-a
-- [ ] 630, 632 dnevnik zahtjeva (5 d / 10 000), datumi `/v2/requests` po UK kalendaru
+Odluke iz noćnog rada S4 (2026-10-24), označene „(noćni rad, potvrđeno 2026-10-24)”:
 
-Odluke iz noćnog rada S5 (2026-10-24), označene „(noćni rad, potvrditi)”:
+- [x] 601 pravila usporedbe imena (FULL / CLOSE) u `payee/match.ts`
+- [x] 602 vlasnik računa: klijenti su uvijek BUSINESS, ACTIVE VIBAN odgovara imenom vlasnika; nepoznat račun NOT_APPLICABLE / NOAP / AC01
+- [x] 603 greške EE VoP zahtjeva idu u inbox kao `<Errors>` (kao odluka 200), ne kao HTTP 4xx
+- [x] 604–606 oblik UK VoP/CoP odgovora po G primjerima, greške u inboxu s `Data: null`, CoP ishod po kategoriji
+- [x] 608 oblik `GET /test/accounts/ibans` (JSON polje IBAN-ova klijenta)
+- [x] 609 VoP/CoP bez service granta
+- [x] 620 v2 samo na UK hostu, jedno stanje za v1 i v2
+- [x] 621 obrađene poruke čuvaju se tjedan dana od nastanka; **ponovljeni v1 DELETE sad daje 200 do 7 dana** (mijenja ponašanje iz 504)
+- [x] 622–624 parametri `/v2/messages`, metapodaci, validacija PATCH-a
+- [x] 630, 632 dnevnik zahtjeva (5 d / 10 000), datumi `/v2/requests` po UK kalendaru
 
-- [ ] 700–702 routing: `X-Bank-Code` bira entitet samo na UK hostu; EE-only servisi (FX, ugovori, SEPA DD, `POST /heartbeat`, EE webhookovi) na UK hostu **bez `LHVEE` sad daju 404** (dosad su radili); UK-only servisi 404 za LHV EE
-- [ ] 706–709 `/accounts/*`: oblik liste i straničenje, samo GB računi klijenta, AWS `{"Message"}` samo za identitet (inače goli JSON string), `TransactionId` i ime polja `VirtualAccount` su pretpostavka
-- [ ] 711, 713 odakle dolaze dolazni pending / rejected; parametri `/accounts/{acc}/payments` (`size` > 100 → 400)
-- [ ] 720 UK webhook konfiguracije: jedna po messageType po klijentu, tajna samo na POST/PUT, PUT bez tajne je rotira, konfiguracija pružatelja pokriva povezane klijente
-- [ ] 721 polja payloada: zadano `regCode`/`regCodeIssuer` (svi JSON primjeri), a golden HMAC vektor daje tek `clientCode`/`clientCountry` (opcija); dokumentacija je proturječna
-- [ ] 723, 725–728 retry raspored (12 pokušaja u 24 h), HMAC nad nekomprimiranim JSON-om, povijest 7 d / 10 000, greške JSON (403 ostaje XML), replay 200/400
-- [ ] 740–742 Bacs samo na UK hostu, bez gatea; kalendar Engleske i Walesa; dolazni kredit Pending pa knjižen 3. dan u 06:00
-- [ ] 743, 746 naplate: odbijena naplata se i dalje tereti (G use case 5), retry 11:30/15:00/18:30, mapiranje kodova
-- [ ] 744 mandati: G primjer koristi `Accptd` „0” za prihvat (obrnuto od XSD booleana) — mi tako čitamo
-- [ ] 745, 747, 749 sinkroni 400 `<Errors>` za loše dokumente; pravila otkaza i reversala; granice memorije Bacsa
+Odluke iz noćnog rada S5 (2026-10-24), označene „(noćni rad, potvrđeno 2026-10-24)”:
 
-Odluke iz noćnog rada S6 (2026-10-24), označene „(noćni rad, potvrditi)”:
+- [x] 700–702 routing: `X-Bank-Code` bira entitet samo na UK hostu; EE-only servisi (FX, ugovori, SEPA DD, `POST /heartbeat`, EE webhookovi) na UK hostu **bez `LHVEE` sad daju 404** (dosad su radili); UK-only servisi 404 za LHV EE
+- [x] 706–709 `/accounts/*`: oblik liste i straničenje, samo GB računi klijenta, AWS `{"Message"}` samo za identitet (inače goli JSON string), `TransactionId` i ime polja `VirtualAccount` su pretpostavka
+- [x] 711, 713 odakle dolaze dolazni pending / rejected; parametri `/accounts/{acc}/payments` (`size` > 100 → 400)
+- [x] 720 UK webhook konfiguracije: jedna po messageType po klijentu, tajna samo na POST/PUT, PUT bez tajne je rotira, konfiguracija pružatelja pokriva povezane klijente
+- [x] 721 polja payloada: zadano `regCode`/`regCodeIssuer` (svi JSON primjeri), a golden HMAC vektor daje tek `clientCode`/`clientCountry` (opcija); dokumentacija je proturječna
+- [x] 723, 725–728 retry raspored (12 pokušaja u 24 h), HMAC nad nekomprimiranim JSON-om, povijest 7 d / 10 000, greške JSON (403 ostaje XML), replay 200/400
+- [x] 740–742 Bacs samo na UK hostu, bez gatea; kalendar Engleske i Walesa; dolazni kredit Pending pa knjižen 3. dan u 06:00
+- [x] 743, 746 naplate: odbijena naplata se i dalje tereti (G use case 5), retry 11:30/15:00/18:30, mapiranje kodova
+- [x] 744 mandati: G primjer koristi `Accptd` „0” za prihvat (obrnuto od XSD booleana) — mi tako čitamo
+- [x] 745, 747, 749 sinkroni 400 `<Errors>` za loše dokumente; pravila otkaza i reversala; granice memorije Bacsa
 
-- [ ] 801–802 agency set-up po klijentu (ugovor, rasponi sort codea / IBAN prefiksa s master računom), bez ugovora sinkroni 403
-- [ ] 803–804 v1 sinkronizacija: jedan loš unos odbija cijeli batch; bez BankCodes računi idu u LHV EE; UK kod na EE hostu → INVALID_REQUEST
-- [ ] 806 v2 pravila (Name + AccountCategory obavezni uz responder, prazan Status)
-- [ ] 808–809 CoP / VoP responder: odgovor iz sinkroniziranih računa, notifikacija samo ako je uključena
-- [ ] 811 RTF: RT1 gzip, TARGET2 generiran, ostale sheme trebaju sadržaj izvana
-- [ ] 820–822, 825–826 merchant report: format, greške, period, sadržaj po primjeru umjesto po tablici P 13, prazan izvještaj
-- [ ] 831, 834–835 agency plaćanja: ime i adresa dužnika obavezni, INST_RESTRICTED, dolazni krediti na master račun
-- [ ] 840–841 GBP na UK račun ide Faster Paymentsom (`FAST`); Ultimate Debtor / Creditor sad u camt.054
-- [ ] **Promjena izlaza:** pain.002 više nema `OrgnlEndToEndId` (G: „Not used”); adresa VIBAN vlasnika u camt.054 sad samo ulica
+Odluke iz noćnog rada S6 (2026-10-24), označene „(noćni rad, potvrđeno 2026-10-24)”:
 
-Odluke iz noćnog rada S7 (2026-10-24), označene „(noćni rad, potvrditi)”:
+- [x] 801–802 agency set-up po klijentu (ugovor, rasponi sort codea / IBAN prefiksa s master računom), bez ugovora sinkroni 403
+- [x] 803–804 v1 sinkronizacija: jedan loš unos odbija cijeli batch; bez BankCodes računi idu u LHV EE; UK kod na EE hostu → INVALID_REQUEST
+- [x] 806 v2 pravila (Name + AccountCategory obavezni uz responder, prazan Status)
+- [x] 808–809 CoP / VoP responder: odgovor iz sinkroniziranih računa, notifikacija samo ako je uključena
+- [x] 811 RTF: RT1 gzip, TARGET2 generiran, ostale sheme trebaju sadržaj izvana
+- [x] 820–822, 825–826 merchant report: format, greške, period, sadržaj po primjeru umjesto po tablici P 13, prazan izvještaj
+- [x] 831, 834–835 agency plaćanja: ime i adresa dužnika obavezni, INST_RESTRICTED, dolazni krediti na master račun
+- [x] 840–841 GBP na UK račun ide Faster Paymentsom (`FAST`); Ultimate Debtor / Creditor sad u camt.054
+- [x] **Promjena izlaza:** pain.002 više nema `OrgnlEndToEndId` (G: „Not used”); adresa VIBAN vlasnika u camt.054 sad samo ulica
 
-- [ ] 900–907 inbox u Postgresu: async sučelje, `bytea` + oznaka stringa, `ns` stupac, vrijeme iz injektiranog sata, granice u tablicama, bez zajedničke transakcije s ledgerom
-- [ ] 910–918 ledger u Postgresu: zaključavanje samo kod tereta (911, commit/release bez locka), prekidač testova, **popravak MemoryLedgera kod paralelnih rezervacija (913)**, seed se ne financira ponovno nakon restarta (914), ograničeni logovi (915)
-- [ ] 920–928 open-ledger kao `Ledger`: hold wallet po računu, imena walleta, `@` računi s limitom -(2^53-1), ključ `OPEN_LEDGER_KEY`, iznosi do 2^53-1 i abecedni redoslijed valuta (925)
-- [ ] 930–938 asinkroni `Rails`, odgođeni simulator, `HttpRails` protokol, ponašanje kod pada bridgea (936), **SEPA nakon INST pada nosi isti ref (937): bridge ključ ref + shema**
-- [ ] 940–949 agency i acquiring storeovi, seed se piše samo ako stanja nema (941), jedna sinkronizacija po procesu (942), pending rails plaćanja preživljavaju restart (948)
-- [ ] 950–955 partner PSP primjeri: **camt.054 sad nosi `PstlAdr` banke pod `Svcr` (950), `NOTPROVIDED` se ne ponavlja (951)**; razlike potvrđene u testu
-- [ ] 960–967 journal, keyed store, stanje payment enginea i DD MsgId u Postgresu; **knjiženje sad ide u journal prije izlaska iz in-flight limita (963)**
-- [ ] Umetnut paket **S7b** (ostatak trajnog stanja) prije S8, jer S7 nije stigao sve poslovno stanje (odluka 967) (noćni rad, potvrditi)
+Odluke iz noćnog rada S7 (2026-10-24), označene „(noćni rad, potvrđeno 2026-10-24)”:
+
+- [x] 900–907 inbox u Postgresu: async sučelje, `bytea` + oznaka stringa, `ns` stupac, vrijeme iz injektiranog sata, granice u tablicama, bez zajedničke transakcije s ledgerom
+- [x] 910–918 ledger u Postgresu: zaključavanje samo kod tereta (911, commit/release bez locka), prekidač testova, **popravak MemoryLedgera kod paralelnih rezervacija (913)**, seed se ne financira ponovno nakon restarta (914), ograničeni logovi (915)
+- [x] 920–928 open-ledger kao `Ledger`: hold wallet po računu, imena walleta, `@` računi s limitom -(2^53-1), ključ `OPEN_LEDGER_KEY`, iznosi do 2^53-1 i abecedni redoslijed valuta (925)
+- [x] 930–938 asinkroni `Rails`, odgođeni simulator, `HttpRails` protokol, ponašanje kod pada bridgea (936), **SEPA nakon INST pada nosi isti ref (937): bridge ključ ref + shema**
+- [x] 940–949 agency i acquiring storeovi, seed se piše samo ako stanja nema (941), jedna sinkronizacija po procesu (942), pending rails plaćanja preživljavaju restart (948)
+- [x] 950–955 partner PSP primjeri: **camt.054 sad nosi `PstlAdr` banke pod `Svcr` (950), `NOTPROVIDED` se ne ponavlja (951)**; razlike potvrđene u testu
+- [x] 960–967 journal, keyed store, stanje payment enginea i DD MsgId u Postgresu; **knjiženje sad ide u journal prije izlaska iz in-flight limita (963)**
+- [x] Umetnut paket **S7b** (ostatak trajnog stanja) prije S8, jer S7 nije stigao sve poslovno stanje (odluka 967) (potvrđeno)
