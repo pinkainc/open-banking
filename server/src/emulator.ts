@@ -28,6 +28,7 @@ import { BACS_BOUNDS, BacsService } from './bacs/service.js'
 import { Agency } from './agency/service.js'
 import { checkSetup, type AgencyStore } from './agency/store.js'
 import type { AcquiringStore } from './acquiring/store.js'
+import type { RailsPending } from './payments/pending.js'
 import { Acquiring } from './acquiring/service.js'
 
 export interface Seed {
@@ -62,6 +63,8 @@ export interface EmulatorOptions {
   agency?: (clock: Clock, bounds: Bounds) => AgencyStore
   /** Merchant set-ups and card transactions (decision 945); default in memory, PgAcquiringStore (pg/acquiring.ts) in Postgres. */
   acquiring?: (clock: Clock, bounds: Bounds) => AcquiringStore
+  /** Payments waiting at the rails for their outcome (decision 948); default in memory, PgRailsPending in Postgres. */
+  railsPending?: () => RailsPending
   memory?: { tombstones?: Partial<Bounds>; msgIds?: Partial<Bounds>; processed?: Partial<Bounds>; requests?: Partial<Bounds>; incoming?: Partial<Bounds>; webhookEvents?: Partial<Bounds>; bacs?: Partial<typeof BACS_BOUNDS>; agency?: Partial<Bounds> }
 }
 
@@ -126,7 +129,7 @@ export class Emulator {
     this.engine = new PaymentEngine(this.directory, this.ledger, this.rails, this.inbox, this.clock, this.bank, {
       strictIban: opts.strictIban, pain00103Until: opts.pain00103Until ?? '2026-11-15', xsd, virtual: this.viban.registry, msgIds,
       onBooking: (_c, b) => { this.journal.record(b) }, limits: (c) => this.reports.paymentLimits(c),
-      onIncoming: (e) => this.accounts.onIncoming(e), agency: () => this.agency?.accounts,
+      onIncoming: (e) => this.accounts.onIncoming(e), agency: () => this.agency?.accounts, pending: opts.railsPending?.(),
     })
     // Outcomes the rails deliver later and credits from the scheme come in here (decision 930).
     this.rails.listen({ outcome: (ref, o) => this.engine.settle(ref, o), credit: (c) => this.engine.received(c) })

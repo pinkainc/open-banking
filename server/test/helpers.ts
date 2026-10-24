@@ -19,6 +19,7 @@ import { PgInbox } from '../src/pg/inbox.js'
 import { PgLedger } from '../src/pg/ledger.js'
 import { PgAgencyStore } from '../src/pg/agency.js'
 import { PgAcquiringStore } from '../src/pg/acquiring.js'
+import { PgRailsPending } from '../src/pg/rails-pending.js'
 import { OpenLedgerLedger } from '../src/ledgers/open-ledger.js'
 import { openLedgerUrl } from './open-ledger-server.js'
 import { XsdValidator } from '../src/payments/xsd.js'
@@ -91,6 +92,7 @@ export async function postgresStore(namespace: string = randomUUID()): Promise<E
     ledger: (clock) => new PgLedger(db, { namespace, clock }),
     agency: (clock, bounds) => new PgAgencyStore(db, clock, { namespace, bounds }),
     acquiring: (clock, bounds) => new PgAcquiringStore(db, clock, { namespace, bounds }),
+    railsPending: () => new PgRailsPending(db, { namespace }),
   }
 }
 /** The options of the selected store (STORE), for every emulator a test builds. */

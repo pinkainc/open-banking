@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { beforeEach, describe, test } from 'node:test'
 import { many } from '../src/xml.js'
 import { SimulatorRails, type OutgoingPayment, type RailsAnswer, type RailsEvents } from '../src/rails.js'
-import { C1, C2, DE_IBAN, balance, call, drain, pain001, setup, type Ctx, type TxSpec } from './helpers.js'
+import { C1, C2, DE_IBAN, balance, call, drain, pain001, postgresStore, setup, type Ctx, type TxSpec } from './helpers.js'
 
 let ctx: Ctx
 beforeEach(async () => { ctx = await setup() })
@@ -60,7 +60,7 @@ describe('deferred simulator rails: accepted, then the outcome (decision 931)', 
     const h = await held()
     assert.deepEqual(h.map((x) => x.outcome.status), ['settled'])
     assert.equal(h[0].ref, first.reports[0].txs[0].ref)
-    assert.deepEqual(ctx.emulator.engine.atRails(), [h[0].ref])
+    assert.deepEqual(await ctx.emulator.engine.atRails(), [h[0].ref])
 
     assert.deepEqual((await sim('deliver')).json(), { delivered: 1 })
     const later = await messages()
@@ -68,7 +68,7 @@ describe('deferred simulator rails: accepted, then the outcome (decision 931)', 
     assert.equal(later.reports[0].txs[0].ref, h[0].ref, 'one AcctSvcrRef throughout')
     assert.equal(later.notes[0].ref, h[0].ref)
     assert.equal(await balance(ctx, C1.iban), '9993.00')
-    assert.deepEqual(ctx.emulator.engine.atRails(), [])
+    assert.deepEqual(await ctx.emulator.engine.atRails(), [])
   })
 
   test('rejected after accept: RJCT with the scheme reason, funds released', async () => {
@@ -180,7 +180,7 @@ describe('outcome before the answer', () => {
     const r = await messages(c)
     assert.deepEqual(r.reports.map((x) => x.txs[0].sts), ['ACSP', 'ACSC'])
     assert.deepEqual(r.notes.map((n) => n.ind), ['DBIT'])
-    assert.deepEqual(c.emulator.engine.atRails(), [])
+    assert.deepEqual(await c.emulator.engine.atRails(), [])
     assert.equal(await balance(c, C1.iban), '9993.00')
   })
 })
@@ -206,4 +206,26 @@ describe('credits from the scheme through the rails events (decision 932)', () =
     assert.deepEqual(await credit('BRIDGE-3', 'EE127700771001260999'), { status: 'returned', code: 'AC01', reason: 'Incorrect account number.' })
     assert.deepEqual((await messages(ctx, C2.code)).notes, [])
   })
+})
+
+if (process.env.DATABASE_URL) test('payments accepted by the rails settle after a restart on the same Postgres namespace (decision 948)', async () => {
+  const opts = await postgresStore() // one namespace for both instances
+  const a = await setup(opts)
+  await sim('defer', {}, a)
+  await pay([{ amount: '7.00', creditorIban: DE_IBAN }, { amount: '3.00', creditorIban: DE_IBAN }], a)
+  const refs = (await messages(a)).reports[0].txs.map((t) => t.ref!)
+  assert.equal(refs.length, 2)
+  // Restarted: a new engine and simulator, the same Postgres state.
+  const b = await setup(opts)
+  assert.deepEqual(await b.emulator.engine.atRails(), refs)
+  assert.equal(await b.emulator.engine.settle(refs[0], { status: 'settled' }), true)
+  assert.equal(await b.emulator.engine.settle(refs[0], { status: 'settled' }), false, 'settled once')
+  assert.equal(await a.emulator.engine.settle(refs[0], { status: 'settled' }), false, 'not by the old instance either')
+  assert.equal(await b.emulator.engine.settle(refs[1], { status: 'rejected', reason: 'Scheme says no' }), true)
+  const later = await messages(b)
+  assert.deepEqual(later.reports.map((r) => r.txs.map((t) => [t.sts, t.ref, t.reason])), [[['ACSC', refs[0], undefined]], [['RJCT', undefined, 'Scheme says no']]])
+  assert.deepEqual(later.notes.map((n) => [n.ind, n.ref]), [['DBIT', refs[0]]])
+  assert.equal(await balance(b, C1.iban), '9993.00', 'booked once')
+  assert.equal((await call(b, { url: `/_sim/accounts/${C1.iban}` })).json().balances.EUR.available, '9993.00', 'the rejected one released')
+  assert.deepEqual(await b.emulator.engine.atRails(), [])
 })

@@ -132,6 +132,19 @@ create index if not exists acq_transactions_ord on acq_transactions (ns, ord);
 create index if not exists acq_transactions_account on acq_transactions (ns, account, ord);
 `
 
+// Payments waiting at the rails for their outcome (decision 948): the engine's record as JSON.
+const RAILS_SCHEMA = `
+create sequence if not exists rails_pending_seq;
+create table if not exists rails_pending (
+  ns     text   not null,
+  ref    text   not null,
+  scheme text   not null,
+  record jsonb  not null,
+  ord    bigint not null,
+  primary key (ns, ref)
+);
+`
+
 /** Serialises schema creation between processes connecting at once (as open-ledger's 815). */
 const SCHEMA_LOCK = 4410
 
@@ -160,7 +173,7 @@ export class PgDb {
     const c = await pool.connect()
     try {
       await c.query('select pg_advisory_lock($1)', [SCHEMA_LOCK])
-      for (const s of [INBOX_SCHEMA, LEDGER_SCHEMA, AGENCY_SCHEMA, ACQUIRING_SCHEMA].flatMap(statements)) await c.query(s)
+      for (const s of [INBOX_SCHEMA, LEDGER_SCHEMA, AGENCY_SCHEMA, ACQUIRING_SCHEMA, RAILS_SCHEMA].flatMap(statements)) await c.query(s)
     } finally {
       await c.query('select pg_advisory_unlock($1)', [SCHEMA_LOCK])
       c.release()

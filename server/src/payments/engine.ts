@@ -38,6 +38,7 @@ import type { XsdValidator } from './xsd.js'
 import type { BankAddress } from '../statements/bank-address.js'
 import type { VirtualAccount, VirtualAccounts } from '../viban/registry.js'
 import { receivable, type AgencyAccount, type AgencyStore } from '../agency/store.js'
+import { MemoryRailsPending, type PendingRecord, type RailsPending } from './pending.js'
 
 export interface Bank {
   bic: string
@@ -67,6 +68,8 @@ export interface EngineOptions {
   onIncoming?: (e: IncomingEvent) => void
   /** Synchronised agency accounts (indirect scheme access, decisions 830–836): paid from and to via their master account. */
   agency?: () => AgencyStore | undefined
+  /** Payments waiting at the rails (decision 948); default in memory. */
+  pending?: RailsPending
 }
 
 /**
@@ -169,7 +172,8 @@ export class PaymentEngine {
   #inflight = new Map<string, { customer: string; amount: bigint }>()
   #parked = new Map<string, { kind: ParkedKind; file: FileRef; plan: Plan; status: TxStatus }>()
   /** External payments sent to the rails whose outcome has not arrived (decision 930; in memory, decision 934). */
-  #atRails = new Map<string, { file: FileRef; plan: Plan; accepted: TxStatus }>()
+  /** Payments waiting at the rails (decision 948); in memory unless the emulator gives a persistent store. */
+  #pending: RailsPending
   /** Credits from the rails by their ref: the result a repeat answers (decision 932). */
   #credits: BoundedMap<string, Promise<CreditResult>>
   constructor(
@@ -179,6 +183,7 @@ export class PaymentEngine {
     this.#seenMsgIds = new BoundedSet(clock, opts.msgIds ?? DEFAULT_BOUNDS.msgIds)
     this.#instrIds = new BoundedMap(clock, opts.msgIds ?? DEFAULT_BOUNDS.msgIds)
     this.#credits = new BoundedMap(clock, opts.msgIds ?? DEFAULT_BOUNDS.msgIds)
+    this.#pending = opts.pending ?? new MemoryRailsPending()
   }
 
   /** Handles one POST /payment body. Throws XmlSyntaxError when the body is not XML at all. */
@@ -417,18 +422,17 @@ export class PaymentEngine {
   async #rails(file: FileRef, p: Plan, accepted: TxStatus): Promise<Step | undefined> {
     const { block, tx } = p
     // Registered before sending: a bridge may call back before its answer arrives.
-    const waiting = { file, plan: p, accepted }
-    this.#atRails.set(p.ref, waiting)
+    await this.#pending.put(this.#encode(file, p, accepted))
     const answer = await this.rails.send({
       ref: p.ref, scheme: p.scheme!, amount: p.amount, currency: p.currency,
       debtor: { name: block.debtorName ?? file.customer.name, iban: p.debtorIban },
       creditor: { name: tx.creditorName, iban: p.creditorIban, account: tx.creditorOther, bic: tx.creditorBic },
       endToEndId: tx.endToEndId, remittance: tx.ustrd,
     })
-    // Settled through the events while the answer was on its way: already reported.
-    if (this.#atRails.get(p.ref) !== waiting) return undefined
     if (answer.status === 'accepted') return undefined
-    this.#atRails.delete(p.ref)
+    // Settled through the events while the answer was on its way: already reported (and a
+    // SEPA fallback of it waits under the same ref with another scheme).
+    if (!(await this.#pending.take(p.ref, p.scheme))) return undefined
     return this.#outcome(file, p, accepted, answer)
   }
 
@@ -438,15 +442,39 @@ export class PaymentEngine {
    * not waiting at the rails (unknown, or already final): a repeat changes nothing.
    */
   async settle(ref: string, outcome: RailsOutcome): Promise<boolean> {
-    const w = this.#atRails.get(ref)
+    const r = await this.#pending.take(ref)
+    const w = r && this.#decode(r)
     if (!w) return false
-    this.#atRails.delete(ref)
     await this.#flow(w.file, [await this.#outcome(w.file, w.plan, w.accepted, outcome)], false)
     return true
   }
 
   /** Payments sent to the rails without a final outcome yet (refs). */
-  atRails(): string[] { return [...this.#atRails.keys()] }
+  atRails(): Promise<string[]> { return this.#pending.refs() }
+
+  /** A waiting payment as JSON: the customer by key, the amount as a string, agency times in ms. */
+  #encode(file: FileRef, p: Plan, accepted: TxStatus): PendingRecord {
+    // An external payment has no creditor here (VIBAN, owner or agency account): nothing else to keep.
+    const { amount, debtorA, creditorV: _v, creditorOwner: _o, creditorA: _a, ...plan } = p
+    return {
+      ref: p.ref, scheme: p.scheme!,
+      file: { customer: { code: file.customer.code, country: file.customer.country }, requestId: file.requestId, version: file.version, msgId: file.msgId },
+      plan: { ...plan, amount: amount.toString(), ...(debtorA ? { debtorA: { ...debtorA, createdAt: debtorA.createdAt.getTime(), updatedAt: debtorA.updatedAt.getTime() } } : {}) },
+      accepted: { ...accepted },
+    }
+  }
+
+  /** Undefined when the customer is gone from the directory (nothing to report to). */
+  #decode(r: PendingRecord): { file: FileRef; plan: Plan; accepted: TxStatus } | undefined {
+    const customer = this.directory.get(r.file.customer)
+    if (!customer) return undefined
+    const { amount, debtorA, ...plan } = r.plan as any
+    return {
+      file: { customer, requestId: r.file.requestId, version: r.file.version as PainVersion, msgId: r.file.msgId },
+      plan: { ...plan, amount: BigInt(amount), ...(debtorA ? { debtorA: { ...debtorA, createdAt: new Date(debtorA.createdAt), updatedAt: new Date(debtorA.updatedAt) } } : {}) },
+      accepted: r.accepted as unknown as TxStatus,
+    }
+  }
 
   /** The rails' outcome of a reserved external payment: booked, rejected, or on to SEPA. */
   async #outcome(file: FileRef, p: Plan, accepted: TxStatus, outcome: RailsOutcome): Promise<Step> {

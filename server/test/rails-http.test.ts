@@ -125,7 +125,7 @@ describe('HttpRails: payments through the bridge', () => {
     assert.equal(unsigned.status, 401)
     assert.deepEqual(await messages(), { reports: [], notes: [] })
     assert.equal(await balance(ctx, C1.iban), '10000.00')
-    assert.deepEqual(ctx.emulator.engine.atRails(), [event.ref])
+    assert.deepEqual(await ctx.emulator.engine.atRails(), [event.ref])
     assert.equal((await callback(event)).body.applied, true)
     assert.equal((await messages()).notes.length, 1)
   })
