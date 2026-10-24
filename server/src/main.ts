@@ -8,6 +8,7 @@ import { Emulator, type Seed } from './emulator.js'
 import { PgDb } from './pg/db.js'
 import { PgInbox } from './pg/inbox.js'
 import { PgLedger } from './pg/ledger.js'
+import { OpenLedgerLedger } from './ledgers/open-ledger.js'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const env = process.env
@@ -33,9 +34,23 @@ const max = (v: string | undefined) => {
 const pool = max(env.DATABASE_POOL_MAX)
 const db = env.DATABASE_URL ? await PgDb.connect(env.DATABASE_URL, pool) : undefined
 const namespace = env.STORE_NAMESPACE ?? env.INBOX_NAMESPACE ?? 'default'
+// LEDGER=open-ledger: the money on an open-ledger server (decisions 920-929), OPEN_LEDGER_URL
+// (…/api/v2), the ledger `open-banking.<STORE_NAMESPACE>`; OPEN_LEDGER_KEY our ed25519
+// secret (raw 32 bytes, base64), which owns that ledger, so keep it across restarts (without
+// it a fresh key each start, and a restart cannot reach the old ledger); OPEN_LEDGER_TIMEOUT_MS
+// per request and intent (default 10000). LEDGER=postgres needs DATABASE_URL, LEDGER=memory
+// keeps the money in the process; default postgres with DATABASE_URL, else memory.
+const ledgerKind = env.LEDGER ?? (db ? 'postgres' : 'memory')
+if (!['open-ledger', 'postgres', 'memory'].includes(ledgerKind)) throw new Error(`LEDGER must be open-ledger, postgres or memory, not ${ledgerKind}`)
+if (ledgerKind === 'postgres' && !db) throw new Error('LEDGER=postgres needs DATABASE_URL')
+if (ledgerKind === 'open-ledger' && !env.OPEN_LEDGER_URL) throw new Error('LEDGER=open-ledger needs OPEN_LEDGER_URL')
+if (ledgerKind === 'open-ledger' && !env.OPEN_LEDGER_KEY) console.error('warning: OPEN_LEDGER_KEY is not set; a fresh key owns a ledger a restart cannot reach')
+if (env.OPEN_LEDGER_TIMEOUT_MS && !/^[1-9]\d*$/.test(env.OPEN_LEDGER_TIMEOUT_MS)) throw new Error(`OPEN_LEDGER_TIMEOUT_MS must be a positive integer, not ${env.OPEN_LEDGER_TIMEOUT_MS}`)
+const timeoutMs = env.OPEN_LEDGER_TIMEOUT_MS ? Number(env.OPEN_LEDGER_TIMEOUT_MS) : undefined
 const emulator = await Emulator.fromSeed(seed, {
   inbox: db && ((clock, bounds) => new PgInbox(db, clock, { ...bounds, namespace })),
-  ledger: db && ((clock) => new PgLedger(db, { namespace, clock })),
+  ledger: ledgerKind === 'open-ledger' ? new OpenLedgerLedger({ url: env.OPEN_LEDGER_URL!, namespace, secretKey: env.OPEN_LEDGER_KEY, timeoutMs })
+    : ledgerKind === 'postgres' ? (clock) => new PgLedger(db!, { namespace, clock }) : undefined,
   xsdDir: existsSync(xsdDir) ? xsdDir : undefined,
   strictIban: env.STRICT_IBAN !== '0',
   pain00103Until: env.PAIN_001_001_03_UNTIL,

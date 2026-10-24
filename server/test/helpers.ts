@@ -17,6 +17,8 @@ import { MemoryLedger, type Ledger } from '../src/ledger.js'
 import { PgDb } from '../src/pg/db.js'
 import { PgInbox } from '../src/pg/inbox.js'
 import { PgLedger } from '../src/pg/ledger.js'
+import { OpenLedgerLedger } from '../src/ledgers/open-ledger.js'
+import { openLedgerUrl } from './open-ledger-server.js'
 import { XsdValidator } from '../src/payments/xsd.js'
 import { parseXml } from '../src/xml.js'
 
@@ -104,6 +106,9 @@ if (process.env.DATABASE_URL) {
 /** Ledgers to run ledger behaviour against: memory always, Postgres when DATABASE_URL is set. */
 export const LEDGERS: [string, () => Promise<Ledger>][] = [['memory', async () => new MemoryLedger()]]
 if (process.env.DATABASE_URL) LEDGERS.push(['postgres', async () => new PgLedger(await pgDb())])
+// OPEN_LEDGER_TESTS=1 (scripts/check.sh, decision 927): also an OpenLedgerLedger on a real
+// open-ledger server, a fresh ledger (namespace) each.
+if (process.env.OPEN_LEDGER_TESTS === '1') LEDGERS.push(['open-ledger', async () => new OpenLedgerLedger({ url: await openLedgerUrl(), namespace: randomUUID() })])
 
 export interface Ctx { app: FastifyInstance; emulator: Emulator; clock: ManualClock }
 
