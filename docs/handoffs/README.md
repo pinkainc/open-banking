@@ -20,6 +20,10 @@ Korisnik nakon `/clear` kaže „nastavi zadnji handoff” ili zalijepi prompt i
 5. S8 je blokiran dok ne postoji sandbox certifikat. Ako je S7 gotov, a certifikata nema,
    lanac staje. Tada se samo osvježe „Gdje smo” u planu i `README.md`.
 
+Bez čovjeka lanac vrti `scripts/overnight.sh [broj-sesija]`: sesiju po sesiju, provjere
+nakon svake, staje na prvoj grešci ili na `.rec/overnight-stop`. Opis i brojke su u
+[orkestraciji](../2026-10-23-orkestracija-subagenata.md#noćni-lanac-scriptsovernightsh-2026-10-24).
+
 Handoff se smije mijenjati samo prema naprijed: gotovi `SN` se ne prepisuju, služe kao
 povijest.
 

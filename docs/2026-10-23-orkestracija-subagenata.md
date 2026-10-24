@@ -256,3 +256,53 @@ Sedam agenata strogo jedan za drugim (bez worktreeja), Opus 5.5, effort high.
 - Svaki agent je stao ispod guarda (121k–190k) jer je zadatak bio jedno područje stanja.
   Za S7b isti rez: jedno do dva područja po agentu.
 - Sve poslovno stanje nije stalo u S7, pa je umetnut S7b (odluka 968).
+
+## Noćni lanac: `scripts/overnight.sh` (2026-10-24)
+
+S3–S7 su odrađeni bez čovjeka, od 01:03 do 06:18. Svaku sesiju je pokrenula shell petlja kao
+svježi `claude -p`, a glavna sesija je samo čekala da skripta završi.
+
+```mermaid
+flowchart LR
+  H[najnoviji handoff u ~/.claude/handoffs/open-banking] --> P["claude -p (preamble + handoff)"]
+  P --> W[wrap-up piše sljedeći handoff]
+  W --> C{novi handoff? git čist? novi commit? npm run check?}
+  C -- da --> S{.rec/overnight-stop?}
+  S -- ne --> H
+  C -- ne --> X[STOP + notifikacija]
+  S -- da --> X
+```
+
+**Zašto `claude -p`, a ne subagent glavne sesije.** Svaka sesija i sama orkestrira
+subagente (implementacija pa testovi), a subagent ne može pokretati vlastite subagente.
+Kao subagent, sesija bi cijeli paket morala odraditi u jednom kontekstu, a to je na L0–L4
+udaralo u context guard. `claude -p` je prava sesija: ima Agent tool, skillove, hookove i
+compaction.
+
+**Preamble** koji skripta stavlja ispred handoffa: subagenti strogo jedan po jedan (bez
+worktreeja i Workflowa), bez Monitora i buđenja, korisnikove odluke konzervativno uz oznaku
+„(noćni rad, potvrditi)” i stavku u TODO „Za pregled ujutro”, razlog za čovjeka u
+`.rec/overnight-stop`, na kraju `wrap-up`.
+
+| Sesija | Trajanje | Potezi orkestratora | API-ekviv. | Testovi nakon |
+|---|---|---|---|---|
+| S3 | 52 min | 25 | $13,6 | 429 |
+| S4 | 16 min | 16 | $8,1 | 483 |
+| S5 | 48 min | 28 | $14,4 | 555 |
+| S6 | 46 min | 21 | $13,5 | 602 |
+| S7 | 108 min | 35 | $25,7 | 745 ×2 + 21 |
+
+Ukupno oko $75 i 5 sati. Nijedna sesija nije stala na limitu, pa nastavak nakon limita
+(`--resume`, 60 min čekanja, najviše 3 puta) još nije isproban.
+
+Zamke:
+- Skripta mora krenuti s čistim gitom, pa svaku izmjenu skripte treba commitati prije
+  pokretanja. Dok lanac radi, repo se ne dira.
+- Iz Claude Code sesije pokretati s `env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT`.
+- `claude -p` se ne vidi kao subagent. Napredak pokazuje `~/.claude/overnight-status.sh`
+  (commitovi, subagenti s vremenom zadnjeg pisanja, zadnji koraci). Sesiju koja radi ne
+  otvarati s `claude --resume`.
+- Sažetak čita brojke testova iz `check.sh`. Kad je S7 počeo uvlačiti ispis, redak je
+  ostao prazan iako je check prošao (popravljeno u `3c21df4`).
+- Logovi i sažetak: `.rec/overnight/<vrijeme>/summary.md`, `session-N.json` (rezultat,
+  trošak, `session_id`), `check-N.log`.
