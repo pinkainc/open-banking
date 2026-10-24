@@ -20,6 +20,7 @@ import { AccountReports, type ReportsOptions } from './statements/reports.js'
 import { checkBankAddress, defaultBankAddress } from './statements/bank-address.js'
 import { VibanSchemas } from './viban/messages.js'
 import { VibanService, type ErrorDelivery } from './viban/service.js'
+import { PayeeService } from './payee/service.js'
 
 export interface Seed {
   bank?: Partial<Bank>
@@ -63,6 +64,7 @@ export class Emulator {
   readonly fx: FxService
   readonly contracts: Contracts
   readonly webhooksEe: EeWebhooks
+  readonly payee: PayeeService
 
   constructor(opts: EmulatorOptions & { bank?: Partial<Bank> } = {}) {
     this.clock = opts.clock ?? systemClock
@@ -92,6 +94,7 @@ export class Emulator {
       onBooking: (_c, b) => { this.journal.record(b) },
     })
     this.contracts = new Contracts(this.directory, this.clock)
+    this.payee = new PayeeService({ directory: this.directory, viban: this.viban.registry, inbox: this.inbox, clock: this.clock })
     this.reports = new AccountReports({
       directory: this.directory, ledger: this.ledger, journal: this.journal, inbox: this.inbox, clock: this.clock, bank: this.bank, xsd, msgIds,
     }, opts.reports)

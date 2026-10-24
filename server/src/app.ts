@@ -20,6 +20,7 @@ import { BoundedSet, DEFAULT_BOUNDS, type Bounds } from './bounded.js'
 import { COMPRESSION_THRESHOLD, compress, negotiate } from './compression.js'
 import { mockLargeStatement } from './statements/mock-large.js'
 import { eeWebhookSimRoutes, registerEeWebhooks } from './webhooks/ee-routes.js'
+import { payeeSimRoutes, registerPayee } from './payee/routes.js'
 
 export interface AppOptions {
   emulator: Emulator
@@ -293,6 +294,9 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   // --- Webhooks, LHV EE (JSON; the UK system is separate) --------------------------------
   jsonTextScope(app, (scope) => registerEeWebhooks(scope, emulator, caller))
 
+  // --- Payee verification (EE VoP XML on both hosts; UK VoP and CoP JSON) -----------------
+  registerPayee(app, emulator, caller, flavour)
+
   if (opts.sim !== false) {
     app.register(simRoutes(emulator), { prefix: '/_sim' })
     app.register(vibanSimRoutes(emulator), { prefix: '/_sim/viban' })
@@ -300,6 +304,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     app.register(fxSimRoutes(emulator), { prefix: '/_sim/fx' })
     app.register(contractsSimRoutes(emulator), { prefix: '/_sim/contracts' })
     app.register(eeWebhookSimRoutes(emulator), { prefix: '/_sim/webhooks/ee' })
+    app.register(payeeSimRoutes(emulator), { prefix: '/_sim/payee' })
   }
   return app
 }

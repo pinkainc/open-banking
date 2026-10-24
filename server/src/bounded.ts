@@ -46,6 +46,12 @@ export class BoundedMap<K, V> {
 
   delete(key: K): boolean { return this.#m.delete(key) }
 
+  /** The live entries, oldest first. */
+  entries(): [K, V][] {
+    const now = this.clock.now().getTime()
+    return [...this.#m].filter(([, e]) => e.until > now).map(([k, e]) => [k, e.value])
+  }
+
   /** Drops every expired entry; returns how many. */
   purge(): number {
     const now = this.clock.now().getTime()
