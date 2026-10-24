@@ -82,7 +82,14 @@ Legend: `[x]` done · `[ ]` open · `[~]` in progress · `(?)` needs a sandbox r
 
 ## L6 — agency / indirect scheme access → S6
 
-- [ ] Agency account synchronisation (+ v2), routing tables, VoP / CoP responder roles, merchant report
+- [x] Agency account synchronisation v1 + v2, RTF routing table files, CoP / VoP responder notifications (S6, decisions 800–813)
+- [x] Merchant payment report `POST /acq/merchant-report` (P 13, decisions 820–826)
+- [x] Payments from / to agency accounts, requester VoP / CoP over agency accounts, G PSP use cases 1–8 end to end (decisions 830–849)
+- [ ] RTF for EBA STEP2 / RT1: 7 of 8 sample zips are password-protected, so the emulator only generates TARGET2 content; other schemes need the content supplied
+- [ ] Replay the partner-site `PAYMENT_PSP_USECASES/case1..8` samples (EE accounts, different from the G pages); only the G use cases are chains today
+- [ ] Use case 7/8 camt.054: account currency and creditor bank name differ from the samples (no bank directory)
+- [ ] `errMerchantReport_4` has no trigger
+- [ ] (?) Agency bank codes, v2 rules, RTF content types, responder notification shapes, merchant report, agency payments on LHV UK (sandbox q77–86) → S8
 
 ## Core and conformance
 
@@ -131,3 +138,15 @@ Odluke iz noćnog rada S5 (2026-10-24), označene „(noćni rad, potvrditi)”:
 - [ ] 743, 746 naplate: odbijena naplata se i dalje tereti (G use case 5), retry 11:30/15:00/18:30, mapiranje kodova
 - [ ] 744 mandati: G primjer koristi `Accptd` „0” za prihvat (obrnuto od XSD booleana) — mi tako čitamo
 - [ ] 745, 747, 749 sinkroni 400 `<Errors>` za loše dokumente; pravila otkaza i reversala; granice memorije Bacsa
+
+Odluke iz noćnog rada S6 (2026-10-24), označene „(noćni rad, potvrditi)”:
+
+- [ ] 801–802 agency set-up po klijentu (ugovor, rasponi sort codea / IBAN prefiksa s master računom), bez ugovora sinkroni 403
+- [ ] 803–804 v1 sinkronizacija: jedan loš unos odbija cijeli batch; bez BankCodes računi idu u LHV EE; UK kod na EE hostu → INVALID_REQUEST
+- [ ] 806 v2 pravila (Name + AccountCategory obavezni uz responder, prazan Status)
+- [ ] 808–809 CoP / VoP responder: odgovor iz sinkroniziranih računa, notifikacija samo ako je uključena
+- [ ] 811 RTF: RT1 gzip, TARGET2 generiran, ostale sheme trebaju sadržaj izvana
+- [ ] 820–822, 825–826 merchant report: format, greške, period, sadržaj po primjeru umjesto po tablici P 13, prazan izvještaj
+- [ ] 831, 834–835 agency plaćanja: ime i adresa dužnika obavezni, INST_RESTRICTED, dolazni krediti na master račun
+- [ ] 840–841 GBP na UK račun ide Faster Paymentsom (`FAST`); Ultimate Debtor / Creditor sad u camt.054
+- [ ] **Promjena izlaza:** pain.002 više nema `OrgnlEndToEndId` (G: „Not used”); adresa VIBAN vlasnika u camt.054 sad samo ulica

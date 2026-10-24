@@ -32,14 +32,14 @@ povijest.
 | S3 | Dugovi L0–L3 + pending | gotovo | 338f0a7 | 26/58 | 429 | noćni rad; odluke 500–504, 520–527, 550–553 (većina „potvrditi”), pitanja 43–51; `payment.oneoff` uklonjen kod LHV-a (520), pa operacija ostaje 404 |
 | S4 | VoP/CoP + messages v2 | gotovo | abca222 | 35/58 | 483 | noćni rad; odluke 600–610, 620–632 (većina „potvrditi”), pitanja 52–61; potpisani zahtjevi (BDOC) i strana odgovaratelja (VoP/CoP responder) nisu dio paketa |
 | S5 | UK flavour | gotovo | 81caade | 51/58 | 555 | noćni rad; odluke 700–714, 720–729, 740–749 (većina „potvrditi”), pitanja 62–76; plan je brojio 52 jer je `payment.oneoff` (404) računao kao pokriven |
-| S6 | L6 agency + ostatak | čeka | | | | |
+| S6 | L6 agency + ostatak | gotovo | e3b395a | 57/58 | 602 | noćni rad; odluke 800–813, 820–849 (većina „potvrditi”), pitanja 77–86; katalog pokriven (`payment.oneoff` namjerni 404); partner-site PSP primjeri nisu replayani |
 | S7 | Trajnost i jezgra | čeka | | | | |
 | S8 | Conformance harness | blokirano | | | | treba sandbox certifikat |
 
 ## Zajednička pravila (vrijede u svakoj sesiji)
 
 - **Polazak:** `npm run check` i potvrda u jednoj rečenici da je zeleno. Ako nije
-  zeleno, prvo to popravi. Repo još nema remote, pa nema ni `git pull`.
+  zeleno, prvo to popravi. open-banking ima origin na GitHubu (wrap-up pusha `main`); mirror se nikad ne pusha.
 - **Orkestracija:** posao rade Opus 5.5 subagenti (`model: "opus"`), glavna sesija
   orkestrira. Svaku razinu razbij na dva agenta: (a) implementacija modula, (b) testovi i
   spajanje na server. Context guard ih reže na granici iz `CONTEXT_GUARD_TOKENS` (300k od 2026-10-23, prije 180k). Effort uvijek zadaj eksplicitno

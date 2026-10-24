@@ -24,6 +24,11 @@ firme, odluka korisnika). Zato:
 - nova pitanja za sandbox dopisuju se u `sandbox-questions.md` (mirror repo, lokalno,
   nikad ne pushati).
 
+## Gdje smo (2026-10-24, nakon S6)
+
+S1–S6 gotovi (`e3b395a`): katalog pokriven 57/58 (`payment.oneoff` namjerni 404), 602 testa,
+sandbox pitanja do 86. Sljedeći je S7 (trajnost i jezgra); S8 čeka sandbox certifikat.
+
 ## Polazno stanje (commit `bcc23e0`)
 
 | Mjera | Stanje |

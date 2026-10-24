@@ -204,3 +204,29 @@ Nalazi:
 5. Mirror je imao necommitana pitanja 52–61 iz S4; orkestrator ih je commitao lokalno
    (zajedno sa 62–66). Agente treba izričito pustiti da commitaju u mirror.
 
+
+## S6: L6 agency i ostatak kataloga (2026-10-24, noćni rad)
+
+Dva agenta strogo jedan za drugim, bez worktreeja, svaki implementacija i testovi zajedno.
+S ovom sesijom katalog je pokriven: 57/58, a `payment.oneoff` je namjerni 404 (odluka 520).
+
+| Agent | Effort | Poziva | Tokena konteksta | Ishod |
+|---|---|---|---|---|
+| agency sync + responderi | high | 78 | 244k | 5 operacija (sync v1/v2, RTF, CoP/VoP incoming), `server/src/agency/`; +27 testova, odluke 800–813, pitanja 77–83 |
+| merchant report, agency plaćanja, PSP | high | 111 | 274k | `acq.merchant_report` (P 13), plaćanja s/na agency račune, G use caseovi 1–8 kao e2e lanci; +20, odluke 820–849, pitanja 84–86 |
+
+Nalazi:
+
+1. **Predaja kroz izvještaj opet je radila.** Prvi agent je unaprijed dizajnirao agency store
+   (`get`, `find`, `agencyKey`, `rangeFor`, `receivable`) za drugoga i to je drugi koristio bez
+   istraživanja.
+2. **Objavljeni primjeri imaju krive IBAN kontrolne brojeve** (sedam komada u agency, VoP i
+   PSP primjerima). Emulator ih odbija kao `INVALID_IBAN`; testovi koriste ispravljene, osim
+   gdje se račun nalazi po sort codeu.
+3. **Sedam od osam RTF zipova je zaključano lozinkom**, pa se formati EBA STEP2/RT1 ne mogu
+   pročitati; čitljiv je samo TARGET2.
+4. **E2e lanci su mijenjali postojeći izlaz**: pain.002 bez `OrgnlEndToEndId`, adresa VIBAN
+   vlasnika samo ulica, identitet LHV UK (BIC, ime, adresa, UK vrijeme) za GB račune. Stari
+   testovi su prilagođeni; promjene su na popisu „Za pregled ujutro”.
+5. Drugi agent je stao blizu guarda (274k) sa 111 poziva. Tri teme u jednom agentu je gornja
+   granica; za S7 (Postgres) je bolje dva agenta po storeu.
