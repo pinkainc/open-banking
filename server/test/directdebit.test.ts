@@ -50,7 +50,7 @@ async function groupRejected(xml: string, text: string, msgId?: string): Promise
   assert.equal(r.grpCode, 'NARR')
   assert.equal(r.grpInfo, text)
   assert.deepEqual(r.blocks, [])
-  assert.equal(ctx.emulator.directDebit.collections.length, 0)
+  assert.equal((await ctx.emulator.directDebit.collections()).length, 0)
   if (msgId) assert.equal(r.orgnlMsgId, msgId)
 }
 
@@ -147,7 +147,7 @@ describe('collection from a debtor here', () => {
     assert.deepEqual(await ddDrain(ctx, C2.code), [])
     assert.equal(await balance(ctx, C2.iban), '100.00')
     assert.equal(await balance(ctx, C1.iban), '10000.00')
-    assert.equal(ctx.emulator.directDebit.collections[0].status, 'REJECTED')
+    assert.equal((await ctx.emulator.directDebit.collections())[0].status, 'REJECTED')
     assert.equal(await settle('2026-03-13T10:30:00Z'), 0, 'one settlement attempt (docs/decisions.md 305)')
   })
 })
@@ -222,7 +222,7 @@ describe('file-level checks (P 09 group level errors)', () => {
     const again = await submitted(pain008([{ txs: [{}] }], { msgId: 'DUP-1' }))
     assert.equal(again.grp, 'RJCT')
     assert.equal(again.grpInfo, E.duplicateMessage)
-    assert.equal(ctx.emulator.directDebit.collections.length, 1)
+    assert.equal((await ctx.emulator.directDebit.collections()).length, 1)
   })
 
   test('a MsgId of a file refused as a whole can be used again (docs/decisions.md 314)', async () => {
@@ -275,7 +275,7 @@ describe('collection-level checks (P 09 transaction level errors)', () => {
       BADCHECK: ['RJCT', 'NARR', E.ibanFormat],
       SELF: ['RJCT', 'AG01', REASONS.AG01],
     })
-    assert.equal(ctx.emulator.directDebit.collections.length, 1, 'only the accepted collection is kept')
+    assert.equal((await ctx.emulator.directDebit.collections()).length, 1, 'only the accepted collection is kept')
     const notes = await ddDrain(ctx, C2.code)
     assert.equal(notes.length, 1, 'the debtor hears only of the accepted collection')
   })

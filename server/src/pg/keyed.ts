@@ -59,6 +59,13 @@ export class PgKeyed<V> implements KeyedStore<V> {
     return row.value as V
   }
 
+  async replace(key: string, value: V) {
+    const r = await this.db.pool.query(
+      'update keyed_entries set value = $4 where ns = $1 and kind = $2 and key = $3 and (until is null or until > $5)',
+      [this.namespace, this.kind, key, JSON.stringify(value), this.#now()])
+    return r.rowCount === 1
+  }
+
   async entries() {
     const r = await this.db.pool.query(
       'select key, value from keyed_entries where ns = $1 and kind = $2 and (until is null or until > $3) order by ord',

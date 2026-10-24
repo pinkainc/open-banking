@@ -66,7 +66,7 @@ export function directDebitSimRoutes(emulator: Emulator) {
   }
 
   return async (app: FastifyInstance) => {
-    app.get('/collections', async () => ({ collections: svc.collections.map(collectionView) }))
+    app.get('/collections', async () => ({ collections: (await svc.collections()).map(collectionView) }))
 
     // A creditor at another bank collects from an account here.
     app.post('/incoming', async (req, reply) => {

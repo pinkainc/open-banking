@@ -94,7 +94,7 @@ describe('refusal before the cut-off', () => {
     assert.deepEqual(await ddDrain(ctx), [])
     assert.deepEqual(await ddDrain(ctx, C2.code), [])
     assert.equal(await balance(ctx, C2.iban), '100.00')
-    assert.equal(ctx.emulator.directDebit.collections[0].status, 'REFUSED')
+    assert.equal((await ctx.emulator.directDebit.collections())[0].status, 'REFUSED')
   })
 
   test('the reason may sit on the block or the group (EPC usage rule)', async () => {
@@ -131,7 +131,7 @@ describe('refusal between the cut-off and settlement', () => {
     assert.equal(ddStatus(creditor.find((m) => m.type === 'DIRECT_DEBIT_OUTGOING')!).blocks[0].txs[0].sts, 'ACSC')
     assert.equal(await balance(ctx, C2.iban), '100.00')
     assert.equal(await balance(ctx, C1.iban), '10000.00')
-    assert.equal(ctx.emulator.directDebit.collections[0].status, 'REFUNDED')
+    assert.equal((await ctx.emulator.directDebit.collections())[0].status, 'REFUNDED')
   })
 
   test('a second refusal of the same collection is refused', async () => {
@@ -197,7 +197,7 @@ describe('refusal request checks', () => {
     assert.deepEqual([status.grp, status.grpInfo, status.blocks], ['RJCT', E.oneOnly, []])
     const { status: count } = await answered(pain007([{ pmtInfId: a.pmtInfId, endToEndId: a.endToEndId }], { nbOfTxs: '2' }))
     assert.deepEqual([count.grp, count.grpInfo], ['RJCT', E.headerCount])
-    assert.equal(ctx.emulator.directDebit.collections.filter((c) => c.status === 'PENDING').length, 2)
+    assert.equal((await ctx.emulator.directDebit.collections()).filter((c) => c.status === 'PENDING').length, 2)
   })
 
   test('unmatched OrgnlPmtInfId or OrgnlEndToEndId: Collection not found', async () => {

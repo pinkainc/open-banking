@@ -13,12 +13,14 @@
 //             it is refunded for 8 weeks (camt.054 with RtrInf to both sides)
 //
 // Collections wait for their settlement date; tick() settles the due ones (main.ts calls
-// it every minute, tests and /_sim/direct-debit/settle call it directly).
+// it every minute, tests and /_sim/direct-debit/settle call it directly). They are kept in
+// the emulator's keyed store (decision 975), so a restart before the settlement day still
+// settles them, once (a claim per collection, decision 976).
 import { DEFAULT_BOUNDS, type Bounds } from '../bounded.js'
-import { memoryKeyed, type KeyedFactory, type KeyedStore } from '../keyed.js'
+import { memoryKeyed, UNBOUNDED, type KeyedFactory, type KeyedStore } from '../keyed.js'
 import type { Clock } from '../clock.js'
 import { DAY_MS } from '../clock.js'
-import { keyOf, type Customer, type DirectoryStore } from '../directory.js'
+import { keyOf, type Customer, type CustomerKey, type DirectoryStore } from '../directory.js'
 import { ibanChecksumOk, normalizeIban } from '../iban.js'
 import { notificationMsgId, servicerRef } from '../ids.js'
 import type { InboxStore } from '../inbox.js'
@@ -132,21 +134,52 @@ export class DirectDebitError extends Error {
   constructor(readonly status: number, message: string) { super(message) }
 }
 
+/** How long a claim on a collection holds when its holder never lets go (a crash), by the clock. */
+export const CLAIM_MS = 5 * 60 * 1000
+
 export class DirectDebitService {
-  readonly collections: Collection[] = []
   #seenMsgIds: KeyedStore<true>
   #seenRefusals: KeyedStore<true>
+  /** Every collection by its id, in the order they came (decision 975). */
+  #collections: KeyedStore<StoredCollection>
+  /** Who is settling or refunding a collection right now (decision 976). */
+  #claims: KeyedStore<true>
+  /** The service's operations in this process, one after the other (decision 976). */
+  #queue: Promise<unknown> = Promise.resolve()
   constructor(private d: DirectDebitDeps) {
     const keyed = d.keyed ?? memoryKeyed(d.clock)
     this.#seenMsgIds = keyed('dd-msgids', d.msgIds ?? DEFAULT_BOUNDS.msgIds)
     this.#seenRefusals = keyed('dd-refusal-msgids', d.msgIds ?? DEFAULT_BOUNDS.msgIds)
+    this.#collections = keyed('dd-collections', UNBOUNDED)
+    this.#claims = keyed('dd-claims', { ttlMs: CLAIM_MS, max: 100_000 })
+  }
+
+  /** Every collection, oldest first; one whose customer is gone from the directory is left out. */
+  async collections(): Promise<Collection[]> {
+    const cache = new Map<string, Promise<Customer | undefined>>()
+    const out: Collection[] = []
+    for (const [, o] of await this.#collections.entries()) {
+      const c = await this.#decode(o, cache)
+      if (c) out.push(c)
+    }
+    return out
+  }
+
+  #serial<T>(f: () => Promise<T>): Promise<T> {
+    const run = this.#queue.then(f, f)
+    this.#queue = run.catch(() => undefined)
+    return run
   }
 
   // --- creditor: POST /direct-debit/collection ------------------------------------
 
   /** Handles one pain.008 body. Throws XmlSyntaxError when the body is not XML at all. */
-  async collect(xml: string, customer: Customer, requestId: string): Promise<void> {
-    await this.tick()
+  collect(xml: string, customer: Customer, requestId: string): Promise<void> {
+    return this.#serial(() => this.#collect(xml, customer, requestId))
+  }
+
+  async #collect(xml: string, customer: Customer, requestId: string): Promise<void> {
+    await this.#tick()
     const doc = parseXml(xml)
     const msgIdGuess = String(doc?.Document?.CstmrDrctDbtInitn?.GrpHdr?.MsgId ?? 'NOTPROVIDED')
     const reject = (reason: string) => this.#report(customer, DD_TYPES.outgoing, requestId,
@@ -175,10 +208,7 @@ export class DirectDebitService {
     }
     report.groupStatus = aggregate(report.blocks.flatMap((b) => b.txs.map((t) => t.status)))
     await this.#report(customer, DD_TYPES.outgoing, requestId, report)
-    for (const c of accepted) {
-      this.collections.push(c)
-      if (c.debtorCustomer) await this.#notifyDebtor(c)
-    }
+    for (const c of accepted) await this.#add(c)
   }
 
   async #fileProblem(f: CollectionFile, customer: Customer): Promise<string | undefined> {
@@ -246,13 +276,22 @@ export class DirectDebitService {
   // --- settlement -----------------------------------------------------------------
 
   /** Settles every collection whose settlement time has come. Returns how many were processed. */
-  async tick(): Promise<number> {
+  tick(): Promise<number> { return this.#serial(() => this.#tick()) }
+
+  async #tick(): Promise<number> {
     const now = this.d.clock.now().getTime()
-    const due = this.collections.filter((c) => c.status === 'PENDING' && settlementAt(c.settlementDate) <= now)
+    const listed = await this.collections()
+    const isDue = (c: Collection) => c.status === 'PENDING' && settlementAt(c.settlementDate) <= now
+    // A refusal after the cut-off is returned once settled; one left over by a restart in between too.
+    const toReturn = (c: Collection) => c.status === 'SETTLED' && !!c.returnOnSettle
+    const due: Collection[] = []
     // Creditor reports of one tick: one pain.002 per original file.
     const reports = new Map<string, { customer: Customer; requestId?: string; report: DdReport }>()
-    for (const c of due) {
-      const s = await this.#settle(c)
+    for (const x of listed.filter(isDue)) {
+      let s: DdStatus | undefined
+      const c = await this.#claimed(x.id, async (c) => { if (isDue(c)) s = await this.#settle(c) })
+      if (!c || !s) continue
+      due.push(c)
       if (!c.creditorCustomer) continue
       const k = `${keyOf(c.creditorCustomer)}|${c.msgId}|${c.requestId}`
       let r = reports.get(k)
@@ -262,16 +301,36 @@ export class DirectDebitService {
       b.txs.push(s)
     }
     for (const r of reports.values()) await this.#report(r.customer, DD_TYPES.outgoing, r.requestId, r.report)
-    for (const c of due) if (c.status === 'SETTLED' && c.returnOnSettle) await this.#refund(c, c.returnOnSettle)
+    const settled = new Set(due.map((c) => c.id))
+    for (const x of [...due.filter(toReturn), ...listed.filter((c) => toReturn(c) && !settled.has(c.id))]) {
+      await this.#claimed(x.id, async (c) => { if (toReturn(c)) await this.#refund(c, c.returnOnSettle!) })
+    }
     return due.length
+  }
+
+  /**
+   * Runs f on the stored collection while holding its claim (keyed `add`, one holder across
+   * emulators on a namespace); undefined when another holds it or the collection is gone.
+   */
+  async #claimed(id: string, f: (c: Collection) => Promise<void>): Promise<Collection | undefined> {
+    if (!(await this.#claims.add(id, true))) return undefined
+    try {
+      const o = await this.#collections.get(id)
+      const c = o && (await this.#decode(o))
+      if (c) await f(c)
+      return c
+    } finally {
+      await this.#claims.take(id)
+    }
   }
 
   async #settle(c: Collection): Promise<DdStatus> {
     const base = { pmtInfId: c.pmtInfId, endToEndId: c.endToEndId, instrId: c.instrId, collection: c }
     const settlement = this.d.rails.settlementAccount(DD_SCHEME)
-    const fail = (code: string): DdStatus => {
+    const fail = async (code: string): Promise<DdStatus> => {
       c.status = 'REJECTED'
       c.reason = code
+      await this.#save(c)
       return { ...base, status: 'RJCT', code, text: REASONS[code] }
     }
     if (c.debtorCustomer) {
@@ -291,6 +350,7 @@ export class DirectDebitService {
     }
     c.status = 'SETTLED'
     c.settledAt = this.d.clock.now()
+    await this.#save(c)
     if (c.debtorCustomer) await this.#notify(c.debtorCustomer, this.#booking(c, 'debtor', 'DBIT', c.id))
     if (c.creditorCustomer) await this.#notify(c.creditorCustomer, this.#booking(c, 'creditor', 'CRDT', servicerRef()))
     return { ...base, status: 'ACSC' }
@@ -310,6 +370,7 @@ export class DirectDebitService {
     }
     c.status = 'REFUNDED'
     c.reason = code
+    await this.#save(c)
     // P 09: "TxId…" then "CD:<code>" under Rsn/Cd NARR. pain.008 has no TxId; InstrId or EndToEndId stands in.
     const returnInfo = { code: 'NARR', additional: [c.instrId ?? c.endToEndId, `CD:${code}`] }
     const family = { subFamily: 'UPDD' }
@@ -321,8 +382,12 @@ export class DirectDebitService {
   // --- debtor: POST /direct-debit/incoming-collection ------------------------------
 
   /** Handles one pain.007 refusal. Throws XmlSyntaxError when the body is not XML at all. */
-  async refuse(xml: string, customer: Customer, requestId: string): Promise<void> {
-    await this.tick()
+  refuse(xml: string, customer: Customer, requestId: string): Promise<void> {
+    return this.#serial(() => this.#refuse(xml, customer, requestId))
+  }
+
+  async #refuse(xml: string, customer: Customer, requestId: string): Promise<void> {
+    await this.#tick()
     const doc = parseXml(xml)
     const msgId = String(doc?.Document?.CstmrPmtRvsl?.GrpHdr?.MsgId ?? 'NOTPROVIDED')
     const report = (r: Omit<DdReport, 'originalMsgId' | 'originalMsgName'>) =>
@@ -345,7 +410,7 @@ export class DirectDebitService {
     await this.#seenRefusals.set(`${keyOf(customer)}|${r.msgId}`, true)
 
     const t = r.txs[0]
-    const c = this.#find(t.pmtInfId!, t.endToEndId!, (x) => !!x.debtorCustomer && keyOf(x.debtorCustomer) === keyOf(customer))
+    const c = await this.#find(t.pmtInfId!, t.endToEndId!, (x) => !!x.debtorCustomer && keyOf(x.debtorCustomer) === keyOf(customer))
     const tx = (status: 'ACCP' | 'RJCT', text?: string, code?: string): DdStatus =>
       ({ pmtInfId: t.pmtInfId!, endToEndId: t.endToEndId, instrId: c?.instrId, status, text, code: text ? code ?? 'NARR' : undefined, collection: c })
     const answer = (s: DdStatus) => report({ blocks: [{ pmtInfId: t.pmtInfId!, txs: [s] }] })
@@ -360,7 +425,7 @@ export class DirectDebitService {
     if (c.status === 'PENDING') {
       await answer(tx('ACCP'))
       // After 10:30 CET on the settlement date the refusal is processed as a return.
-      if (now >= refusalCutoff(c.settlementDate)) { c.returnOnSettle = t.reason; return }
+      if (now >= refusalCutoff(c.settlementDate)) { c.returnOnSettle = t.reason; await this.#save(c); return }
       await this.#cancel(c, t.reason, requestId)
       return
     }
@@ -375,6 +440,7 @@ export class DirectDebitService {
   async #cancel(c: Collection, code: string, requestId?: string) {
     c.status = 'REFUSED'
     c.reason = code
+    await this.#save(c)
     const s: DdStatus = { pmtInfId: c.pmtInfId, endToEndId: c.endToEndId, instrId: c.instrId, status: 'RJCT', code, text: REASONS[code], collection: c }
     if (c.debtorCustomer) {
       await this.#report(c.debtorCustomer, DD_TYPES.cancel, requestId, {
@@ -389,8 +455,10 @@ export class DirectDebitService {
   // --- the other bank (/_sim) -------------------------------------------------------
 
   /** A creditor at another bank collects from an account here. */
-  async incoming(x: ExternalCollection): Promise<Collection> {
-    await this.tick()
+  incoming(x: ExternalCollection): Promise<Collection> { return this.#serial(() => this.#incoming(x)) }
+
+  async #incoming(x: ExternalCollection): Promise<Collection> {
+    await this.#tick()
     const debtorIban = normalizeIban(x.debtorIban)
     if (this.d.virtual?.resolve(debtorIban)) throw new DirectDebitError(409, 'collections from a virtual IBAN are refused (AG01)')
     const owner = await this.d.directory.ownerOf(debtorIban)
@@ -407,8 +475,7 @@ export class DirectDebitService {
       debtor: { name: x.debtorName ?? owner.name, iban: debtorIban, bic: this.d.bank.bic },
       ustrd: x.remittance, reference: x.reference, status: 'PENDING', debtorCustomer: owner,
     }
-    this.collections.push(c)
-    await this.#notifyDebtor(c)
+    await this.#add(c)
     return c
   }
 
@@ -416,9 +483,13 @@ export class DirectDebitService {
    * An R-transaction from the debtor's bank about a collection our creditor sent out:
    * before settlement a refusal (creditor pain.002 RJCT), after it a refund (camt.054 DBIT, 13 months).
    */
-  async externalReturn(endToEndId: string, code: string, pmtInfId?: string): Promise<Collection> {
-    await this.tick()
-    const c = this.#find(pmtInfId, endToEndId, (x) => !!x.creditorCustomer && !x.debtorCustomer)
+  externalReturn(endToEndId: string, code: string, pmtInfId?: string): Promise<Collection> {
+    return this.#serial(() => this.#externalReturn(endToEndId, code, pmtInfId))
+  }
+
+  async #externalReturn(endToEndId: string, code: string, pmtInfId?: string): Promise<Collection> {
+    await this.#tick()
+    const c = await this.#find(pmtInfId, endToEndId, (x) => !!x.creditorCustomer && !x.debtorCustomer)
     if (!c) throw new DirectDebitError(404, 'no collection to an external debtor with this EndToEndId')
     if (c.status === 'PENDING') { await this.#cancel(c, code); return c }
     if (c.status !== 'SETTLED') throw new DirectDebitError(409, `collection is ${c.status}`)
@@ -429,16 +500,38 @@ export class DirectDebitService {
 
   // --- helpers ------------------------------------------------------------------------
 
-  #find(pmtInfId: string | undefined, endToEndId: string, mine: (c: Collection) => boolean) {
-    const hits = this.collections.filter((c) => mine(c) && c.endToEndId === endToEndId && (pmtInfId === undefined || c.pmtInfId === pmtInfId))
+  async #find(pmtInfId: string | undefined, endToEndId: string, mine: (c: Collection) => boolean) {
+    const hits = (await this.collections()).filter((c) => mine(c) && c.endToEndId === endToEndId && (pmtInfId === undefined || c.pmtInfId === pmtInfId))
     return hits.find((c) => c.status === 'PENDING' || c.status === 'SETTLED') ?? hits[hits.length - 1]
   }
 
-  async #notifyDebtor(c: Collection) {
+  /** A new collection: stored, then the debtor here notified (its MsgId stored with it). */
+  async #add(c: Collection) {
     // Enabled per customer by the account manager (P 09, decision 527).
-    if (!c.debtorCustomer!.directDebit?.debtorNotification) return
-    c.notificationMsgId = notificationMsgId()
-    await this.d.inbox.add({ customer: c.debtorCustomer!, type: DD_TYPES.notification, body: incomingCollection(c, c.notificationMsgId, this.d.clock.now()) })
+    if (c.debtorCustomer?.directDebit?.debtorNotification) c.notificationMsgId = notificationMsgId()
+    await this.#collections.set(c.id, encodeCollection(c))
+    if (c.notificationMsgId) {
+      await this.d.inbox.add({ customer: c.debtorCustomer!, type: DD_TYPES.notification, body: incomingCollection(c, c.notificationMsgId, this.d.clock.now()) })
+    }
+  }
+
+  async #save(c: Collection) {
+    if (!(await this.#collections.replace(c.id, encodeCollection(c)))) throw new Error(`collection ${c.id} is not stored`)
+  }
+
+  /** The stored collection with its customers from the directory; undefined when one is gone. */
+  async #decode(o: StoredCollection, cache = new Map<string, Promise<Customer | undefined>>()): Promise<Collection | undefined> {
+    const { amount, creditorCustomer: ck, debtorCustomer: dk, settledAt, ...rest } = o
+    const customer = (k: CustomerKey) => {
+      let p = cache.get(keyOf(k))
+      if (!p) cache.set(keyOf(k), (p = this.d.directory.get(k)))
+      return p
+    }
+    const c: Collection = { ...rest, amount: BigInt(amount) }
+    if (ck && !(c.creditorCustomer = await customer(ck))) return undefined
+    if (dk && !(c.debtorCustomer = await customer(dk))) return undefined
+    if (settledAt !== undefined) c.settledAt = new Date(settledAt)
+    return c
   }
 
   /** The entry on one side's account (the side, not the direction: a refund credits the debtor). */
@@ -465,6 +558,25 @@ export class DirectDebitService {
     await this.d.onBooking?.(customer, b)
     await this.d.inbox.add({ customer, type: 'CREDIT_DEBIT_NOTIFICATION', body: camt054(b, customer.camt054, this.d.bank) })
   }
+}
+
+/** A collection as the keyed store keeps it (decision 975): JSON, the customers by key. */
+type StoredCollection = Omit<Collection, 'amount' | 'creditorCustomer' | 'debtorCustomer' | 'settledAt'> & {
+  amount: string
+  creditorCustomer?: CustomerKey
+  debtorCustomer?: CustomerKey
+  settledAt?: number
+}
+
+const customerKey = (c: Customer): CustomerKey => ({ code: c.code, country: c.country })
+
+/** JSON-safe (undefined fields dropped), so memory hands back what Postgres would. */
+const encodeCollection = (c: Collection): StoredCollection => {
+  const { amount, creditorCustomer, debtorCustomer, settledAt, ...rest } = c
+  return JSON.parse(JSON.stringify({
+    ...rest, amount: String(amount), creditorCustomer: creditorCustomer && customerKey(creditorCustomer),
+    debtorCustomer: debtorCustomer && customerKey(debtorCustomer), settledAt: settledAt?.getTime(),
+  }))
 }
 
 /** An XSD error without the namespace in every element name. */

@@ -15,6 +15,8 @@ export interface KeyedStore<V> {
   add(key: string, value: V): Promise<boolean>
   /** Removes and returns the value; at most once for a key. */
   take(key: string): Promise<V | undefined>
+  /** Replaces the value of a live key, keeping its place and expiry (unlike set); whether it did. */
+  replace(key: string, value: V): Promise<boolean>
   /** The live entries, oldest first. */
   entries(): Promise<[string, V][]>
 }
@@ -41,6 +43,7 @@ export class MemoryKeyed<V> implements KeyedStore<V> {
     if (v !== undefined) this.#m.delete(key)
     return v
   }
+  async replace(key: string, value: V) { return this.#m.replace(key, value) }
   async entries() { return this.#m.entries() }
 }
 

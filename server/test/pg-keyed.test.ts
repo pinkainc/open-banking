@@ -48,6 +48,20 @@ for (const [name, make] of STORES) {
       assert.equal(await s.take('b'), undefined)
     })
 
+    test('replace keeps the place and the expiry, only for a live key (decision 975)', async () => {
+      const { clock, s } = await store<{ n: number }>({ ttlMs: 1000, max: 10 })
+      await s.set('a', { n: 1 })
+      clock.advance(400)
+      await s.set('b', { n: 2 })
+      assert.equal(await s.replace('a', { n: 3 }), true)
+      assert.deepEqual(await s.entries(), [['a', { n: 3 }], ['b', { n: 2 }]], 'a stays the oldest')
+      assert.equal(await s.replace('c', { n: 4 }), false, 'absent: nothing written')
+      assert.equal(await s.has('c'), false)
+      clock.advance(600)
+      assert.equal(await s.replace('a', { n: 5 }), false, 'expired at its first time to live')
+      assert.deepEqual(await s.entries(), [['b', { n: 2 }]])
+    })
+
     test('kinds are apart', async () => {
       const clock = new ManualClock('2026-03-10T08:00:00Z')
       const f = await make(clock)

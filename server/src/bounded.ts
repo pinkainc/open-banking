@@ -56,6 +56,13 @@ export class BoundedMap<K, V> {
 
   has(key: K): boolean { return this.get(key) !== undefined }
 
+  /** A new value for a live key, keeping its place and expiry; whether it did. */
+  replace(key: K, value: V): boolean {
+    if (this.get(key) === undefined) return false
+    this.#m.get(key)!.value = value
+    return true
+  }
+
   delete(key: K): boolean { return this.#m.delete(key) }
 
   /** The live entries, oldest first. */
