@@ -41,7 +41,11 @@ export interface CustomerInput {
   code: string
   country: string
   name: string
-  accounts?: (string | { iban: string; balances?: Record<string, string>; /** Master account agreement for VIBANs. */ viban?: boolean })[]
+  accounts?: (string | {
+    iban: string; balances?: Record<string, string>; /** Master account agreement for VIBANs. */ viban?: boolean
+    /** UK GET /accounts/list (decision 706): nickname, opening day (YYYY-MM-DD, default the day it is added), closed. */
+    nickname?: string; opened?: string; closed?: boolean
+  })[]
   camt054?: '02' | '08'
   connected?: (CustomerKey | [string, string])[]
   services?: string[]

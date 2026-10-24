@@ -26,6 +26,7 @@ import { accepted as acceptedFor } from './requests.js'
 import { BALANCE_TYPE, STATEMENT_TYPE } from './statements/reports.js'
 import { registerMessagesProcessed, registerMessagesV2 } from './messages-v2.js'
 import { registerRequestsV2 } from './requests-v2.js'
+import { accountsSimRoutes, registerAccounts } from './accounts/routes.js'
 
 export interface AppOptions {
   emulator: Emulator
@@ -263,6 +264,8 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     registerMessagesV2(app, emulator, caller, bankCode)
     jsonTextScope(app, (scope) => registerMessagesProcessed(scope, emulator, caller))
     registerRequestsV2(app, emulator, caller)
+    // Account reports in JSON: list, transaction by reference, incoming pending/rejected (decisions 705–713).
+    registerAccounts(app, emulator, caller)
   }
 
   // --- Payment initiation ---------------------------------------------------------
@@ -324,6 +327,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     app.register(contractsSimRoutes(emulator), { prefix: '/_sim/contracts' })
     app.register(eeWebhookSimRoutes(emulator), { prefix: '/_sim/webhooks/ee' })
     app.register(payeeSimRoutes(emulator), { prefix: '/_sim/payee' })
+    app.register(accountsSimRoutes(emulator), { prefix: '/_sim/accounts' })
   }
   return app
 }

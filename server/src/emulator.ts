@@ -22,6 +22,7 @@ import { checkBankAddress, defaultBankAddress } from './statements/bank-address.
 import { VibanSchemas } from './viban/messages.js'
 import { VibanService, type ErrorDelivery } from './viban/service.js'
 import { PayeeService } from './payee/service.js'
+import { AccountsService, DEFAULT_INCOMING } from './accounts/service.js'
 
 export interface Seed {
   bank?: Partial<Bank>
@@ -43,7 +44,7 @@ export interface EmulatorOptions {
   /** How EE webhook payloads are sent (default HTTP POST); tests record them instead. */
   webhookDeliver?: Deliver
   /** Limits of what is remembered (decision 504); each part overrides DEFAULT_BOUNDS. */
-  memory?: { tombstones?: Partial<Bounds>; msgIds?: Partial<Bounds>; processed?: Partial<Bounds>; requests?: Partial<Bounds> }
+  memory?: { tombstones?: Partial<Bounds>; msgIds?: Partial<Bounds>; processed?: Partial<Bounds>; requests?: Partial<Bounds>; incoming?: Partial<Bounds> }
 }
 
 export const DEFAULT_BANK: Bank = { bic: 'LHVBEE22', name: 'open-banking emulator' }
@@ -68,6 +69,8 @@ export class Emulator {
   readonly contracts: Contracts
   readonly webhooksEe: EeWebhooks
   readonly payee: PayeeService
+  /** UK account reports: account list, transaction by reference, incoming pending and rejected. */
+  readonly accounts: AccountsService
 
   constructor(opts: EmulatorOptions & { bank?: Partial<Bank> } = {}) {
     this.clock = opts.clock ?? systemClock
@@ -85,9 +88,13 @@ export class Emulator {
     this.viban = new VibanService(this.directory, this.inbox, this.clock, {
       schemas: opts.xsdDir ? new VibanSchemas(opts.xsdDir) : undefined, errors: opts.vibanErrors,
     })
+    this.accounts = new AccountsService({
+      directory: this.directory, ledger: this.ledger, journal: this.journal, viban: this.viban.registry, clock: this.clock, bank: this.bank, engine: () => this.engine,
+    }, { ...DEFAULT_INCOMING, ...opts.memory?.incoming })
     this.engine = new PaymentEngine(this.directory, this.ledger, this.rails, this.inbox, this.clock, this.bank, {
       strictIban: opts.strictIban, pain00103Until: opts.pain00103Until ?? '2026-11-15', xsd, virtual: this.viban.registry, msgIds,
       onBooking: (_c, b) => { this.journal.record(b) }, limits: (c) => this.reports.paymentLimits(c),
+      onIncoming: (e) => this.accounts.onIncoming(e),
     })
     this.directDebit = new DirectDebitService({
       directory: this.directory, ledger: this.ledger, rails: this.rails, inbox: this.inbox, clock: this.clock, bank: this.bank,
@@ -116,6 +123,10 @@ export class Emulator {
         if (k !== 'daily' && k !== 'monthly' && k !== 'instant') throw new Error(`unknown limit ${k}`)
         toMinor(v as string)
       }
+    }
+    for (const a of c.accounts ?? []) {
+      if (typeof a === 'string') this.accounts.register(a)
+      else this.accounts.register(a.iban, { opened: a.opened, nickname: a.nickname, closed: a.closed })
     }
     const customer = this.directory.add(c)
     if (c.limits) this.reports.configure(customer, { limits: { ...c.limits } })
