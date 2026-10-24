@@ -159,7 +159,7 @@ export class Emulator {
     this.bacs = new BacsService({
       directory: this.directory, ledger: this.ledger, rails: this.rails, inbox: this.inbox, clock: this.clock, bank: this.bank, virtual: this.viban.registry,
       onBooking: async (_c, b) => { await this.journal.record(b) }, onIncoming: (e) => this.accounts.onIncoming(e),
-      credit: (p) => this.engine.incoming(p),
+      credit: (p) => this.engine.incoming(p), keyed,
     }, opts.memory?.bacs)
     this.agency = new Agency({ directory: this.directory, inbox: this.inbox, clock: this.clock, bank: this.bank }, opts.memory?.agency, opts.agency)
     this.acquiring = new Acquiring({ directory: this.directory, inbox: this.inbox, clock: this.clock }, undefined, opts.acquiring)

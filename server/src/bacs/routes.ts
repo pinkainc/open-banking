@@ -104,7 +104,7 @@ export function bacsSimRoutes(emulator: Emulator) {
 
   return async (app: FastifyInstance) => {
     // An incoming Bacs credit to a GB account (or VIBAN) here: BACS_INCOMING now, booked on the entry day.
-    app.get('/incoming', async () => ({ incoming: svc.credits.map(creditView) }))
+    app.get('/incoming', async () => ({ incoming: (await svc.credits()).map(creditView) }))
     app.post('/incoming', async (req, reply) => {
       const b = (req.body ?? {}) as Record<string, unknown>
       const iban = str(b.iban, 'iban')
@@ -118,7 +118,7 @@ export function bacsSimRoutes(emulator: Emulator) {
     })
 
     // A Service User's new mandate on an account here: DIRECT_DEBIT_MANDATE_INITIATION (pain.009).
-    app.get('/mandates', async () => ({ mandates: svc.mandates.entries().map(([, m]) => mandateView(m)) }))
+    app.get('/mandates', async () => ({ mandates: (await svc.mandates()).map(mandateView) }))
     app.post('/mandates', async (req, reply) => {
       const b = (req.body ?? {}) as Record<string, unknown>
       const debtorIban = str(b.debtorIban, 'debtorIban')
@@ -135,7 +135,7 @@ export function bacsSimRoutes(emulator: Emulator) {
     })
 
     // A collection under an active mandate: DIRECT_DEBIT_COLLECTION_NOTIFICATION (pain.008), debit on the entry day.
-    app.get('/collections', async () => ({ collections: svc.collections.map(collectionView) }))
+    app.get('/collections', async () => ({ collections: (await svc.collections()).map(collectionView) }))
     app.post('/collections', async (req, reply) => {
       const b = (req.body ?? {}) as Record<string, unknown>
       const mandateId = str(b.mandateId, 'mandateId')

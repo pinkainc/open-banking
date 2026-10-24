@@ -216,9 +216,9 @@ describe('Bacs mandates', () => {
     assert.deepEqual(req.map((x) => [x.type, x.body]), [['DIRECT_DEBIT_MANDATE_CONFIRM', body]])
 
     await at('2026-03-11T11:34:00Z')
-    assert.equal(ctx.emulator.bacs.mandates.get(m.id)!.status, 'ACCEPTED')
+    assert.equal((await ctx.emulator.bacs.mandate(m.id))!.status, 'ACCEPTED')
     await at('2026-03-11T11:35:00Z')
-    assert.equal(ctx.emulator.bacs.mandates.get(m.id)!.status, 'ACTIVE')
+    assert.equal((await ctx.emulator.bacs.mandate(m.id))!.status, 'ACTIVE')
 
     // Answered again: no longer PENDING.
     await submit('/direct-debit/bacs-mandate-accept', pain012([{ msgId: m.msgId, accepted: 'true' }]))
@@ -247,11 +247,11 @@ describe('Bacs mandates', () => {
     assert.deepEqual(c.Messages.map((x: any) => x.ErrorInfo?.ErrorCode ?? 'OK'),
       ['OK', 'DUPLICATE_MESSAGE_ID', 'MANDATE_FILE_NOT_FOUND', 'NO_RIGHTS_TO_DEBTOR_ACCOUNT', 'MANDATE_NOT_FOUND', 'INVALID_ACCEPTANCE_DATA'])
     const bacs = ctx.emulator.bacs
-    assert.equal(bacs.mandates.get(m1.id)!.status, 'RETURNED')
-    assert.equal(bacs.mandates.get(m1.id)!.reason, 'AC01')
+    assert.equal((await bacs.mandate(m1.id))!.status, 'RETURNED')
+    assert.equal((await bacs.mandate(m1.id))!.reason, 'AC01')
     await at('2026-03-11T18:35:00Z')
     // No answer counts as accepted: active at the 18:35 retry; a returned one stays returned.
-    assert.deepEqual([m1, m2, m3, other].map((m) => bacs.mandates.get(m.id)!.status), ['RETURNED', 'ACTIVE', 'ACTIVE', 'ACTIVE'])
+    assert.deepEqual(await Promise.all([m1, m2, m3, other].map(async (m) => (await bacs.mandate(m.id))!.status)), ['RETURNED', 'ACTIVE', 'ACTIVE', 'ACTIVE'])
     await sim('/collections', { mandateId: m1.id, amount: '1.00' }, 409)
   })
 
@@ -280,7 +280,7 @@ describe('Bacs mandates', () => {
       { mandateId: other.id, reason: 'MD16' }, { mandateId: pending.id, reason: 'XX99' }])
     await valid(body)
     ctx.clock.set('2026-03-12T10:00:00Z')
-    const pendingNow = ctx.emulator.bacs.mandates.get(pending.id)!
+    const pendingNow = (await ctx.emulator.bacs.mandate(pending.id))!
     assert.equal(pendingNow.status, 'ACTIVE') // activated at 18:35 with the other one
     const id = await submit('/direct-debit/bacs-mandate-cancel', body)
     const n = await one('DIRECT_DEBIT_MANDATE_CANCEL')
@@ -290,7 +290,7 @@ describe('Bacs mandates', () => {
     assert.deepEqual(rows, [['true', undefined, undefined], ['false', 'AM05', undefined], ['false', 'MD01', undefined],
       ['false', 'NARR', 'User has no rights to debtor account'], ['false', 'NARR', 'Mandate cancel request contains invalid data']])
     assert.equal([r.UndrlygAccptncDtls].flat()[0].OrgnlMsgInf.MsgId, 'CXL-1')
-    assert.equal(ctx.emulator.bacs.mandates.get(m.id)!.status, 'CANCELLED')
+    assert.equal((await ctx.emulator.bacs.mandate(m.id))!.status, 'CANCELLED')
     await sim('/collections', { mandateId: m.id, amount: '1.00' }, 409)
     // A mandate not active yet cannot be cancelled ("Mandate cancel failed.").
     const fresh = await sim('/mandates', { debtorIban: A })
@@ -358,15 +358,15 @@ describe('Bacs collections', () => {
     await inbox()
     await at('2026-03-13T06:00:00Z')
     await at('2026-03-13T11:30:00Z')
-    assert.equal(ctx.emulator.bacs.collection(c.id)!.attempts, 2)
+    assert.equal((await ctx.emulator.bacs.collection(c.id))!.attempts, 2)
     await ctx.emulator.fund(LOW, '45.00', 'GBP')
     await at('2026-03-13T15:00:00Z')
-    assert.equal(ctx.emulator.bacs.collection(c.id)!.debit, 'BOOKED')
+    assert.equal((await ctx.emulator.bacs.collection(c.id))!.debit, 'BOOKED')
     assert.equal(await balance(LOW), '5.00')
     const c2 = await sim('/collections', { mandateId: m.id, amount: '50.00' })
     await inbox()
     await at('2026-03-16T20:00:00Z')
-    const v = ctx.emulator.bacs.collection(c2.id)!
+    const v = (await ctx.emulator.bacs.collection(c2.id))!
     assert.deepEqual([v.debit, v.attempts], ['UNPAID', 4])
     assert.deepEqual((await inbox()).map((x) => x.type), [])
   })
@@ -484,7 +484,7 @@ describe('Bacs: the published samples', () => {
     await submit('/direct-debit/bacs-mandate-accept', swap(accept, m1))
     await submit('/direct-debit/bacs-mandate-accept', swap(reject, m2))
     assert.deepEqual((await inbox()).map((x) => jsonValid('bacs-confirmation', x.json).AcceptanceStatus), ['OK', 'OK'])
-    assert.deepEqual([ctx.emulator.bacs.mandates.get(m1.id)!.status, ctx.emulator.bacs.mandates.get(m2.id)!.status], ['ACCEPTED', 'RETURNED'])
+    assert.deepEqual([(await ctx.emulator.bacs.mandate(m1.id))!.status, (await ctx.emulator.bacs.mandate(m2.id))!.status], ['ACCEPTED', 'RETURNED'])
     // The pain.011 sample names an unknown mandate: refused with MD01.
     await submit('/direct-debit/bacs-mandate-cancel', blocks[2][0])
     assert.equal(parseXml((await one('DIRECT_DEBIT_MANDATE_CANCEL')).body).Document.MndtAccptncRpt.UndrlygAccptncDtls.AccptncRslt.RjctRsn.Cd, 'MD01')

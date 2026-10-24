@@ -7,9 +7,12 @@
 // scheme cancels one (AUDDIS, DIRECT_DEBIT_MANDATE_SCHEME_CANCEL) and reverses a collection
 // (pain.007, credit the next working day). Incoming Bacs credits are announced on day 2
 // (BACS_INCOMING) and booked on day 3 (camt.054). The scheme side is the /_sim control plane.
-import { BoundedMap, type Bounds } from '../bounded.js'
+// Mandates, collections and credits are kept in the emulator's keyed store (decision 977),
+// so a restart mid-cycle carries on; the clock's steps run once under a claim (978).
+import type { Bounds } from '../bounded.js'
 import { DAY_MS, type Clock } from '../clock.js'
-import { keyOf, type Customer, type DirectoryStore } from '../directory.js'
+import { keyOf, type Customer, type CustomerKey, type DirectoryStore } from '../directory.js'
+import { memoryKeyed, type KeyedFactory, type KeyedStore } from '../keyed.js'
 import { normalizeIban } from '../iban.js'
 import { notificationMsgId, servicerRef } from '../ids.js'
 import type { InboxStore } from '../inbox.js'
@@ -146,7 +149,12 @@ export interface BacsDeps {
   onIncoming?: (e: IncomingEvent) => void
   /** Books an incoming credit (the payment engine's, so VIBANs work as for any credit). */
   credit: (p: { iban: string; amount: bigint; currency: string; scheme: string; debtor: { name?: string; iban?: string; account?: string }; reference?: string; ref: string }) => Promise<{ returned?: unknown }>
+  /** Where mandates, collections and credits are kept (decision 977); default in memory. */
+  keyed?: KeyedFactory
 }
+
+/** How long a claim on a collection or a credit holds when its holder never lets go (a crash), by the clock. */
+export const CLAIM_MS = 5 * 60 * 1000
 
 /** A refusal of the control plane (status, text). */
 export class BacsError extends Error {
@@ -157,20 +165,35 @@ const digits = (s: string, n: number) => new RegExp(`^[0-9]{${n}}$`).test(s)
 const randomDigits = (n: number) => Array.from({ length: n }, () => Math.floor(Math.random() * 10)).join('')
 
 export class BacsService {
-  readonly mandates: BoundedMap<string, Mandate>
-  readonly #collections: BoundedMap<string, BacsCollection>
-  readonly #credits: BoundedMap<string, IncomingCredit>
+  readonly #mandates: KeyedStore<StoredMandate>
+  readonly #collections: KeyedStore<StoredCollection>
+  readonly #credits: KeyedStore<StoredCredit>
+  /** Who is debiting, paying back or booking an item right now (decision 978). */
+  readonly #claims: KeyedStore<true>
+  /** The service's operations in this process, one after the other (decision 978). */
+  #queue: Promise<unknown> = Promise.resolve()
 
   constructor(private d: BacsDeps, bounds: Partial<typeof BACS_BOUNDS> = {}) {
     const b = { ...BACS_BOUNDS, ...bounds }
-    this.mandates = new BoundedMap(d.clock, b.mandates)
-    this.#collections = new BoundedMap(d.clock, b.collections)
-    this.#credits = new BoundedMap(d.clock, b.credits)
+    const keyed = d.keyed ?? memoryKeyed(d.clock)
+    this.#mandates = keyed('bacs-mandates', b.mandates)
+    this.#collections = keyed('bacs-collections', b.collections)
+    this.#credits = keyed('bacs-credits', b.credits)
+    this.#claims = keyed('bacs-claims', { ttlMs: CLAIM_MS, max: 100_000 })
   }
 
-  get collections(): BacsCollection[] { return this.#collections.entries().map(([, c]) => c) }
-  get credits(): IncomingCredit[] { return this.#credits.entries().map(([, c]) => c) }
-  collection(id: string) { return this.#collections.get(id.toUpperCase()) }
+  /** The live mandates, collections and credits, oldest first; one whose customer is gone from the directory is left out. */
+  async mandates(): Promise<Mandate[]> { return this.#all(this.#mandates, (o, k) => this.#decodeMandate(o, k)) }
+  async collections(): Promise<BacsCollection[]> { return this.#all(this.#collections, (o, k) => this.#decodeCollection(o, k)) }
+  async credits(): Promise<IncomingCredit[]> { return this.#all(this.#credits, (o, k) => this.#decodeCredit(o, k)) }
+  async mandate(id: string) { const o = await this.#mandates.get(id); return o && this.#decodeMandate(o) }
+  async collection(id: string) { const o = await this.#collections.get(id.toUpperCase()); return o && this.#decodeCollection(o) }
+
+  #serial<T>(f: () => Promise<T>): Promise<T> {
+    const run = this.#queue.then(f, f)
+    this.#queue = run.catch(() => undefined)
+    return run
+  }
 
   /** A GB account of ours (or a VIBAN on one) as a Bacs party: sort code and account number. */
   async #own(raw: string): Promise<{ iban: string; master: string; customer: Customer; party: Party }> {
@@ -187,7 +210,9 @@ export class BacsService {
   // --- The scheme (control plane) --------------------------------------------------------
 
   /** An incoming Bacs credit: BACS_INCOMING now (day 2), booked on the entry day (decision 742). */
-  async incoming(x: { iban: string; amount: bigint; debtor: Party; reference?: string; numericReference?: string; serviceUserNumber?: string }): Promise<IncomingCredit> {
+  incoming(x: { iban: string; amount: bigint; debtor: Party; reference?: string; numericReference?: string; serviceUserNumber?: string }): Promise<IncomingCredit> { return this.#serial(() => this.#incoming(x)) }
+
+  async #incoming(x: { iban: string; amount: bigint; debtor: Party; reference?: string; numericReference?: string; serviceUserNumber?: string }): Promise<IncomingCredit> {
     const own = await this.#own(x.iban)
     const { processing, entry } = cycle(this.d.clock.now())
     const c: IncomingCredit = {
@@ -195,7 +220,7 @@ export class BacsService {
       reference: x.reference ?? 'BACS CREDIT', numericReference: x.numericReference, serviceUserNumber: x.serviceUserNumber,
       schemeTransactionId: randomDigits(17), uniqueSchemeId: servicerRef().slice(0, 8), processingDate: processing, entryDate: entry, status: 'PENDING',
     }
-    this.#credits.set(c.ref, c)
+    await this.#credits.set(c.ref, encodeCredit(c))
     // Pending in /accounts/{acc}/payments until booked; the debtor is named by sort code + account number.
     this.d.onIncoming?.({ ref: c.ref, status: 'Pending', account: c.iban, master: c.master, amount: c.amount, currency: 'GBP', debtor: { name: x.debtor.name, iban: `${x.debtor.sortCode}${x.debtor.accountNumber}` } })
     await this.d.inbox.add({
@@ -210,7 +235,9 @@ export class BacsService {
   }
 
   /** A new mandate from a Service User for an account here: pain.009 to the account owner. */
-  async newMandate(x: { debtorIban: string; creditor: Party; serviceUserNumber: string; reference?: string }): Promise<Mandate> {
+  newMandate(x: { debtorIban: string; creditor: Party; serviceUserNumber: string; reference?: string }): Promise<Mandate> { return this.#serial(() => this.#newMandate(x)) }
+
+  async #newMandate(x: { debtorIban: string; creditor: Party; serviceUserNumber: string; reference?: string }): Promise<Mandate> {
     const own = await this.#own(x.debtorIban)
     if (own.iban !== own.master) throw new BacsError(400, 'Direct Debit mandates are held on the account itself, not on a VIBAN')
     const { processing, entry } = cycle(this.d.clock.now())
@@ -219,18 +246,20 @@ export class BacsService {
       creditor: x.creditor, debtor: { ...own.party, iban: own.iban }, customer: own.customer, status: 'PENDING',
       processingDate: processing, entryDate: entry, createdAt: this.d.clock.now(), collections: 0,
     }
-    this.mandates.set(m.id, m)
+    await this.#mandates.set(m.id, encodeMandate(m))
     await this.d.inbox.add({ customer: own.customer, type: BACS_TYPES.mandateInitiation, body: pain009({ ...m, mandateId: m.id }, this.d.clock.now()) })
     return m
   }
 
   /** The Service User cancels the mandate through AUDDIS: DIRECT_DEBIT_MANDATE_SCHEME_CANCEL. */
-  async schemeCancel(id: string, reason = 'Cancelled by Service User/creditor'): Promise<Mandate> {
-    await this.tick()
-    const m = this.mandates.get(id)
+  schemeCancel(id: string, reason = 'Cancelled by Service User/creditor'): Promise<Mandate> { return this.#serial(() => this.#schemeCancel(id, reason)) }
+
+  async #schemeCancel(id: string, reason: string): Promise<Mandate> {
+    await this.#tick()
+    const m = await this.mandate(id)
     if (!m) throw new BacsError(404, `no mandate ${id}`)
     if (m.status !== 'ACTIVE') throw new BacsError(409, `the mandate is ${m.status}; only an active mandate can be cancelled`)
-    this.#close(m, 'SCHEME', 'MD17')
+    await this.#close(m, 'SCHEME', 'MD17')
     await this.d.inbox.add({
       customer: m.customer, type: BACS_TYPES.schemeCancel, contentType: 'application/json',
       body: schemeCancel({ creditor: m.creditor, debtor: m.debtor, mandateId: m.id, reference: m.reference, serviceUserNumber: m.serviceUserNumber, reason, closed: dateLondon(this.d.clock.now()) }),
@@ -239,9 +268,11 @@ export class BacsService {
   }
 
   /** A collection under an active mandate: notification now (day 2), debit on the entry day. */
-  async collect(x: { mandateId: string; amount: bigint; reference?: string }): Promise<BacsCollection> {
-    await this.tick()
-    const m = this.mandates.get(x.mandateId)
+  collect(x: { mandateId: string; amount: bigint; reference?: string }): Promise<BacsCollection> { return this.#serial(() => this.#collect(x)) }
+
+  async #collect(x: { mandateId: string; amount: bigint; reference?: string }): Promise<BacsCollection> {
+    await this.#tick()
+    const m = await this.mandate(x.mandateId)
     if (!m) throw new BacsError(404, `no mandate ${x.mandateId}`)
     if (m.status !== 'ACTIVE') throw new BacsError(409, `the mandate is ${m.status}; collections need an active mandate`)
     const { processing, entry } = cycle(this.d.clock.now())
@@ -251,7 +282,8 @@ export class BacsService {
       status: 'RECEIVED', debit: 'PENDING', attempts: 0,
     }
     m.collections++
-    this.#collections.set(c.id, c)
+    await this.#saveMandate(m)
+    await this.#collections.set(c.id, encodeCollection(c))
     await this.d.inbox.add({
       customer: m.customer, type: BACS_TYPES.collection,
       body: pain008({ msgId: c.msgId, pmtInfId: c.id, endToEndId: c.endToEndId, amount: c.amount, seqTp: c.seqTp, collectionDate: entry, creditor: m.creditor, debtor: m.debtor, reference: c.reference }, this.d.clock.now()),
@@ -263,9 +295,11 @@ export class BacsService {
    * The scheme reverses a collection (pain.007): before the debit the two cancel out
    * (nothing is booked); after it the debtor is credited the next working day at 05:00.
    */
-  async reverse(id: string, code = 'R'): Promise<BacsCollection> {
-    await this.tick()
-    const c = this.collection(id)
+  reverse(id: string, code = 'R'): Promise<BacsCollection> { return this.#serial(() => this.#reverse(id, code)) }
+
+  async #reverse(id: string, code: string): Promise<BacsCollection> {
+    await this.#tick()
+    const c = await this.collection(id)
     if (!c) throw new BacsError(404, `no collection ${id}`)
     const text = REVERSAL_REASONS[code]
     if (!text) throw new BacsError(400, `unknown reversal reason ${code} (A–Z of the Bacs reversal reasons)`)
@@ -279,6 +313,7 @@ export class BacsService {
     c.reversal = { msgId: notificationMsgId(), pmtInfId: servicerRef(), code, at: this.d.clock.now() }
     if (c.debit === 'PENDING') c.debit = 'CANCELLED'
     else c.refund = { kind: 'REVERSAL', code, text, ref: servicerRef(), due: londonInstant(nextBacsDay(today), CUTOFF.refunds) }
+    await this.#saveCollection(c)
     await this.d.inbox.add({
       customer: c.mandate.customer, type: BACS_TYPES.reversal,
       body: pain007({ msgId: c.reversal.msgId, originalMsgId: c.msgId, originalCreatedAt: c.createdAt, reversalPmtInfId: c.reversal.pmtInfId, pmtInfId: c.id, amount: c.amount, code, text }, this.d.clock.now()),
@@ -291,10 +326,12 @@ export class BacsService {
   #mine(customer: Customer, m: { customer: Customer }) { return keyOf(m.customer) === keyOf(customer) }
 
   /** POST /direct-debit/bacs-mandate-accept: pain.012 in, DIRECT_DEBIT_MANDATE_CONFIRM out. */
-  async mandateResponse(xml: string, customer: Customer, requestId: string): Promise<void> {
+  mandateResponse(xml: string, customer: Customer, requestId: string): Promise<void> { return this.#serial(() => this.#mandateResponse(xml, customer, requestId)) }
+
+  async #mandateResponse(xml: string, customer: Customer, requestId: string): Promise<void> {
     const r = readPain012(xml)
-    await this.tick()
-    const byMsgId = new Map(this.mandates.entries().map(([, m]) => [m.msgId, m]))
+    await this.#tick()
+    const byMsgId = new Map((await this.mandates()).map((m) => [m.msgId, m]))
     const seen = new Set<string>()
     const items: Confirmation[] = []
     const now = this.d.clock.now()
@@ -314,46 +351,53 @@ export class BacsService {
       if (reject && (!u.reason || !MANDATE_REJECT_CODES.has(u.reason))) { fail('INVALID_ACCEPTANCE_DATA', 'Invalid acceptance data'); continue }
       if (m.status !== 'PENDING') { fail('MANDATE_INVALID_STATUS', `Mandate is expected to be in status PENDING, but is in status ${m.status}`); continue }
       if (reject) { m.status = 'RETURNED'; m.reason = u.reason; m.closedAt = now; m.closedBy = 'DEBTOR' } else { m.status = 'ACCEPTED'; m.acceptedAt = now }
+      await this.#saveMandate(m)
       items.push({ id, confirmed: true })
     }
     await this.d.inbox.add({ customer, type: BACS_TYPES.mandateConfirm, requestId, contentType: 'application/json', body: mandateConfirm(r.msgId, items) })
   }
 
   /** POST /direct-debit/bacs-mandate-cancel: pain.011 in, LHV's pain.012 (DIRECT_DEBIT_MANDATE_CANCEL) out. */
-  async mandateCancel(xml: string, customer: Customer, requestId: string): Promise<void> {
+  mandateCancel(xml: string, customer: Customer, requestId: string): Promise<void> { return this.#serial(() => this.#mandateCancel(xml, customer, requestId)) }
+
+  async #mandateCancel(xml: string, customer: Customer, requestId: string): Promise<void> {
     const r = readPain011(xml)
-    await this.tick()
+    await this.#tick()
     const seen = new Set<string>()
-    const results: CancelResult[] = r.items.map((u) => {
+    const results: CancelResult[] = []
+    for (const u of r.items) results.push(await (async (): Promise<CancelResult> => {
       const no = (code: string, text?: string): CancelResult => ({ mandateId: u.mandateId, accepted: false, code, text })
       if (!u.mandateId) return no('NARR', 'Mandate cancel request contains invalid data')
       if (seen.has(u.mandateId)) return no('AM05')
       seen.add(u.mandateId)
-      const m = this.mandates.get(u.mandateId)
+      const m = await this.mandate(u.mandateId)
       if (!m) return no('MD01')
       if (!this.#mine(customer, m)) return no('NARR', 'User has no rights to debtor account')
       if (!u.reason || !MANDATE_CANCEL_CODES.has(u.reason)) return no('NARR', 'Mandate cancel request contains invalid data')
       if (m.status !== 'ACTIVE') return no('NARR', 'Mandate cancel failed.')
-      this.#close(m, 'DEBTOR', u.reason)
+      await this.#close(m, 'DEBTOR', u.reason)
       return { mandateId: m.id, accepted: true }
-    })
+    })())
     await this.d.inbox.add({ customer, type: BACS_TYPES.mandateCancel, requestId, body: pain012Cancel(notificationMsgId(), r.msgId, results, this.d.clock.now()) })
   }
 
   /** POST /direct-debit/bacs-collection-reject: pain.002 in, DIRECT_DEBIT_COLLECTION_CONFIRMATION out. */
-  async collectionResponse(xml: string, customer: Customer, requestId: string): Promise<void> {
+  collectionResponse(xml: string, customer: Customer, requestId: string): Promise<void> { return this.#serial(() => this.#collectionResponse(xml, customer, requestId)) }
+
+  async #collectionResponse(xml: string, customer: Customer, requestId: string): Promise<void> {
     const r = readPain002(xml)
-    await this.tick()
+    await this.#tick()
     const now = this.d.clock.now()
-    const inFile = this.collections.filter((c) => c.msgId === r.originalMsgId)
+    const inFile = (await this.collections()).filter((c) => c.msgId === r.originalMsgId)
     const seen = new Set<string>()
-    const items: Confirmation[] = r.items.map((u) => {
+    const items: Confirmation[] = []
+    for (const u of r.items) items.push(await (async (): Promise<Confirmation> => {
       const id = u.pmtInfId ?? ''
       const fail = (code: string, description: string): Confirmation => ({ id, confirmed: false, error: { code, description } })
       if (seen.has(id)) return fail('DUPLICATE_PAYMENT_ID', 'Duplicate payment in file')
       seen.add(id)
       if (!inFile.length) return fail('DIRECT_DEBIT_FILE_NOT_FOUND', 'pain.008 message file not found')
-      const c = this.collection(id)
+      const c = await this.collection(id)
       if (!c) return fail('DIRECT_DEBIT_NOT_FOUND', 'Direct Debit not found')
       if (c.msgId !== r.originalMsgId) return fail('DIRECT_DEBIT_FILE_INVALID', 'Payment doesn’t exist in corresponding pain.008 file')
       if (!this.#mine(customer, c.mandate)) return fail('NO_RIGHTS_TO_DEBTOR_ACCOUNT', 'User have no rights to debtor account')
@@ -373,53 +417,94 @@ export class BacsService {
         // G use case 5: debited on day 3 all the same, credited on day 5 of the cycle (decision 743).
         c.refund = { kind: 'RETURN', code: u.reason!, text: 'Direct Debit returned by the debtor', ref: servicerRef(), due: londonInstant(nextBacsDay(c.entryDate, 2), CUTOFF.refunds) }
       } else c.status = 'ACCEPTED'
+      await this.#saveCollection(c)
       return { id, confirmed: true }
-    })
+    })())
     await this.d.inbox.add({ customer, type: BACS_TYPES.collectionConfirm, requestId, contentType: 'application/json', body: collectionConfirm(r.msgId, r.originalMsgId, items) })
   }
 
-  #close(m: Mandate, by: 'DEBTOR' | 'SCHEME', reason: string) {
+  async #close(m: Mandate, by: 'DEBTOR' | 'SCHEME', reason: string) {
     m.status = 'CANCELLED'
     m.closedBy = by
     m.reason = reason
     m.closedAt = this.d.clock.now()
+    await this.#saveMandate(m)
   }
 
   // --- The clock ----------------------------------------------------------------------------
 
   /** Activates mandates, books credits, debits and refunds that are due. Returns how many things happened. */
-  async tick(): Promise<number> {
+  tick(): Promise<number> { return this.#serial(() => this.#tick()) }
+
+  async #tick(): Promise<number> {
     const now = this.d.clock.now().getTime()
     let n = 0
-    for (const [, m] of this.mandates.entries()) {
+    for (const m of await this.mandates()) {
       if (m.status !== 'PENDING' && m.status !== 'ACCEPTED') continue
       const early = londonInstant(m.entryDate, CUTOFF.mandateEarly)
       const late = londonInstant(m.entryDate, CUTOFF.mandate)
       // Accepted before 11:35: active at 11:35; otherwise at 18:35 (no answer counts as accepted, decision 744).
       const at = m.status === 'ACCEPTED' && m.acceptedAt!.getTime() <= early ? early : late
-      if (now >= at) { m.status = 'ACTIVE'; m.activatedAt = new Date(at); n++ }
+      // The same activation from two emulators writes the same state.
+      if (now >= at) { m.status = 'ACTIVE'; m.activatedAt = new Date(at); await this.#saveMandate(m); n++ }
     }
-    for (const c of this.credits) {
-      if (c.status !== 'PENDING' || now < londonInstant(c.entryDate, CUTOFF.credits)) continue
+    const creditDue = (c: IncomingCredit) => c.status === 'PENDING' && now >= londonInstant(c.entryDate, CUTOFF.credits)
+    for (const x of (await this.credits()).filter(creditDue)) {
+      n += await this.#claimed(`credit|${x.ref}`, () => this.#credits.get(x.ref), (o) => this.#decodeCredit(o), async (c) => {
+        if (!creditDue(c)) return 0
+        await this.#book(c)
+        return 1
+      })
+    }
+    for (const x of await this.collections()) {
+      if (x.debit !== 'PENDING' && !(x.refund && !x.refund.bookedAt && x.debit === 'BOOKED')) continue
+      n += await this.#claimed(`collection|${x.id}`, () => this.#collections.get(x.id), (o) => this.#decodeCollection(o), (c) => this.#due(c, now))
+    }
+    return n
+  }
+
+  /**
+   * Runs f on the stored item while holding its claim (keyed `add`, one holder across
+   * emulators on a namespace); 0 when another holds it or the item is gone.
+   */
+  async #claimed<S, T>(claim: string, read: () => Promise<S | undefined>, decode: (o: S) => Promise<T | undefined>, f: (x: T) => Promise<number>): Promise<number> {
+    if (!(await this.#claims.add(claim, true))) return 0
+    try {
+      const o = await read()
+      const x = o && (await decode(o))
+      return x ? await f(x) : 0
+    } finally {
+      await this.#claims.take(claim)
+    }
+  }
+
+  /** An incoming credit on its entry day: booked through the payment engine (or returned). */
+  async #book(c: IncomingCredit) {
+    {
       const r = await this.d.credit({
         iban: c.iban, amount: c.amount, currency: 'GBP', scheme: BACS_SCHEME, ref: c.ref, reference: c.reference,
         debtor: { name: c.debtor.name, account: `${c.debtor.sortCode}${c.debtor.accountNumber}` },
       })
       c.status = r.returned ? 'RETURNED' : 'BOOKED'
-      if (!r.returned) { c.bookedAt = this.d.clock.now(); this.d.onIncoming?.({ ref: c.ref, status: 'Booked', account: c.iban, master: c.master, amount: c.amount, currency: 'GBP', debtor: {} }) }
-      n++
+      if (!r.returned) c.bookedAt = this.d.clock.now()
+      await this.#saveCredit(c)
+      if (!r.returned) this.d.onIncoming?.({ ref: c.ref, status: 'Booked', account: c.iban, master: c.master, amount: c.amount, currency: 'GBP', debtor: {} })
     }
-    for (const c of this.collections) {
-      if (c.debit === 'PENDING') {
-        while (c.debit === 'PENDING' && c.attempts < CUTOFF.debits.length && now >= londonInstant(c.entryDate, CUTOFF.debits[c.attempts])) {
-          c.attempts++
-          n++
-          if (await this.#debit(c)) break
-          if (c.attempts === CUTOFF.debits.length) c.debit = 'UNPAID'
-        }
+  }
+
+  /** A collection's due debit attempts and refund; how many things happened. */
+  async #due(c: BacsCollection, now: number): Promise<number> {
+    let n = 0
+    if (c.debit === 'PENDING') {
+      while (c.debit === 'PENDING' && c.attempts < CUTOFF.debits.length && now >= londonInstant(c.entryDate, CUTOFF.debits[c.attempts])) {
+        c.attempts++
+        n++
+        if (await this.#debit(c)) break
+        if (c.attempts === CUTOFF.debits.length) c.debit = 'UNPAID'
+        await this.#saveCollection(c)
       }
-      if (c.refund && !c.refund.bookedAt && c.debit === 'BOOKED' && now >= c.refund.due) { await this.#refund(c); n++ }
     }
+    if (c.refund && !c.refund.bookedAt && c.debit === 'BOOKED' && now >= c.refund.due) { await this.#refund(c); n++ }
     return n
   }
 
@@ -434,6 +519,7 @@ export class BacsService {
     }
     c.debit = 'BOOKED'
     c.debitedAt = this.d.clock.now()
+    await this.#saveCollection(c)
     await this.#notify(m.customer, this.#booking(c, 'DBIT', c.id))
     return true
   }
@@ -442,6 +528,7 @@ export class BacsService {
     const f = c.refund!
     await this.d.ledger.transfer({ ref: f.ref, from: this.d.rails.settlementAccount(BACS_SCHEME), to: c.mandate.debtor.iban, amount: c.amount, currency: 'GBP' })
     f.bookedAt = this.d.clock.now()
+    await this.#saveCollection(c)
     // A return (UPDD) or a reversal (PRDD) of the direct debit, with the reason as RtrInf.
     const b = this.#booking(c, 'CRDT', f.ref)
     await this.#notify(c.mandate.customer, { ...b, bankTxCode: { family: 'RDDT', subFamily: f.kind === 'RETURN' ? 'UPDD' : 'PRDD' }, returnInfo: { code: f.code, additional: [f.text] } })
@@ -463,7 +550,92 @@ export class BacsService {
     await this.d.onBooking?.(customer, b)
     await this.d.inbox.add({ customer, type: 'CREDIT_DEBIT_NOTIFICATION', body: camt054(b, customer.camt054, this.d.bank) })
   }
+
+  // --- The store (decision 977) ---------------------------------------------------------------
+
+  // A change is written in place (replace: the item keeps its place and its time to live).
+  async #saveMandate(m: Mandate) { await this.#replace(this.#mandates, m.id, encodeMandate(m)) }
+  async #saveCollection(c: BacsCollection) { await this.#replace(this.#collections, c.id, encodeCollection(c)) }
+  async #saveCredit(c: IncomingCredit) { await this.#replace(this.#credits, c.ref, encodeCredit(c)) }
+  async #replace<S>(store: KeyedStore<S>, key: string, value: S) {
+    if (!(await store.replace(key, value))) throw new BacsError(409, `${key} is no longer kept`)
+  }
+
+  async #all<S, T>(store: KeyedStore<S>, decode: (o: S, customers: Customers) => Promise<T | undefined>): Promise<T[]> {
+    const customers: Customers = new Map()
+    const out: T[] = []
+    for (const [, o] of await store.entries()) {
+      const x = await decode(o, customers)
+      if (x) out.push(x)
+    }
+    return out
+  }
+
+  #customer(k: CustomerKey, customers: Customers) {
+    let p = customers.get(keyOf(k))
+    if (!p) customers.set(keyOf(k), (p = this.d.directory.get(k)))
+    return p
+  }
+
+  async #decodeMandate(o: StoredMandate, customers: Customers = new Map()): Promise<Mandate | undefined> {
+    const customer = await this.#customer(o.customer, customers)
+    if (!customer) return undefined
+    const { createdAt, acceptedAt, activatedAt, closedAt, ...rest } = o
+    return { ...rest, customer, createdAt: new Date(createdAt), ...dates({ acceptedAt, activatedAt, closedAt }) }
+  }
+
+  async #decodeCollection(o: StoredCollection, customers: Customers = new Map()): Promise<BacsCollection | undefined> {
+    const mandate = await this.#decodeMandate(o.mandate, customers)
+    if (!mandate) return undefined
+    const { refund, reversal, createdAt, debitedAt, ...rest } = o
+    return {
+      ...rest, mandate, amount: BigInt(o.amount), createdAt: new Date(createdAt), ...dates({ debitedAt }),
+      ...(refund ? { refund: (({ bookedAt, ...f }) => ({ ...f, ...dates({ bookedAt }) }))(refund) } : {}),
+      ...(reversal ? { reversal: { ...reversal, at: new Date(reversal.at) } } : {}),
+    }
+  }
+
+  async #decodeCredit(o: StoredCredit, customers: Customers = new Map()): Promise<IncomingCredit | undefined> {
+    const customer = await this.#customer(o.customer, customers)
+    if (!customer) return undefined
+    const { bookedAt, ...rest } = o
+    return { ...rest, customer, amount: BigInt(o.amount), ...dates({ bookedAt }) }
+  }
 }
+
+// What the keyed store keeps (decision 977): JSON, amounts as decimal strings, times in ms,
+// customers by key. A collection keeps a copy of its mandate (only the mandate's fixed fields
+// are read through it, as through the object it held before), so it is still debited when
+// the mandate is no longer remembered.
+
+type Customers = Map<string, Promise<Customer | undefined>>
+
+interface StoredMandate extends Omit<Mandate, 'customer' | 'createdAt' | 'acceptedAt' | 'activatedAt' | 'closedAt'> {
+  customer: CustomerKey; createdAt: number; acceptedAt?: number; activatedAt?: number; closedAt?: number
+}
+interface StoredCollection extends Omit<BacsCollection, 'mandate' | 'amount' | 'createdAt' | 'debitedAt' | 'refund' | 'reversal'> {
+  mandate: StoredMandate; amount: string; createdAt: number; debitedAt?: number
+  refund?: Omit<NonNullable<BacsCollection['refund']>, 'bookedAt'> & { bookedAt?: number }
+  reversal?: Omit<NonNullable<BacsCollection['reversal']>, 'at'> & { at: number }
+}
+interface StoredCredit extends Omit<IncomingCredit, 'customer' | 'amount' | 'bookedAt'> { customer: CustomerKey; amount: string; bookedAt?: number }
+
+const ms = (d?: Date) => d?.getTime()
+/** Undefined fields dropped, so memory hands back what Postgres would. */
+const json = <T>(o: unknown): T => JSON.parse(JSON.stringify(o))
+const customerKey = (c: Customer): CustomerKey => ({ code: c.code, country: c.country })
+/** The named ms fields as Dates; an absent one stays absent. */
+const dates = <K extends string>(o: Partial<Record<K, number>>) =>
+  Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined).map(([k, v]) => [k, new Date(v as number)])) as Partial<Record<K, Date>>
+
+const encodeMandate = (m: Mandate): StoredMandate => json({
+  ...m, customer: customerKey(m.customer), createdAt: ms(m.createdAt), acceptedAt: ms(m.acceptedAt), activatedAt: ms(m.activatedAt), closedAt: ms(m.closedAt),
+})
+const encodeCollection = (c: BacsCollection): StoredCollection => json({
+  ...c, mandate: encodeMandate(c.mandate), amount: String(c.amount), createdAt: ms(c.createdAt), debitedAt: ms(c.debitedAt),
+  refund: c.refund && { ...c.refund, bookedAt: ms(c.refund.bookedAt) }, reversal: c.reversal && { ...c.reversal, at: ms(c.reversal.at) },
+})
+const encodeCredit = (c: IncomingCredit): StoredCredit => json({ ...c, customer: customerKey(c.customer), amount: String(c.amount), bookedAt: ms(c.bookedAt) })
 
 export const isSortCode = (s: string) => digits(s, 6)
 export const isAccountNumber = (s: string) => digits(s, 8)
