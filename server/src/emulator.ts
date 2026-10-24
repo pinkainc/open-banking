@@ -85,6 +85,8 @@ export const FUNDING = '@sim:funding'
 export class Emulator {
   readonly directory: DirectoryStore
   readonly clock: Clock
+  /** The keyed store factory every service's remembered state comes from (decision 961). */
+  readonly keyed: KeyedFactory
   readonly ledger: Ledger
   readonly rails: Rails
   readonly inbox: InboxStore
@@ -117,15 +119,15 @@ export class Emulator {
     this.ledger = typeof opts.ledger === 'function' ? opts.ledger(this.clock) : opts.ledger ?? new MemoryLedger()
     this.rails = opts.rails ?? new SimulatorRails()
     this.journal = opts.journal?.() ?? new MemoryJournal()
-    const keyed = opts.keyed?.(this.clock) ?? memoryKeyed(this.clock)
+    const keyed = this.keyed = opts.keyed?.(this.clock) ?? memoryKeyed(this.clock)
     const tombstones = { ...DEFAULT_BOUNDS.tombstones, ...opts.memory?.tombstones }
     const msgIds = { ...DEFAULT_BOUNDS.msgIds, ...opts.memory?.msgIds }
     const processed = { ...DEFAULT_BOUNDS.processed, ...opts.memory?.processed }
     this.inbox = opts.inbox ? opts.inbox(this.clock, { tombstones, processed }) : new MemoryInbox(this.clock, undefined, tombstones, processed)
     this.requests = new RequestLog(this.clock, { ...DEFAULT_BOUNDS.requests, ...opts.memory?.requests })
-    this.webhooksEe = new EeWebhooks(this.inbox, this.clock, { deliver: opts.webhookDeliver })
+    this.webhooksEe = new EeWebhooks(this.inbox, this.clock, { deliver: opts.webhookDeliver, keyed })
     this.webhooksUk = new UkWebhooks(this.inbox, this.directory, this.clock, {
-      deliver: opts.ukWebhookDeliver, events: { ...DEFAULT_EVENT_BOUNDS, ...opts.memory?.webhookEvents },
+      deliver: opts.ukWebhookDeliver, events: { ...DEFAULT_EVENT_BOUNDS, ...opts.memory?.webhookEvents }, keyed,
       // The entity that processed the request behind the message; notifications are LHV UK's (decision 724).
       bankOf: (m) => (m.requestId && this.requests.bankCodeOf(m.requestId)) || 'LHVUK',
     })

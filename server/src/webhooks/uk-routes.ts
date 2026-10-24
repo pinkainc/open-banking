@@ -95,10 +95,10 @@ function dateParam(q: Record<string, unknown>, k: string): string | undefined {
   return s
 }
 
-export function historyItem(emulator: Emulator, e: UkEvent) {
+export async function historyItem(emulator: Emulator, e: UkEvent) {
   const last = e.attempts[e.attempts.length - 1]
   return {
-    message: emulator.webhooksUk.summary(e),
+    message: await emulator.webhooksUk.summary(e),
     status: e.status,
     retriesAttempted: Math.max(0, e.attempts.length - 1),
     ...(last?.status !== undefined ? { httpStatus: last.status } : {}),
@@ -117,38 +117,38 @@ export function registerUkWebhooks(app: FastifyInstance, emulator: Emulator, cal
     if (input.messageType === undefined) throw bad('messageType is mandatory')
     if (input.requestUrl === undefined) throw bad('requestUrl is mandatory')
     if (input.active === undefined) throw bad('active is mandatory')
-    if (hooks.forType(c.customer, input.messageType)) throw bad(`A webhook configuration for messageType ${input.messageType} already exists`)
-    const cfg = hooks.create(c.customer, { ...input, messageType: input.messageType, requestUrl: input.requestUrl, active: input.active })
+    const cfg = await hooks.create(c.customer, { ...input, messageType: input.messageType, requestUrl: input.requestUrl, active: input.active })
+    if (!cfg) throw bad(`A webhook configuration for messageType ${input.messageType} already exists`)
     return json(reply, configView(cfg, true))
   })
 
-  app.get('/notifications/subscription', async (req, reply) => json(reply, hooks.list((await caller(req)).customer).map((x) => configView(x))))
+  app.get('/notifications/subscription', async (req, reply) => json(reply, (await hooks.list((await caller(req)).customer)).map((x) => configView(x))))
 
   app.get('/notifications/subscription/:ref', async (req, reply) => {
-    const cfg = hooks.get((await caller(req)).customer, ref(req))
+    const cfg = await hooks.get((await caller(req)).customer, ref(req))
     if (!cfg) throw notFound()
     return json(reply, configView(cfg))
   })
 
   app.put('/notifications/subscription/:ref', async (req, reply) => {
     const c = await caller(req)
-    const cfg = hooks.get(c.customer, ref(req))
+    const cfg = await hooks.get(c.customer, ref(req))
     if (!cfg) throw notFound()
     const b = objectBody(req.body)
     if (typeof b.subscriptionReference === 'string' && b.subscriptionReference.toLowerCase() !== cfg.subscriptionReference) {
       throw bad('subscriptionReference in the body does not match the path')
     }
     const input = configInput(b)
-    if (input.messageType !== undefined && input.messageType !== cfg.messageType && hooks.forType(c.customer, input.messageType)) {
+    if (input.messageType !== undefined && input.messageType !== cfg.messageType && await hooks.forType(c.customer, input.messageType)) {
       throw bad(`A webhook configuration for messageType ${input.messageType} already exists`)
     }
-    return json(reply, configView(hooks.update(cfg, input), true))
+    return json(reply, configView(await hooks.update(cfg, input), true))
   })
 
   app.delete('/notifications/subscription/:ref', async (req, reply) => {
-    const cfg = hooks.get((await caller(req)).customer, ref(req))
+    const cfg = await hooks.get((await caller(req)).customer, ref(req))
     if (!cfg) throw notFound()
-    hooks.remove(cfg)
+    await hooks.remove(cfg)
     return reply.code(200).send()
   })
 
@@ -166,12 +166,14 @@ export function registerUkWebhooks(app: FastifyInstance, emulator: Emulator, cal
     const eventId = one(q, 'eventId')?.trim().toLowerCase()
     const type = one(q, 'responseType')?.trim()
     await hooks.idle()
-    const items = hooks.events(customersOf(c, sp === 'true' || sp === '1')).filter((e) => {
+    const items = (await hooks.events(customersOf(c, sp === 'true' || sp === '1'))).filter((e) => {
       const day = dateLondon(e.createdAt)
       return (!eventId || e.eventId === eventId) && (!status || e.status === status) && (!type || e.message.type === type)
         && (!start || day >= start) && (!end || day <= end)
     })
-    return json(reply, items.slice(offset, offset + limit).map((e) => historyItem(emulator, e)))
+    const page = []
+    for (const e of items.slice(offset, offset + limit)) page.push(await historyItem(emulator, e))
+    return json(reply, page)
   })
 
   app.post('/notifications/replay', async (req, reply) => {
@@ -186,7 +188,7 @@ export function registerUkWebhooks(app: FastifyInstance, emulator: Emulator, cal
     const dispatched: { eventId: string }[] = []
     const failed: { eventId: string; error: string }[] = []
     for (const id of [...new Set(ids as string[])]) {
-      const r = hooks.replay(customers, c.customer.code, id)
+      const r = await hooks.replay(customers, c.customer.code, id)
       if (typeof r === 'string') failed.push({ eventId: id, error: r })
       else dispatched.push({ eventId: id })
     }
@@ -194,11 +196,11 @@ export function registerUkWebhooks(app: FastifyInstance, emulator: Emulator, cal
   })
 }
 
-function eventView(emulator: Emulator, e: UkEvent) {
+async function eventView(emulator: Emulator, e: UkEvent) {
   return {
     eventId: e.eventId, subscriptionReference: e.subscriptionReference, messageResponseId: e.message.id, status: e.status,
     customer: e.customer, createdAt: e.createdAt.toISOString(),
-    payload: JSON.parse(emulator.webhooksUk.body(e)),
+    payload: JSON.parse(await emulator.webhooksUk.body(e)),
     attempts: e.attempts.map((a) => ({
       at: a.at.toISOString(), url: a.url, hmac: a.hmac, compressed: a.compressed, latencyMs: a.latencyMs,
       ...(a.status !== undefined ? { status: a.status } : {}), ...(a.contentLength !== undefined ? { contentLength: a.contentLength } : {}),
@@ -215,11 +217,13 @@ export function ukWebhookSimRoutes(emulator: Emulator) {
   return async (app: FastifyInstance) => {
     // Secrets included: the emulator's operator may verify signatures.
     app.get('/subscriptions', async () => ({
-      subscriptions: hooks.all().map((c) => ({ ...configView(c, true), owner: c.owner, createdAt: c.createdAt.toISOString() })),
+      subscriptions: (await hooks.all()).map((c) => ({ ...configView(c, true), owner: c.owner, createdAt: c.createdAt.toISOString() })),
     }))
     app.get('/events', async () => {
       await hooks.idle()
-      return { events: hooks.events().map((e) => eventView(emulator, e)) }
+      const events = []
+      for (const e of await hooks.events()) events.push(await eventView(emulator, e))
+      return { events }
     })
     // Runs the attempts due on the emulator clock now and waits for them (main.ts: every 15 s).
     app.post('/tick', async () => {

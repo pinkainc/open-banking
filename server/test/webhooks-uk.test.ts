@@ -388,7 +388,7 @@ describe('retries', () => {
     const start = ctx.clock.now().getTime()
     const times: number[] = [0]
     for (let i = 0; i < 40 && h[0].status === 'RETRY_PENDING'; i++) {
-      const due = hooks().events()[0].nextAt!
+      const due = (await hooks().events())[0].nextAt!
       ctx.clock.advance(due - ctx.clock.now().getTime() - 1)
       assert.equal(await hooks().tick(), 0) // not a millisecond early
       ctx.clock.advance(1)

@@ -7,6 +7,7 @@ import type { Caller } from './auth.js'
 import { BoundedMap, DEFAULT_BOUNDS, type Bounds } from './bounded.js'
 import type { Clock } from './clock.js'
 import { keyOf, type CustomerKey } from './directory.js'
+import { closeRequest } from './ids.js'
 
 export interface SubmittedRequest {
   id: string
@@ -36,6 +37,7 @@ export class RequestLog {
       createdAt: this.clock.now(), body: r.body, contentType: r.contentType, seq: ++this.#seq,
     }
     this.#m.set(s.id, s)
+    closeRequest(s.id)
     return s
   }
 

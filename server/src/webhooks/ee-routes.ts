@@ -34,11 +34,11 @@ export function registerEeWebhooks(app: FastifyInstance, emulator: Emulator, cal
   app.post('/notifications/subscribe', async (req) => {
     const c = await caller(req)
     const b = subscriptionBody(req.body)
-    return { subscriptionReference: hooks.subscribe(c.customer, b.url, b.eventType).subscriptionReference }
+    return { subscriptionReference: (await hooks.subscribe(c.customer, b.url, b.eventType)).subscriptionReference }
   })
 
   app.get('/notifications/subscriptions', async (req, reply) => {
-    const subs = hooks.list((await caller(req)).customer)
+    const subs = await hooks.list((await caller(req)).customer)
     if (subs.length === 0) return reply.code(204).send()
     return { subscriptions: subs.map(view) }
   })
@@ -46,13 +46,13 @@ export function registerEeWebhooks(app: FastifyInstance, emulator: Emulator, cal
   app.put('/notifications/subscriptions/:ref', async (req, reply) => {
     const c = await caller(req)
     const b = subscriptionBody(req.body)
-    if (!hooks.update(c.customer, ref(req), b.url)) throw notFound()
+    if (!(await hooks.update(c.customer, ref(req), b.url))) throw notFound()
     return reply.code(204).send()
   })
 
   app.delete('/notifications/subscriptions/:ref', async (req, reply) => {
     const c = await caller(req)
-    if (!hooks.remove(c.customer, ref(req))) throw notFound()
+    if (!(await hooks.remove(c.customer, ref(req)))) throw notFound()
     return reply.code(200).send()
   })
 }
@@ -70,11 +70,11 @@ export function eeWebhookSimRoutes(emulator: Emulator) {
   const hooks = emulator.webhooksEe
   return async (app: FastifyInstance) => {
     app.get('/subscriptions', async () => ({
-      subscriptions: hooks.all().map((s) => ({ ...s, createdAt: s.createdAt.toISOString() })),
+      subscriptions: (await hooks.all()).map((s) => ({ ...s, createdAt: s.createdAt.toISOString() })),
     }))
     app.get('/deliveries', async () => {
       await hooks.idle()
-      return { deliveries: hooks.deliveries.map(deliveryView) }
+      return { deliveries: (await hooks.deliveries()).map(deliveryView) }
     })
     // Runs the attempts due on the emulator clock now and waits for them (main.ts: every 15 s).
     app.post('/tick', async () => {
