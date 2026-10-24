@@ -218,10 +218,12 @@ describe('two outcomes for one payment (decision 1003)', () => {
     const l = ctx.emulator.ledger as any
     const commit = l.commit.bind(l)
     let open!: () => void
+    let reached!: () => void
     const gate = new Promise<void>((r) => { open = r })
-    l.commit = async (...a: unknown[]) => { await gate; return commit(...a) }
+    const atCommit = new Promise<void>((r) => { reached = r })
+    l.commit = async (...a: unknown[]) => { reached(); await gate; return commit(...a) }
     const settling = ctx.emulator.engine.settle(ref, { status: 'settled' })
-    await new Promise((r) => setTimeout(r, 20))
+    await atCommit
     assert.equal(await ctx.emulator.engine.settle(ref, { status: 'rejected', reason: 'Scheme says no' }), false, 'another outcome than the stored one')
     open()
     assert.equal(await settling, true)
