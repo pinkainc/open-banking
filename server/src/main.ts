@@ -9,6 +9,8 @@ import { PgDb } from './pg/db.js'
 import { PgInbox } from './pg/inbox.js'
 import { PgLedger } from './pg/ledger.js'
 import { OpenLedgerLedger } from './ledgers/open-ledger.js'
+import { HttpRails, railsCallbackApp } from './rails-http.js'
+import type { Scheme } from './rails.js'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const env = process.env
@@ -47,7 +49,23 @@ if (ledgerKind === 'open-ledger' && !env.OPEN_LEDGER_URL) throw new Error('LEDGE
 if (ledgerKind === 'open-ledger' && !env.OPEN_LEDGER_KEY) console.error('warning: OPEN_LEDGER_KEY is not set; a fresh key owns a ledger a restart cannot reach')
 if (env.OPEN_LEDGER_TIMEOUT_MS && !/^[1-9]\d*$/.test(env.OPEN_LEDGER_TIMEOUT_MS)) throw new Error(`OPEN_LEDGER_TIMEOUT_MS must be a positive integer, not ${env.OPEN_LEDGER_TIMEOUT_MS}`)
 const timeoutMs = env.OPEN_LEDGER_TIMEOUT_MS ? Number(env.OPEN_LEDGER_TIMEOUT_MS) : undefined
+// RAILS=http: payments go to an external scheme bridge (docs/rails-bridge-protocol.md,
+// decisions 935-938): RAILS_URL (base, e.g. http://bridge:9000/v1), RAILS_URL_<SCHEME> per
+// scheme (SEPA, INST, SWIFT, TARGET2, FAST), RAILS_SECRET the shared HMAC secret,
+// RAILS_TIMEOUT_MS per request (default 10000); the bridge calls back on plain HTTP at
+// RAILS_CALLBACK_HOST:RAILS_CALLBACK_PORT/rails/events (default 127.0.0.1:8444).
+// Otherwise (RAILS unset or `simulator`) the simulator, steered through /_sim/rails.
+const railsKind = env.RAILS ?? 'simulator'
+if (railsKind !== 'http' && railsKind !== 'simulator') throw new Error(`RAILS must be http or simulator, not ${railsKind}`)
+if (railsKind === 'http' && !env.RAILS_URL) throw new Error('RAILS=http needs RAILS_URL')
+if (railsKind === 'http' && !env.RAILS_SECRET) throw new Error('RAILS=http needs RAILS_SECRET')
+if (env.RAILS_TIMEOUT_MS && !/^[1-9]\d*$/.test(env.RAILS_TIMEOUT_MS)) throw new Error(`RAILS_TIMEOUT_MS must be a positive integer, not ${env.RAILS_TIMEOUT_MS}`)
+const rails = railsKind === 'http' ? new HttpRails({
+  url: env.RAILS_URL!, secret: env.RAILS_SECRET!, timeoutMs: env.RAILS_TIMEOUT_MS ? Number(env.RAILS_TIMEOUT_MS) : undefined,
+  urls: Object.fromEntries((['SEPA', 'INST', 'SWIFT', 'TARGET2', 'FAST'] as Scheme[]).filter((s) => env[`RAILS_URL_${s}`]).map((s) => [s, env[`RAILS_URL_${s}`]!])),
+}) : undefined
 const emulator = await Emulator.fromSeed(seed, {
+  rails,
   inbox: db && ((clock, bounds) => new PgInbox(db, clock, { ...bounds, namespace })),
   ledger: ledgerKind === 'open-ledger' ? new OpenLedgerLedger({ url: env.OPEN_LEDGER_URL!, namespace, secretKey: env.OPEN_LEDGER_KEY, timeoutMs })
     : ledgerKind === 'postgres' ? (clock) => new PgLedger(db!, { namespace, clock }) : undefined,
@@ -88,3 +106,11 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) process.on(signal, () => {
 const port = Number(env.PORT ?? 8443)
 await app.listen({ port, host: env.HOST ?? '127.0.0.1' })
 console.error(`listening on https://${env.HOST ?? '127.0.0.1'}:${port} (mutual TLS)`)
+if (rails) {
+  // The bridge's callbacks (HMAC-signed), started after the engine listens to the rails.
+  const callbacks = railsCallbackApp(rails)
+  const cbHost = env.RAILS_CALLBACK_HOST ?? '127.0.0.1'
+  const cbPort = Number(env.RAILS_CALLBACK_PORT ?? 8444)
+  await callbacks.listen({ port: cbPort, host: cbHost })
+  console.error(`rails bridge ${env.RAILS_URL}; callbacks on http://${cbHost}:${cbPort}/rails/events`)
+}
