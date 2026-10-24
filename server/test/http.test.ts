@@ -7,6 +7,9 @@ import { DAY_MS } from '../src/clock.js'
 import { parseXml } from '../src/xml.js'
 import { C2, call, setup, type Ctx } from './helpers.js'
 
+// POST /heartbeat (BDOC) is an LHV EE service: the UK host reaches it with X-Bank-Code: LHVEE (decision 701).
+const EE = { 'x-bank-code': 'LHVEE' }
+
 describe('http', () => {
   let ctx: Ctx, ee: Ctx
   // X-Idempotency-Key is a UK-host feature (decision 500): these run as the UK flavour.
@@ -36,22 +39,22 @@ describe('http', () => {
 
   test('X-Idempotency-Key: a repeat within 24 h is 409, the first one stays done', async () => {
     const key = randomUUID()
-    const first = await call(ctx, { url: '/heartbeat', method: 'POST', body: 'x', headers: { 'X-Idempotency-Key': key } })
+    const first = await call(ctx, { url: '/heartbeat', method: 'POST', body: 'x', headers: { ...EE, 'X-Idempotency-Key': key } })
     assert.equal(first.statusCode, 202)
-    const again = await call(ctx, { url: '/heartbeat', method: 'POST', body: 'x', headers: { 'X-Idempotency-Key': key } })
+    const again = await call(ctx, { url: '/heartbeat', method: 'POST', body: 'x', headers: { ...EE, 'X-Idempotency-Key': key } })
     assert.equal(again.statusCode, 409)
     assert.equal(parseXml(again.body).Errors.Error.ErrorCode, 'CONFLICT')
     // Keys are per client: another customer may use the same value.
-    const other = await call(ctx, { url: '/heartbeat', method: 'POST', as: C2.code, body: 'x', headers: { 'X-Idempotency-Key': key } })
+    const other = await call(ctx, { url: '/heartbeat', method: 'POST', as: C2.code, body: 'x', headers: { ...EE, 'X-Idempotency-Key': key } })
     assert.equal(other.statusCode, 202)
     assert.deepEqual(JSON.parse((await call(ctx, { url: '/messages/count' })).body), { count: 1 })
     ctx.clock.advance(DAY_MS + 1)
-    const later = await call(ctx, { url: '/heartbeat', method: 'POST', body: 'x', headers: { 'X-Idempotency-Key': key } })
+    const later = await call(ctx, { url: '/heartbeat', method: 'POST', body: 'x', headers: { ...EE, 'X-Idempotency-Key': key } })
     assert.equal(later.statusCode, 202)
   })
 
   test('X-Idempotency-Key must be a UUID', async () => {
-    const r = await call(ctx, { url: '/heartbeat', method: 'POST', body: 'x', headers: { 'X-Idempotency-Key': 'abc' } })
+    const r = await call(ctx, { url: '/heartbeat', method: 'POST', body: 'x', headers: { ...EE, 'X-Idempotency-Key': 'abc' } })
     assert.equal(r.statusCode, 400)
   })
 
@@ -59,7 +62,7 @@ describe('http', () => {
     const key = randomUUID()
     const bad = await call(ctx, { url: '/payment', method: 'POST', body: 'not xml', headers: { 'X-Idempotency-Key': key } })
     assert.equal(bad.statusCode, 400)
-    const retry = await call(ctx, { url: '/heartbeat', method: 'POST', body: 'x', headers: { 'X-Idempotency-Key': key } })
+    const retry = await call(ctx, { url: '/heartbeat', method: 'POST', body: 'x', headers: { ...EE, 'X-Idempotency-Key': key } })
     assert.equal(retry.statusCode, 202)
   })
 })

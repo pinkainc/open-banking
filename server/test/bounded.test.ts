@@ -128,7 +128,7 @@ describe('remembered MsgIds', () => {
 describe('remembered idempotency keys (UK host)', () => {
   test('beyond the cap the oldest key is forgotten', async () => {
     const ctx = await setup({}, undefined, { flavour: 'UK', idempotencyKeys: { max: 2 } })
-    const post = async (key: string) => (await call(ctx, { url: '/heartbeat', method: 'POST', body: 'x', headers: { 'X-Idempotency-Key': key } })).statusCode
+    const post = async (key: string) => (await call(ctx, { url: '/heartbeat', method: 'POST', body: 'x', headers: { 'x-bank-code': 'LHVEE', 'X-Idempotency-Key': key } })).statusCode
     const [a, b, c] = [randomUUID(), randomUUID(), randomUUID()]
     assert.deepEqual([await post(a), await post(b), await post(a)], [202, 202, 409])
     assert.equal(await post(c), 202)

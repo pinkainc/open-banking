@@ -60,3 +60,9 @@ export function heartbeatTallinn(d: Date): string {
   const l = local(d)
   return `${l.date}T${l.time}.${l.ms}0000${l.offset}`
 }
+
+/** The heartbeat timestamp in UK time (LHV UK answering, `ssot/ee-vs-uk.md`: offset +00/+01). */
+export function heartbeatLondon(d: Date): string {
+  const l = local(d, london)
+  return `${l.date}T${l.time}.${l.ms}0000${l.offset}`
+}

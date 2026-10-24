@@ -8,7 +8,8 @@ import { keyOf } from './directory.js'
 import type { Emulator } from './emulator.js'
 import { requestId } from './ids.js'
 import type { Message, Scope } from './inbox.js'
-import { heartbeatTallinn, isoLondon, listTimeTallinn } from './time.js'
+import { heartbeatLondon, heartbeatTallinn, isoLondon, listTimeTallinn } from './time.js'
+import { bankFor, hostRouting, type Flavour } from './routing.js'
 import { XmlSyntaxError, el, toXml } from './xml.js'
 import { simRoutes } from './sim.js'
 import { registerViban, vibanSimRoutes } from './viban/routes.js'
@@ -47,7 +48,7 @@ export interface AppOptions {
   idempotencyKeys?: Partial<Bounds>
 }
 
-export type Flavour = 'EE' | 'UK'
+export type { Flavour } from './routing.js'
 
 /** Request bodies above this are refused with 413 (the reference's nginx limit). */
 export const BODY_LIMIT = 5 * 1024 * 1024
@@ -74,7 +75,9 @@ export function buildApp(opts: AppOptions): FastifyInstance {
 
   const flavour: Flavour = opts.flavour ?? 'EE'
   const bankCode = opts.bankCode ?? (flavour === 'UK' ? 'LHVUK' : 'LHVEE')
-  app.addHook('onRequest', async (_req, reply) => { reply.header('X-Bank-Code', bankCode) })
+  // X-Bank-Code on every response, the UK host's X-Bank-Code override and the gates of
+  // one-sided services (routing.ts, decisions 700–703).
+  hostRouting(app, flavour, bankCode)
 
   app.setErrorHandler((err: any, _req, reply) => {
     if (err instanceof ConnectError) return sendError(reply, err)
@@ -149,13 +152,16 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   })
 
   // --- Communication test -------------------------------------------------------
+  // The time of the entity that answers: UK time from LHV UK, else Tallinn (decision 704).
+  const heartbeatTime = (req: FastifyRequest) =>
+    (bankFor(req, flavour, bankCode) === 'LHVUK' ? heartbeatLondon : heartbeatTallinn)(emulator.clock.now())
   app.get('/heartbeat', async (req, reply) => {
     granted(req, SERVICE.heartbeat)
-    return reply.type('application/xml').send(toXml(el('HeartBeatResponse', el('TimeStamp', heartbeatTallinn(emulator.clock.now())))))
+    return reply.type('application/xml').send(toXml(el('HeartBeatResponse', el('TimeStamp', heartbeatTime(req)))))
   })
 
-  const heartbeatMessage = (c: Caller, userRequest: string) => toXml(el('HeartBeatResponse',
-    el('TimeStamp', heartbeatTallinn(emulator.clock.now())),
+  const heartbeatMessage = (req: FastifyRequest, c: Caller, userRequest: string) => toXml(el('HeartBeatResponse',
+    el('TimeStamp', heartbeatTime(req)),
     el('AuthorizedUser', el('Name', c.user.name), el('Code', c.user.code)),
     el('Certificates', el('Certificate',
       el('SerialNumber', c.cert.certSerial ?? ''),
@@ -167,7 +173,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   app.get('/heartbeat/mq', async (req, reply) => {
     const c = granted(req, SERVICE.heartbeat)
     const id = requestId()
-    emulator.inbox.add({ customer: c.customer, type: 'HEARTBEAT', requestId: id, body: heartbeatMessage(c, '') })
+    emulator.inbox.add({ customer: c.customer, type: 'HEARTBEAT', requestId: id, body: heartbeatMessage(req, c, '') })
     return accepted(req, reply, c, id, 'HEARTBEAT')
   })
 
@@ -175,7 +181,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     const c = granted(req, SERVICE.heartbeat)
     const id = requestId()
     const body = typeof req.body === 'string' ? req.body : req.body ? JSON.stringify(req.body) : ''
-    emulator.inbox.add({ customer: c.customer, type: 'HEARTBEAT', requestId: id, body: heartbeatMessage(c, body) })
+    emulator.inbox.add({ customer: c.customer, type: 'HEARTBEAT', requestId: id, body: heartbeatMessage(req, c, body) })
     return accepted(req, reply, c, id, 'HEARTBEAT')
   })
 

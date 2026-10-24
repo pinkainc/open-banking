@@ -382,15 +382,17 @@ describe('GET /v2/requests and /v2/requests/{id} (decisions 630–632)', () => {
       ['/account-balance', camt060({ kind: 'balance' }), 'ACCOUNT_BALANCE'],
       ['/account-statement', camt060(), 'ACCOUNT_STATEMENT'],
       ['/viban/info', '<VibanInfoRequest><MasterAccount>x</MasterAccount><VirtualIBAN>y</VirtualIBAN></VibanInfoRequest>', 'VIBAN_INFO'],
-      ['/fx/trade-offer', {}, 'FX_TRADE_OFFER'],
+      ['/fx/trade-offer', {}, 'FX_TRADE_OFFER', 'LHVEE'],
       ['/payment/vop-request', {}, 'VERIFICATION_OF_PAYEE'],
       ['/payment/cop-request', {}, 'CONFIRMATION_OF_PAYEE'],
       ['/verification-of-payee', '<VerificationOfPayeeRequest/>', 'VERIFICATION_OF_PAYEE', 'LHVEE'],
     ]
     const ids: string[] = []
-    for (const [url, body] of posts) {
+    for (const [url, body, , bank] of posts) {
       ctx.clock.advance(1000)
-      const r = await call(ctx, { method: url === '/heartbeat/mq' ? 'GET' : 'POST', url, body })
+      // FX is LHV EE's: the UK host reaches it with X-Bank-Code: LHVEE (decision 701).
+      const headers: Record<string, string> = bank === 'LHVEE' ? { 'x-bank-code': 'LHVEE' } : {}
+      const r = await call(ctx, { method: url === '/heartbeat/mq' ? 'GET' : 'POST', url, body, headers })
       assert.equal(r.statusCode, 202, `${url}: ${r.body}`)
       ids.push(r.headers['message-request-id'] as string)
     }
