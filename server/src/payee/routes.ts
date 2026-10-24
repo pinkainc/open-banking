@@ -1,4 +1,4 @@
-// HTTP surface of payee verification (decisions 600–609): 202 with Message-Request-Id, the
+// HTTP surface of payee verification (decisions 600–610): 202 with Message-Request-Id, the
 // answer in the inbox. The EE XML service is on both hosts (the UK host "always" hands it
 // to LHV EE); the UK JSON services only on the UK host, a 404 on the EE one. Also the EE
 // TEST-only GET /test/accounts/ibans (decision 608) and the /_sim/payee control plane.

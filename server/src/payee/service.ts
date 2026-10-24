@@ -1,4 +1,4 @@
-// Payee verification, requester side (docs/decisions.md 600–609): the EE Verification of
+// Payee verification, requester side (docs/decisions.md 600–610): the EE Verification of
 // Payee (XML, POST /verification-of-payee), the UK one (JSON, POST /payment/vop-request)
 // and UK Confirmation of Payee (JSON, POST /payment/cop-request). Every answer, errors
 // included, is an inbox message of the operation's type. The holder is who the bank knows:
@@ -120,6 +120,7 @@ export class PayeeService {
     const iban = account.iban ? normalizeIban(account.iban) : undefined
     const bban = account.bban ?? (iban ? gbBban(iban) : undefined)
     const sim = (iban ? this.accounts.get(iban) : undefined) ?? (bban ? this.accounts.get(bban) : undefined)
+      ?? (bban && !iban ? this.accounts.entries().find(([k]) => gbBban(k) === bban)?.[1] : undefined)
     let own = iban ? this.#ownHolder(iban) : undefined
     if (!own && bban && !iban) {
       const match = (i: string) => gbBban(i) === bban
