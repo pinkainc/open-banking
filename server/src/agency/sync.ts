@@ -8,7 +8,7 @@ import type { Clock } from '../clock.js'
 import { keyOf, type Customer, type Directory } from '../directory.js'
 import { errorsXml } from '../errors.js'
 import { ibanChecksumOk, isSepaCountry, normalizeIban } from '../iban.js'
-import type { Inbox } from '../inbox.js'
+import type { InboxStore } from '../inbox.js'
 import { JsonBodyError, asObject, parseJsonBody } from '../jsonbody.js'
 import { el, parseXml, toXml } from '../xml.js'
 import {
@@ -58,7 +58,7 @@ const IBAN_SHAPE = /^[A-Z]{2}[0-9]{2}[a-zA-Z0-9]{1,30}$/
 /** A region: GB or a SEPA scheme country (G "'GB' or ISO country code (SEPA Scheme Country)"). */
 const regionOk = (r: string) => r === 'GB' || isSepaCountry(r)
 
-export interface SyncDeps { directory: Directory; inbox: Inbox; clock: Clock; store: AgencyStore }
+export interface SyncDeps { directory: Directory; inbox: InboxStore; clock: Clock; store: AgencyStore }
 
 /** One account to write: where, under which key, what was given. */
 interface Entry {
@@ -100,7 +100,7 @@ export class AgencySync {
    * POST /agent/account/synchronize. `ukHost`: the request is processed by the UK host
    * (BankCodes allowed, decision 804). Returns nothing; the answer is in the inbox.
    */
-  syncXml(body: unknown, agent: Customer, requestId: string, ukHost: boolean) {
+  async syncXml(body: unknown, agent: Customer, requestId: string, ukHost: boolean) {
     const send = (xml: string) => this.deps.inbox.add({ customer: agent, type: AGENT_ACCOUNT_SYNC, requestId, body: xml })
     const errors: { code: V1Code; field?: string }[] = []
     const fail = () => send(errorsXml(errors.map((e) => ({ code: e.code, description: V1[e.code], field: e.field }))))
@@ -203,7 +203,7 @@ export class AgencySync {
   // --- v2, JSON -----------------------------------------------------------------------
 
   /** POST /v2/agent/account/synchronize (LHV UK). The answer is in the inbox. */
-  syncJson(raw: unknown, agent: Customer, requestId: string) {
+  async syncJson(raw: unknown, agent: Customer, requestId: string) {
     const send = (b: object) => this.deps.inbox.add({ customer: agent, type: AGENT_ACCOUNT_SYNC, requestId, body: JSON.stringify(b), contentType: 'application/json' })
     const failed = (code: V2Code, detail?: string) => send({
       OriginalMsgId: requestId, AcceptanceStatus: 'FAILED', Accounts: [],

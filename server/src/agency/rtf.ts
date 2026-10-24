@@ -7,7 +7,7 @@
 import { gzipSync } from 'node:zlib'
 import type { Clock } from '../clock.js'
 import type { Customer, CustomerKey, Directory } from '../directory.js'
-import type { Inbox, Message } from '../inbox.js'
+import type { InboxStore, Message } from '../inbox.js'
 import type { Bank } from '../payments/engine.js'
 import { dateTallinn } from '../time.js'
 import type { RtfScheme } from './store.js'
@@ -30,7 +30,7 @@ export class RtfError extends Error {
   constructor(readonly status: 400 | 404 | 409, message: string) { super(message) }
 }
 
-export interface RtfDeps { directory: Directory; inbox: Inbox; clock: Clock; bank: Bank }
+export interface RtfDeps { directory: Directory; inbox: InboxStore; clock: Clock; bank: Bank }
 
 const pad = (s: string, n: number) => s.slice(0, n).padEnd(n, ' ')
 const isGzip = (b: Buffer) => b.length >= 2 && b[0] === 0x1f && b[1] === 0x8b
@@ -60,7 +60,7 @@ export class RtfService {
    * Sends one file to every agent that receives the scheme, or to one of them. Without
    * `content` only TARGET2 has a file of its own.
    */
-  deliver(o: { scheme: RtfScheme; content?: Buffer; customer?: CustomerKey }): Message[] {
+  async deliver(o: { scheme: RtfScheme; content?: Buffer; customer?: CustomerKey }): Promise<Message[]> {
     let to = this.recipients(o.scheme)
     if (o.customer) {
       const c = this.deps.directory.get(o.customer)
@@ -75,6 +75,8 @@ export class RtfService {
     }
     if (o.scheme.startsWith('rt1.') && !isGzip(file)) file = gzipSync(file)
     const contentType = RTF_CONTENT_TYPES[o.scheme]
-    return to.map((c) => this.deps.inbox.add({ customer: c, type: AGENT_REPORT, body: file, contentType }))
+    const sent: Message[] = []
+    for (const c of to) sent.push(await this.deps.inbox.add({ customer: c, type: AGENT_REPORT, body: file, contentType }))
+    return sent
   }
 }

@@ -178,7 +178,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   app.get('/heartbeat/mq', async (req, reply) => {
     const c = granted(req, SERVICE.heartbeat)
     const id = requestId()
-    emulator.inbox.add({ customer: c.customer, type: 'HEARTBEAT', requestId: id, body: heartbeatMessage(req, c, '') })
+    await emulator.inbox.add({ customer: c.customer, type: 'HEARTBEAT', requestId: id, body: heartbeatMessage(req, c, '') })
     return accepted(req, reply, c, id, 'HEARTBEAT')
   })
 
@@ -186,14 +186,14 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     const c = granted(req, SERVICE.heartbeat)
     const id = requestId()
     const body = typeof req.body === 'string' ? req.body : req.body ? JSON.stringify(req.body) : ''
-    emulator.inbox.add({ customer: c.customer, type: 'HEARTBEAT', requestId: id, body: heartbeatMessage(req, c, body) })
+    await emulator.inbox.add({ customer: c.customer, type: 'HEARTBEAT', requestId: id, body: heartbeatMessage(req, c, body) })
     return accepted(req, reply, c, id, 'HEARTBEAT')
   })
 
   // --- Messages -----------------------------------------------------------------
   app.get('/messages/next', async (req, reply) => {
     const c = caller(req)
-    const m = emulator.inbox.next(scope(req, c))
+    const m = await emulator.inbox.next(scope(req, c))
     return m ? sendMessage(req, reply, m) : reply.code(204).send()
   })
 
@@ -205,14 +205,14 @@ export function buildApp(opts: AppOptions): FastifyInstance {
       if (String((req.query as { mockLargeMessage?: string }).mockLargeMessage).toLowerCase() === 'true') {
         return sendBody(req, reply, 'application/xml', mockLargeStatement(emulator.clock.now(), emulator.bank))
       }
-      const m = emulator.inbox.next(scope(req, c))
+      const m = await emulator.inbox.next(scope(req, c))
       return m ? sendMessage(req, reply, m) : reply.code(204).send()
     })
   }
 
   app.get('/messages/count', async (req) => {
     const c = caller(req)
-    return { count: emulator.inbox.count(scope(req, c)) }
+    return { count: await emulator.inbox.count(scope(req, c)) }
   })
 
   app.get('/messages', async (req, reply) => {
@@ -221,7 +221,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     let limit = q.limit === undefined ? 10 : Number(q.limit)
     if (!/^\d+$/.test(q.limit ?? '10') || !Number.isInteger(limit) || limit < 1) throw jsonError(400, 'BAD_REQUEST', 'limit must be a positive integer')
     limit = Math.min(limit, 100)
-    const messages = emulator.inbox.list(scope(req, c), limit)
+    const messages = await emulator.inbox.list(scope(req, c), limit)
     if (messages.length === 0) return reply.code(204).send()
     return {
       messages: messages.map((m) => ({
@@ -238,14 +238,14 @@ export function buildApp(opts: AppOptions): FastifyInstance {
 
   app.get('/messages/:id', async (req, reply) => {
     const c = caller(req)
-    const m = emulator.inbox.get(scope(req, c), (req.params as { id: string }).id)
+    const m = await emulator.inbox.get(scope(req, c), (req.params as { id: string }).id)
     if (!m) throw notFound()
     return sendMessage(req, reply, m)
   })
 
   app.delete('/messages/:id', async (req, reply) => {
     const c = caller(req)
-    if (emulator.inbox.delete(scope(req, c), (req.params as { id: string }).id) === 'unknown') throw notFound()
+    if (await emulator.inbox.delete(scope(req, c), (req.params as { id: string }).id) === 'unknown') throw notFound()
     return reply.code(200).send()
   })
 
@@ -258,7 +258,9 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     }
     if (ids.length > 100) throw jsonError(400, 'BAD_REQUEST', 'At most 100 messages can be deleted at once')
     const s = scope(req, c)
-    const messages = ids.map((id: string) => ({ messageResponseId: id, status: emulator.inbox.delete(s, id) === 'deleted' ? 200 : 400 }))
+    // One after another: an id given twice is confirmed once, then answered from its tombstone.
+    const messages: { messageResponseId: string; status: number }[] = []
+    for (const id of ids as string[]) messages.push({ messageResponseId: id, status: (await emulator.inbox.delete(s, id)) === 'deleted' ? 200 : 400 })
     const ok = messages.filter((m) => m.status === 200).length
     return reply.code(ok === messages.length ? 200 : ok === 0 ? 400 : 207).send({ messages })
   })

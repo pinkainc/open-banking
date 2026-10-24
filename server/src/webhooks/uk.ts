@@ -15,7 +15,7 @@ import { gzipSync } from 'node:zlib'
 import { BoundedMap, type Bounds } from '../bounded.js'
 import { DAY_MS, type Clock } from '../clock.js'
 import { keyOf, type CustomerKey, type Directory } from '../directory.js'
-import type { Inbox, Message } from '../inbox.js'
+import type { InboxStore, Message } from '../inbox.js'
 import { messageMetadata } from '../metadata.js'
 import { isoLondon } from '../time.js'
 
@@ -180,7 +180,7 @@ export class UkWebhooks {
   readonly naming: Naming
   readonly #bankOf: (m: Message) => string
 
-  constructor(private inbox: Inbox, private directory: Directory, private clock: Clock, opts: UkWebhookOptions = {}) {
+  constructor(private inbox: InboxStore, private directory: Directory, private clock: Clock, opts: UkWebhookOptions = {}) {
     this.deliver = opts.deliver ?? httpUkDeliver
     this.immediate = opts.immediate ?? true
     this.naming = opts.naming ?? 'regCode'
@@ -390,7 +390,7 @@ export class UkWebhooks {
       e.status = 'SUCCESS'
       e.nextAt = undefined
       if (c.removeAfterDelivery) {
-        this.inbox.delete({ customers: new Set([e.customer]) }, e.message.id)
+        await this.inbox.delete({ customers: new Set([e.customer]) }, e.message.id)
       }
       return
     }

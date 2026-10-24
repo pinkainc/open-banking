@@ -3,14 +3,14 @@
 import type { Bounds } from '../bounded.js'
 import type { Clock } from '../clock.js'
 import type { Directory } from '../directory.js'
-import type { Inbox } from '../inbox.js'
+import type { InboxStore } from '../inbox.js'
 import type { Bank } from '../payments/engine.js'
 import { AgencyResponder } from './responder.js'
 import { RtfService } from './rtf.js'
 import { AGENCY_BOUNDS, AgencyStore } from './store.js'
 import { AgencySync } from './sync.js'
 
-export interface AgencyDeps { directory: Directory; inbox: Inbox; clock: Clock; bank: Bank }
+export interface AgencyDeps { directory: Directory; inbox: InboxStore; clock: Clock; bank: Bank }
 
 export class Agency {
   /** Synchronised agency accounts: the lookup API for payments (store.ts). */

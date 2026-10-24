@@ -61,7 +61,7 @@ async function subscribe(requestUrl: string, extra: Record<string, unknown> = {}
   return JSON.parse(res.body)
 }
 const add = async () => {
-  const m = ctx.emulator.inbox.add({ customer: { code: C1.code, country: C1.country }, type: 'VIBAN_OPEN', body: '<VibanOpenResponse/>', requestId: 'REQ00000000000000000000000000000001' })
+  const m = await ctx.emulator.inbox.add({ customer: { code: C1.code, country: C1.country }, type: 'VIBAN_OPEN', body: '<VibanOpenResponse/>', requestId: 'REQ00000000000000000000000000000001' })
   await ctx.emulator.webhooksUk.idle()
   return m
 }

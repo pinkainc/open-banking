@@ -20,7 +20,7 @@ import { DAY_MS } from '../clock.js'
 import { keyOf, type Customer, type Directory } from '../directory.js'
 import { ibanChecksumOk, normalizeIban } from '../iban.js'
 import { notificationMsgId, servicerRef } from '../ids.js'
-import type { Inbox } from '../inbox.js'
+import type { InboxStore } from '../inbox.js'
 import { InsufficientFunds, toMinor, type Ledger } from '../ledger.js'
 import type { Bank } from '../payments/engine.js'
 import { camt054, type Booking } from '../payments/camt054.js'
@@ -98,7 +98,7 @@ export interface DirectDebitDeps {
   directory: Directory
   ledger: Ledger
   rails: Rails
-  inbox: Inbox
+  inbox: InboxStore
   clock: Clock
   bank: Bank
   xsd?: XsdValidator
@@ -169,10 +169,10 @@ export class DirectDebitService {
       report.blocks.push({ pmtInfId: b.pmtInfId!, status: aggregate(txs.map((s) => s.status)), txs })
     }
     report.groupStatus = aggregate(report.blocks.flatMap((b) => b.txs.map((t) => t.status)))
-    this.#report(customer, DD_TYPES.outgoing, requestId, report)
+    await this.#report(customer, DD_TYPES.outgoing, requestId, report)
     for (const c of accepted) {
       this.collections.push(c)
-      if (c.debtorCustomer) this.#notifyDebtor(c)
+      if (c.debtorCustomer) await this.#notifyDebtor(c)
     }
   }
 
@@ -256,7 +256,7 @@ export class DirectDebitService {
       if (!b) r.report.blocks.push((b = { pmtInfId: c.pmtInfId, txs: [] }))
       b.txs.push(s)
     }
-    for (const r of reports.values()) this.#report(r.customer, DD_TYPES.outgoing, r.requestId, r.report)
+    for (const r of reports.values()) await this.#report(r.customer, DD_TYPES.outgoing, r.requestId, r.report)
     for (const c of due) if (c.status === 'SETTLED' && c.returnOnSettle) await this.#refund(c, c.returnOnSettle)
     return due.length
   }
@@ -286,8 +286,8 @@ export class DirectDebitService {
     }
     c.status = 'SETTLED'
     c.settledAt = this.d.clock.now()
-    if (c.debtorCustomer) this.#notify(c.debtorCustomer, this.#booking(c, 'debtor', 'DBIT', c.id))
-    if (c.creditorCustomer) this.#notify(c.creditorCustomer, this.#booking(c, 'creditor', 'CRDT', servicerRef()))
+    if (c.debtorCustomer) await this.#notify(c.debtorCustomer, this.#booking(c, 'debtor', 'DBIT', c.id))
+    if (c.creditorCustomer) await this.#notify(c.creditorCustomer, this.#booking(c, 'creditor', 'CRDT', servicerRef()))
     return { ...base, status: 'ACSC' }
   }
 
@@ -308,8 +308,8 @@ export class DirectDebitService {
     // P 09: "TxId…" then "CD:<code>" under Rsn/Cd NARR. pain.008 has no TxId; InstrId or EndToEndId stands in.
     const returnInfo = { code: 'NARR', additional: [c.instrId ?? c.endToEndId, `CD:${code}`] }
     const family = { subFamily: 'UPDD' }
-    if (c.debtorCustomer) this.#notify(c.debtorCustomer, { ...this.#booking(c, 'debtor', 'CRDT', ref), bankTxCode: { family: 'RDDT', ...family }, returnInfo })
-    if (c.creditorCustomer) this.#notify(c.creditorCustomer, { ...this.#booking(c, 'creditor', 'DBIT', servicerRef()), bankTxCode: { family: 'IDDT', ...family }, returnInfo })
+    if (c.debtorCustomer) await this.#notify(c.debtorCustomer, { ...this.#booking(c, 'debtor', 'CRDT', ref), bankTxCode: { family: 'RDDT', ...family }, returnInfo })
+    if (c.creditorCustomer) await this.#notify(c.creditorCustomer, { ...this.#booking(c, 'creditor', 'DBIT', servicerRef()), bankTxCode: { family: 'IDDT', ...family }, returnInfo })
     return 'ok'
   }
 
@@ -353,31 +353,31 @@ export class DirectDebitService {
     const now = this.d.clock.now().getTime()
 
     if (c.status === 'PENDING') {
-      answer(tx('ACCP'))
+      await answer(tx('ACCP'))
       // After 10:30 CET on the settlement date the refusal is processed as a return.
       if (now >= refusalCutoff(c.settlementDate)) { c.returnOnSettle = t.reason; return }
-      this.#cancel(c, t.reason, requestId)
+      await this.#cancel(c, t.reason, requestId)
       return
     }
     // SETTLED: a refund through Connect for 8 weeks.
     if (now > c.settledAt!.getTime() + REFUND_DAYS * DAY_MS) return answer(tx('RJCT', E.refundPeriod))
     if (c.creditorCustomer && (await this.d.ledger.available(c.creditor.iban, c.currency)) < c.amount) return answer(tx('RJCT', REASONS.AM04, 'AM04'))
-    answer(tx('ACCP'))
+    await answer(tx('ACCP'))
     await this.#refund(c, t.reason)
   }
 
   /** Refused before settlement: nothing is booked; the debtor gets the cancel notification, the creditor RJCT. */
-  #cancel(c: Collection, code: string, requestId?: string) {
+  async #cancel(c: Collection, code: string, requestId?: string) {
     c.status = 'REFUSED'
     c.reason = code
     const s: DdStatus = { pmtInfId: c.pmtInfId, endToEndId: c.endToEndId, instrId: c.instrId, status: 'RJCT', code, text: REASONS[code], collection: c }
     if (c.debtorCustomer) {
-      this.#report(c.debtorCustomer, DD_TYPES.cancel, requestId, {
+      await this.#report(c.debtorCustomer, DD_TYPES.cancel, requestId, {
         originalMsgId: c.notificationMsgId ?? c.msgId, originalMsgName: PAIN008, blocks: [{ pmtInfId: c.pmtInfId, txs: [s] }],
       })
     }
     if (c.creditorCustomer) {
-      this.#report(c.creditorCustomer, DD_TYPES.outgoing, c.requestId, { originalMsgId: c.msgId, originalMsgName: PAIN008, blocks: [{ pmtInfId: c.pmtInfId, txs: [s] }] })
+      await this.#report(c.creditorCustomer, DD_TYPES.outgoing, c.requestId, { originalMsgId: c.msgId, originalMsgName: PAIN008, blocks: [{ pmtInfId: c.pmtInfId, txs: [s] }] })
     }
   }
 
@@ -403,7 +403,7 @@ export class DirectDebitService {
       ustrd: x.remittance, reference: x.reference, status: 'PENDING', debtorCustomer: owner,
     }
     this.collections.push(c)
-    this.#notifyDebtor(c)
+    await this.#notifyDebtor(c)
     return c
   }
 
@@ -415,7 +415,7 @@ export class DirectDebitService {
     await this.tick()
     const c = this.#find(pmtInfId, endToEndId, (x) => !!x.creditorCustomer && !x.debtorCustomer)
     if (!c) throw new DirectDebitError(404, 'no collection to an external debtor with this EndToEndId')
-    if (c.status === 'PENDING') { this.#cancel(c, code); return c }
+    if (c.status === 'PENDING') { await this.#cancel(c, code); return c }
     if (c.status !== 'SETTLED') throw new DirectDebitError(409, `collection is ${c.status}`)
     if (this.d.clock.now().getTime() > c.settledAt!.getTime() + 395 * DAY_MS) throw new DirectDebitError(409, 'more than 13 months since settlement')
     if ((await this.#refund(c, code)) === 'funds') throw new DirectDebitError(409, 'the creditor account has insufficient funds')
@@ -429,11 +429,11 @@ export class DirectDebitService {
     return hits.find((c) => c.status === 'PENDING' || c.status === 'SETTLED') ?? hits[hits.length - 1]
   }
 
-  #notifyDebtor(c: Collection) {
+  async #notifyDebtor(c: Collection) {
     // Enabled per customer by the account manager (P 09, decision 527).
     if (!c.debtorCustomer!.directDebit?.debtorNotification) return
     c.notificationMsgId = notificationMsgId()
-    this.d.inbox.add({ customer: c.debtorCustomer!, type: DD_TYPES.notification, body: incomingCollection(c, c.notificationMsgId, this.d.clock.now()) })
+    await this.d.inbox.add({ customer: c.debtorCustomer!, type: DD_TYPES.notification, body: incomingCollection(c, c.notificationMsgId, this.d.clock.now()) })
   }
 
   /** The entry on one side's account (the side, not the direction: a refund credits the debtor). */
@@ -452,13 +452,13 @@ export class DirectDebitService {
     }
   }
 
-  #report(customer: Customer, type: string, requestId: string | undefined, r: DdReport) {
-    this.d.inbox.add({ customer, type, requestId, body: ddStatusReport(r, this.d.bank.bic, this.d.clock.now()) })
+  async #report(customer: Customer, type: string, requestId: string | undefined, r: DdReport) {
+    await this.d.inbox.add({ customer, type, requestId, body: ddStatusReport(r, this.d.bank.bic, this.d.clock.now()) })
   }
 
-  #notify(customer: Customer, b: Booking) {
+  async #notify(customer: Customer, b: Booking) {
     this.d.onBooking?.(customer, b)
-    this.d.inbox.add({ customer, type: 'CREDIT_DEBIT_NOTIFICATION', body: camt054(b, customer.camt054, this.d.bank) })
+    await this.d.inbox.add({ customer, type: 'CREDIT_DEBIT_NOTIFICATION', body: camt054(b, customer.camt054, this.d.bank) })
   }
 }
 

@@ -19,7 +19,7 @@ import type { Clock } from '../clock.js'
 import { keyOf, type Customer, type Directory } from '../directory.js'
 import { normalizeIban } from '../iban.js'
 import { servicerRef } from '../ids.js'
-import type { Inbox } from '../inbox.js'
+import type { InboxStore } from '../inbox.js'
 import { fromMinor, InsufficientFunds, type Ledger } from '../ledger.js'
 import { camt054, type Booking } from '../payments/camt054.js'
 import type { Bank } from '../payments/engine.js'
@@ -104,7 +104,7 @@ const nextPmtInfId = () => ++pmtInfSeq
 export interface FxDeps {
   directory: Directory
   ledger: Ledger
-  inbox: Inbox
+  inbox: InboxStore
   clock: Clock
   bank: Bank
   onBooking?: (c: Customer, b: Booking) => void
@@ -141,13 +141,13 @@ export class FxService {
 
   #key = (c: Customer, ref: string) => `${keyOf(c)}|${ref}`
 
-  #send(customer: Customer, type: string, requestId: string | undefined, body: object) {
-    this.d.inbox.add({ customer, type, requestId, body: JSON.stringify(body), contentType: 'application/json' })
+  async #send(customer: Customer, type: string, requestId: string | undefined, body: object) {
+    await this.d.inbox.add({ customer, type, requestId, body: JSON.stringify(body), contentType: 'application/json' })
   }
 
   /** POST /fx/trade-offer: always answered in the inbox. */
   async offer(raw: unknown, customer: Customer, requestId: string) {
-    this.#send(customer, FX_TYPES.offer, requestId, await this.#offer(raw, customer))
+    await this.#send(customer, FX_TYPES.offer, requestId, await this.#offer(raw, customer))
   }
 
   async #offer(raw: unknown, customer: Customer): Promise<object> {
@@ -269,7 +269,7 @@ export class FxService {
 
   /** POST /fx/trade-offer-confirmation: always answered in the inbox. */
   async confirm(raw: unknown, customer: Customer, requestId: string) {
-    this.#send(customer, FX_TYPES.confirmation, requestId, await this.#confirm(raw, customer, requestId))
+    await this.#send(customer, FX_TYPES.confirmation, requestId, await this.#confirm(raw, customer, requestId))
   }
 
   async #confirm(raw: unknown, customer: Customer, requestId: string): Promise<object> {
@@ -335,7 +335,7 @@ export class FxService {
     })
     for (const b of [leg('DBIT', o.amountFrom!, o.currencyFrom, servicerRef()), leg('CRDT', o.amountTo!, o.currencyTo, creditRef)]) {
       this.d.onBooking?.(c, b)
-      this.d.inbox.add({ customer: c, type: 'CREDIT_DEBIT_NOTIFICATION', body: camt054(b, c.camt054, this.d.bank) })
+      await this.d.inbox.add({ customer: c, type: 'CREDIT_DEBIT_NOTIFICATION', body: camt054(b, c.camt054, this.d.bank) })
     }
   }
 
@@ -349,7 +349,7 @@ export class FxService {
     for (const o of this.offers.values()) {
       if (o.deal?.status !== 'SETTLEMENT_PENDING' || now < instant(o.settlementDate!, '00:00:00')) continue
       await this.#settle(o)
-      this.#send(o.customer, FX_TYPES.confirmation, o.deal.confirmRequestId, this.dealView(o))
+      await this.#send(o.customer, FX_TYPES.confirmation, o.deal.confirmRequestId, this.dealView(o))
       n++
     }
     return n

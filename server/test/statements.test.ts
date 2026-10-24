@@ -407,7 +407,7 @@ describe('automatic end-of-day statement', () => {
     ctx.clock.advance(DAY_MS)
     book({ amount: '7.00' }) // the next day: not in the statement
     assert.equal((await call(ctx, { method: 'POST', url: '/_sim/end-of-day', body: {} })).json().messages, 1)
-    assert.equal(ctx.emulator.reports.tick(), 0)
+    assert.equal(await ctx.emulator.reports.tick(), 0)
     const msgs = await drain(ctx)
     const st = msgs.filter((m) => m.type === 'ACCOUNT_STATEMENT')
     assert.equal(st.length, 1)
@@ -423,8 +423,8 @@ describe('automatic end-of-day statement', () => {
   test('the clock-driven tick catches up on every finished day; an explicit date is sent once', async () => {
     await put({ automaticStatement: '02' })
     ctx.clock.advance(3 * DAY_MS)
-    assert.equal(ctx.emulator.reports.tick(), 3) // 10, 11, 12 March
-    assert.equal(ctx.emulator.reports.tick(), 0)
+    assert.equal(await ctx.emulator.reports.tick(), 3) // 10, 11, 12 March
+    assert.equal(await ctx.emulator.reports.tick(), 0)
     const r = await call(ctx, { method: 'POST', url: '/_sim/end-of-day', body: { date: '2026-03-11' } })
     assert.deepEqual(r.json(), { date: '2026-03-11', messages: 0 })
     const st = (await drain(ctx)).filter((m) => m.type === 'ACCOUNT_STATEMENT')
@@ -445,7 +445,7 @@ describe('automatic end-of-day statement', () => {
     await put({ automaticStatement: '08' })
     assert.equal((await put({ automaticStatement: null })).json().automaticStatement, null)
     ctx.clock.advance(DAY_MS)
-    assert.equal(ctx.emulator.reports.tick(), 0)
+    assert.equal(await ctx.emulator.reports.tick(), 0)
     const bad = await call(ctx, { method: 'POST', url: '/_sim/end-of-day', body: { date: '2026-03-11' } })
     assert.equal(bad.statusCode, 400)
     assert.equal((await call(ctx, { method: 'POST', url: '/_sim/end-of-day', body: { date: '11.03.2026' } })).statusCode, 400)

@@ -164,10 +164,10 @@ export function simRoutes(emulator: Emulator) {
     // since the last run, as the clock-driven tick does).
     app.post('/end-of-day', async (req) => {
       const b = (req.body ?? {}) as { date?: unknown }
-      if (b.date === undefined) return { messages: emulator.reports.tick() }
+      if (b.date === undefined) return { messages: await emulator.reports.tick() }
       if (typeof b.date !== 'string' || !isDate(b.date)) throw bad('date must be YYYY-MM-DD')
       if (b.date >= dateTallinn(emulator.clock.now())) throw bad('date must be a finished day (Europe/Tallinn)')
-      return { date: b.date, messages: emulator.reports.endOfDay(b.date) }
+      return { date: b.date, messages: await emulator.reports.endOfDay(b.date) }
     })
 
     app.post('/rails/reject', async (req) => {

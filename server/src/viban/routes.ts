@@ -24,7 +24,7 @@ export function registerViban(app: FastifyInstance, emulator: Emulator, caller: 
         return reply.code(status).type('application/xml').send(errorsXml(out.errors))
       }
       const id = requestId()
-      emulator.inbox.add({ customer: c.customer, type: out.type, requestId: id, body: 'errors' in out ? errorsXml(out.errors) : out.body })
+      await emulator.inbox.add({ customer: c.customer, type: out.type, requestId: id, body: 'errors' in out ? errorsXml(out.errors) : out.body })
       return accepted(emulator.requests, req, reply, c, id, out.type)
     })
   }
@@ -50,7 +50,7 @@ export function vibanSimRoutes(emulator: Emulator) {
       const status = (req.body as { status?: string } | undefined)?.status as VibanStatus
       if (!STATUSES.includes(status)) throw bad(`status must be one of ${STATUSES.join(', ')}`)
       if (!svc.registry.get(iban)) throw new ConnectError(404, 'NOT_FOUND', 'no such VIBAN')
-      const why = svc.bankStatus(iban, status)
+      const why = await svc.bankStatus(iban, status)
       if (why) throw new ConnectError(409, 'CONFLICT', why)
       return view(svc.registry.get(iban)!)
     })

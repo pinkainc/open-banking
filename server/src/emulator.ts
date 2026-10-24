@@ -4,7 +4,7 @@
 import { DEFAULT_BOUNDS, type Bounds } from './bounded.js'
 import { systemClock, type Clock } from './clock.js'
 import { Directory, type CustomerInput } from './directory.js'
-import { Inbox } from './inbox.js'
+import { MemoryInbox, type InboxStore } from './inbox.js'
 import { RequestLog } from './requests.js'
 import { MemoryLedger, toMinor, type Ledger } from './ledger.js'
 import { PaymentEngine, type Bank } from './payments/engine.js'
@@ -49,6 +49,11 @@ export interface EmulatorOptions {
   webhookDeliver?: Deliver
   /** How UK webhooks are sent (default HTTP POST); tests record them instead. */
   ukWebhookDeliver?: UkDeliver
+  /**
+   * The message box, built with the emulator's clock and bounds (decision 900); default
+   * in memory. A PgInbox (pg/inbox.ts) keeps it in Postgres.
+   */
+  inbox?: (clock: Clock, bounds: { tombstones: Bounds; processed: Bounds }) => InboxStore
   /** Limits of what is remembered (decision 504); each part overrides DEFAULT_BOUNDS. */
   memory?: { tombstones?: Partial<Bounds>; msgIds?: Partial<Bounds>; processed?: Partial<Bounds>; requests?: Partial<Bounds>; incoming?: Partial<Bounds>; webhookEvents?: Partial<Bounds>; bacs?: Partial<typeof BACS_BOUNDS>; agency?: Partial<Bounds> }
 }
@@ -62,7 +67,7 @@ export class Emulator {
   readonly clock: Clock
   readonly ledger: Ledger
   readonly rails: Rails
-  readonly inbox: Inbox
+  readonly inbox: InboxStore
   /** Every request answered 202, as submitted (GET /v2/requests, decision 630). */
   readonly requests: RequestLog
   readonly engine: PaymentEngine
@@ -92,7 +97,8 @@ export class Emulator {
     this.rails = opts.rails ?? new SimulatorRails()
     const tombstones = { ...DEFAULT_BOUNDS.tombstones, ...opts.memory?.tombstones }
     const msgIds = { ...DEFAULT_BOUNDS.msgIds, ...opts.memory?.msgIds }
-    this.inbox = new Inbox(this.clock, undefined, tombstones, { ...DEFAULT_BOUNDS.processed, ...opts.memory?.processed })
+    const processed = { ...DEFAULT_BOUNDS.processed, ...opts.memory?.processed }
+    this.inbox = opts.inbox ? opts.inbox(this.clock, { tombstones, processed }) : new MemoryInbox(this.clock, undefined, tombstones, processed)
     this.requests = new RequestLog(this.clock, { ...DEFAULT_BOUNDS.requests, ...opts.memory?.requests })
     this.webhooksEe = new EeWebhooks(this.inbox, this.clock, { deliver: opts.webhookDeliver })
     this.webhooksUk = new UkWebhooks(this.inbox, this.directory, this.clock, {

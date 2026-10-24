@@ -12,7 +12,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Clock } from '../clock.js'
 import { keyOf, type CustomerKey } from '../directory.js'
-import type { Inbox, Message } from '../inbox.js'
+import type { InboxStore, Message } from '../inbox.js'
 
 export const EVENT_TYPE = 'GENERAL_WEBHOOK'
 /** Pause before each retry, after a failed attempt; the length is the number of retries. */
@@ -73,7 +73,7 @@ export class EeWebhooks {
   deliver: Deliver
   readonly immediate: boolean
 
-  constructor(inbox: Inbox, private clock: Clock, opts: EeWebhookOptions = {}) {
+  constructor(inbox: InboxStore, private clock: Clock, opts: EeWebhookOptions = {}) {
     this.deliver = opts.deliver ?? httpDeliver
     this.immediate = opts.immediate ?? true
     inbox.onAdd((m) => this.#onMessage(m))

@@ -9,7 +9,7 @@ let ctx: Ctx
 beforeEach(async () => { ctx = await setup() })
 
 /** Puts a message in C1's inbox (or another customer's), one second apart. */
-function put(type = 'PAYMENT', body = '<x/>', customer = C1) {
+async function put(type = 'PAYMENT', body = '<x/>', customer = C1) {
   ctx.clock.advance(1000)
   return ctx.emulator.inbox.add({ customer, type, body, requestId: `REQ${'0'.repeat(32)}` })
 }
@@ -26,7 +26,7 @@ describe('next', () => {
   })
 
   test('returns the oldest message, the same one until it is deleted', async () => {
-    const a = put('PAYMENT', '<a/>'), b = put('HEARTBEAT', '<b/>')
+    const a = await put('PAYMENT', '<a/>'), b = await put('HEARTBEAT', '<b/>')
     for (let i = 0; i < 3; i++) {
       const r = await call(ctx, { url: '/messages/next' })
       assert.equal(r.statusCode, 200)
@@ -43,7 +43,8 @@ describe('next', () => {
   })
 
   test('messages created in the same instant keep their order', async () => {
-    const ids = [1, 2, 3].map(() => ctx.emulator.inbox.add({ customer: C1, type: 'PAYMENT', body: '<x/>' }).id)
+    const ids: string[] = []
+    for (let i = 0; i < 3; i++) ids.push((await ctx.emulator.inbox.add({ customer: C1, type: 'PAYMENT', body: '<x/>' })).id)
     const got = []
     for (const _ of ids) {
       const r = await call(ctx, { url: '/messages/next' })
@@ -54,13 +55,13 @@ describe('next', () => {
   })
 
   test('a message without a request has no Message-Request-Id', async () => {
-    ctx.emulator.inbox.add({ customer: C1, type: 'CREDIT_DEBIT_NOTIFICATION', body: '<n/>' })
+    await ctx.emulator.inbox.add({ customer: C1, type: 'CREDIT_DEBIT_NOTIFICATION', body: '<n/>' })
     const r = await call(ctx, { url: '/messages/next' })
     assert.equal(r.headers['message-request-id'], undefined)
   })
 
   test('Filter-Response-Type selects one type (next, list, count)', async () => {
-    put('PAYMENT'); const hb = put('HEARTBEAT'); put('PAYMENT')
+    await put('PAYMENT'); const hb = await put('HEARTBEAT'); await put('PAYMENT')
     const headers = { 'Filter-Response-Type': 'HEARTBEAT' }
     const r = await call(ctx, { url: '/messages/next', headers })
     assert.equal(r.headers['message-response-id'], hb.id)
@@ -70,7 +71,7 @@ describe('next', () => {
   })
 
   test("customers do not see each other's messages", async () => {
-    const m = put('PAYMENT', '<x/>', C2)
+    const m = await put('PAYMENT', '<x/>', C2)
     assert.equal((await call(ctx, { url: '/messages/next' })).statusCode, 204)
     assert.equal((await call(ctx, { url: `/messages/${m.id}` })).statusCode, 404)
     assert.equal((await del(m.id)).statusCode, 404)
@@ -86,9 +87,9 @@ describe('list, count, get', () => {
 
   test('list shape: oldest first, documented fields, EE local time without offset', async () => {
     ctx.clock.set('2026-03-10T08:00:00.067Z')
-    const a = ctx.emulator.inbox.add({ customer: C1, type: 'PAYMENT', body: '<a/>', requestId: 'REQ1' })
+    const a = await ctx.emulator.inbox.add({ customer: C1, type: 'PAYMENT', body: '<a/>', requestId: 'REQ1' })
     ctx.clock.advance(1000)
-    const b = ctx.emulator.inbox.add({ customer: C1, type: 'CREDIT_DEBIT_NOTIFICATION', body: '<b/>' })
+    const b = await ctx.emulator.inbox.add({ customer: C1, type: 'CREDIT_DEBIT_NOTIFICATION', body: '<b/>' })
     const r = await call(ctx, { url: '/messages' })
     assert.equal(r.statusCode, 200)
     assert.match(String(r.headers['content-type']), /application\/json/)
@@ -100,7 +101,7 @@ describe('list, count, get', () => {
   })
 
   test('limit: default 10, maximum 100, invalid is 400', async () => {
-    for (let i = 0; i < 120; i++) put()
+    for (let i = 0; i < 120; i++) await put()
     assert.equal(json(await call(ctx, { url: '/messages' })).messages.length, 10)
     assert.equal(json(await call(ctx, { url: '/messages?limit=3' })).messages.length, 3)
     assert.equal(json(await call(ctx, { url: '/messages?limit=500' })).messages.length, 100)
@@ -113,13 +114,13 @@ describe('list, count, get', () => {
   })
 
   test('listing does not consume: messages stay until deleted', async () => {
-    put(); put()
+    await put(); await put()
     await call(ctx, { url: '/messages' })
     assert.deepEqual(json(await call(ctx, { url: '/messages/count' })), { count: 2 })
   })
 
   test('GET by id returns the message with its headers, in any order', async () => {
-    put('PAYMENT', '<a/>'); const b = put('HEARTBEAT', '<b/>')
+    await put('PAYMENT', '<a/>'); const b = await put('HEARTBEAT', '<b/>')
     const r = await call(ctx, { url: `/messages/${b.id}` })
     assert.equal(r.statusCode, 200)
     assert.equal(r.body, '<b/>')
@@ -137,7 +138,7 @@ describe('list, count, get', () => {
 
 describe('delete', () => {
   test('DELETE is 200, and 200 again for an already deleted message', async () => {
-    const m = put()
+    const m = await put()
     assert.equal((await del(m.id)).statusCode, 200)
     assert.equal((await del(m.id)).statusCode, 200)
     assert.equal((await call(ctx, { url: `/messages/${m.id}` })).statusCode, 404)
@@ -150,7 +151,7 @@ describe('delete', () => {
   })
 
   test('bulk: all deleted is 200 with a status per id', async () => {
-    const ids = [put().id, put().id, put().id]
+    const ids = [(await put()).id, (await put()).id, (await put()).id]
     const r = await bulk(ids)
     assert.equal(r.statusCode, 200)
     assert.deepEqual(json(r), { messages: ids.map((id) => ({ messageResponseId: id, status: 200 })) })
@@ -158,13 +159,13 @@ describe('delete', () => {
   })
 
   test('bulk: already deleted ids count as deleted', async () => {
-    const a = put()
+    const a = await put()
     await del(a.id)
     assert.equal((await bulk([a.id])).statusCode, 200)
   })
 
   test('bulk: some unknown is 207, all unknown is 400', async () => {
-    const a = put().id
+    const a = (await put()).id
     const partial = await bulk([a, 'RESnope'])
     assert.equal(partial.statusCode, 207)
     assert.deepEqual(json(partial).messages, [{ messageResponseId: a, status: 200 }, { messageResponseId: 'RESnope', status: 400 }])
@@ -174,7 +175,8 @@ describe('delete', () => {
   })
 
   test('bulk: at most 100 ids; malformed bodies are 400', async () => {
-    const ids = Array.from({ length: 100 }, () => put().id)
+    const ids: string[] = []
+    for (let i = 0; i < 100; i++) ids.push((await put()).id)
     assert.equal((await bulk([...ids, 'RESextra'])).statusCode, 400)
     assert.deepEqual(json(await call(ctx, { url: '/messages/count' })), { count: 100 }, 'nothing deleted')
     assert.equal((await bulk(ids)).statusCode, 200)
@@ -187,16 +189,16 @@ describe('delete', () => {
 
 describe('expiry', () => {
   test('unread messages older than five days are gone', async () => {
-    const old = put()
+    const old = await put()
     ctx.clock.advance(3 * DAY_MS)
-    const recent = put()
+    const recent = await put()
     ctx.clock.advance(2 * DAY_MS - 1001)
     assert.deepEqual(json(await call(ctx, { url: '/messages/count' })), { count: 2 }, 'exactly five days is still there')
     ctx.clock.advance(2)
     assert.deepEqual(json(await call(ctx, { url: '/messages/count' })), { count: 1 })
     assert.equal((await call(ctx, { url: '/messages/next' })).headers['message-response-id'], recent.id)
     assert.equal((await call(ctx, { url: `/messages/${old.id}` })).statusCode, 404)
-    assert.equal(ctx.emulator.inbox.purge(), 1)
+    assert.equal(await ctx.emulator.inbox.purge(), 1)
     assert.equal((await del(old.id)).statusCode, 200, 'an expired message counts as deleted')
     ctx.clock.advance(5 * DAY_MS)
     assert.equal((await call(ctx, { url: '/messages/next' })).statusCode, 204)

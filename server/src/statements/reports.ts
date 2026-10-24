@@ -5,7 +5,7 @@ import { BoundedSet, DEFAULT_BOUNDS, type Bounds } from '../bounded.js'
 import type { Clock } from '../clock.js'
 import { keyOf, type Customer, type CustomerKey, type Directory } from '../directory.js'
 import { errorsXml } from '../errors.js'
-import type { Inbox } from '../inbox.js'
+import type { InboxStore } from '../inbox.js'
 import { toMinor, type Ledger } from '../ledger.js'
 import type { Bank } from '../payments/engine.js'
 import type { XsdValidator } from '../payments/xsd.js'
@@ -58,7 +58,7 @@ export interface ReportsDeps {
   directory: Directory
   ledger: Ledger
   journal: Journal
-  inbox: Inbox
+  inbox: InboxStore
   clock: Clock
   bank: Bank
   xsd?: XsdValidator
@@ -106,10 +106,10 @@ export class AccountReports {
       if (!owner || keyOf(owner) !== keyOf(customer)) throw new StatementError(E.noAccess)
       const bodies = kind === 'statement' ? this.#statementRequest(req, owner) : [await this.#balanceRequest(req, owner)]
       this.#seen.add(`${seenKey}|${req.msgId}`)
-      for (const b of bodies) add(b)
+      for (const b of bodies) await add(b)
     } catch (e) {
       const err = e instanceof StatementError ? e : new StatementError(E.technical)
-      add(errorsXml([{ code: err.err[0], description: err.err[1], field: err.field }]))
+      await add(errorsXml([{ code: err.err[0], description: err.err[1], field: err.field }]))
     }
   }
 
@@ -273,7 +273,7 @@ export class AccountReports {
    * Sends the statement of a finished day (Tallinn time) for every account of every
    * customer with automatic statements. Returns the number of messages; a day is sent once.
    */
-  endOfDay(date: string): number {
+  async endOfDay(date: string): Promise<number> {
     if (this.#eodDone.has(date)) return 0
     this.#eodDone.add(date)
     let n = 0
@@ -282,7 +282,7 @@ export class AccountReports {
       if (!version) continue
       for (const iban of c.accounts) {
         for (const body of this.statementPages({ version, iban, owner: c, from: instant(date), to: instant(addDays(date, 1)) })) {
-          this.d.inbox.add({ customer: c, type: STATEMENT_TYPE, body })
+          await this.d.inbox.add({ customer: c, type: STATEMENT_TYPE, body })
           n++
         }
       }
@@ -291,10 +291,10 @@ export class AccountReports {
   }
 
   /** Runs the end-of-day statements of every day finished since the last call (clock-driven). */
-  tick(): number {
+  async tick(): Promise<number> {
     const yesterday = addDays(dateTallinn(this.d.clock.now()), -1)
     let n = 0
-    for (let d = this.#eodFrom; d <= yesterday; d = addDays(d, 1)) n += this.endOfDay(d)
+    for (let d = this.#eodFrom; d <= yesterday; d = addDays(d, 1)) n += await this.endOfDay(d)
     if (this.#eodFrom <= yesterday) this.#eodFrom = addDays(yesterday, 1)
     return n
   }

@@ -73,7 +73,7 @@ export function registerMessagesV2(app: FastifyInstance, emulator: Emulator, cal
     const scope: Scope = { customers: v2Customers(c, boolParam(q, 'serviceProvider')), type: one(q, 'responseType') || undefined }
     const requestId = one(q, 'messageRequestId') || undefined
     // LHV UK messages only: an answer to a request the host handed to LHV EE (decision 607) is not listed.
-    const entries = emulator.inbox.entries(scope, { includeProcessed, requestId })
+    const entries = (await emulator.inbox.entries(scope, { includeProcessed, requestId }))
       .filter((e) => !e.message.requestId || (emulator.requests.bankCodeOf(e.message.requestId) ?? bankCode) === bankCode)
     const result = page(entries, p)
     if (!result) return reply.code(204).send()
@@ -116,7 +116,7 @@ export function registerMessagesProcessed(scope: FastifyInstance, emulator: Emul
       if (typeof o.messageProcessed !== 'boolean') throw bad(`messages[${i}].messageProcessed must be true or false`)
       return { id: o.messageResponseId, processed: o.messageProcessed }
     })
-    const refused = emulator.inbox.setProcessed({ customers: c.visible }, changes)
+    const refused = await emulator.inbox.setProcessed({ customers: c.visible }, changes)
     if (refused) {
       // The G sample's wording, "Message-Request-Id" included, for an id the caller never had.
       throw bad(refused.reason === 'unknown'

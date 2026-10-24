@@ -38,9 +38,9 @@ const flavour = (env.CONNECT_FLAVOUR ?? 'EE').toUpperCase()
 if (flavour !== 'EE' && flavour !== 'UK') throw new Error(`CONNECT_FLAVOUR must be EE or UK, not ${flavour}`)
 const app = buildApp({ emulator, https: tls, sim: env.SIM !== '0', flavour, idempotencyKeys: max(env.MAX_IDEMPOTENCY_KEYS) })
 if (env.LOG) app.addHook('onResponse', async (req, reply) => console.error(`${req.method} ${req.url} ${reply.statusCode}`))
-setInterval(() => { emulator.inbox.purge(); emulator.requests.purge() }, 60 * 60 * 1000).unref()
+setInterval(() => { emulator.inbox.purge().catch((e) => console.error('inbox purge failed:', e)); emulator.requests.purge() }, 60 * 60 * 1000).unref()
 // Automatic end-of-day statements: checked every minute, sent once per finished day.
-if (env.EOD_STATEMENTS !== '0') setInterval(() => emulator.reports.tick(), 60 * 1000).unref()
+if (env.EOD_STATEMENTS !== '0') setInterval(() => { emulator.reports.tick().catch((e) => console.error('end-of-day statements failed:', e)) }, 60 * 1000).unref()
 // SEPA Direct Debit: collections due are settled at 11:30 CET; checked every minute.
 setInterval(() => { emulator.directDebit.tick().catch((e) => console.error('direct debit settlement failed:', e)) }, 60 * 1000).unref()
 // Bacs (UK): mandate activation, credits, debits and refunds on the UK cut-offs; checked every minute.

@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto'
 import type { Clock } from '../clock.js'
 import type { Bank } from '../payments/engine.js'
 import type { Customer, Directory } from '../directory.js'
-import type { Inbox, Message } from '../inbox.js'
+import type { InboxStore, Message } from '../inbox.js'
 import { matchName } from '../payee/match.js'
 import { COP_REASONS, VOP_REASONS } from '../payee/service.js'
 import { rangeFor, type AccountCategory, type AgencyAccount, type AgencyStore } from './store.js'
@@ -24,7 +24,7 @@ const COP_SAMPLE_REASONS: Record<string, string> = {
 }
 const CLOSE_COP = new Set(['MBAM', 'BAMM', 'PAMM'])
 
-export interface ResponderDeps { directory: Directory; inbox: Inbox; clock: Clock; store: AgencyStore; bank: Bank }
+export interface ResponderDeps { directory: Directory; inbox: InboxStore; clock: Clock; store: AgencyStore; bank: Bank }
 
 export interface CopIncoming {
   sortCode: string; accountNumber: string; name: string; classification: AccountCategory
@@ -44,13 +44,13 @@ export class AgencyResponder {
     return this.deps.directory.all().find((c) => rangeFor(c.agency, identifier) !== undefined)
   }
 
-  #notify(type: string, kind: 'cop' | 'vop', agent: Customer | undefined, body: object): Message | undefined {
+  async #notify(type: string, kind: 'cop' | 'vop', agent: Customer | undefined, body: object): Promise<Message | undefined> {
     if (!agent?.agency?.agreement || !agent.agency.notifications || !agent.agency[kind]) return undefined
     return this.deps.inbox.add({ customer: agent, type, body: JSON.stringify(body), contentType: 'application/json' })
   }
 
   /** An incoming CoP request on a sort code and account number of LHV UK (decision 808). */
-  cop(r: CopIncoming): ResponderResult {
+  async cop(r: CopIncoming): Promise<ResponderResult> {
     const bban = `${r.sortCode}${r.accountNumber}`
     const account = this.deps.store.get('LHVUK', bban)
     const agent = this.#agent(bban, account)
@@ -93,11 +93,11 @@ export class AgencyResponder {
         },
       },
     }
-    return { body, agent, account, message: this.#notify(COP_INCOMING, 'cop', agent, body) }
+    return { body, agent, account, message: await this.#notify(COP_INCOMING, 'cop', agent, body) }
   }
 
   /** An incoming VoP request on an IBAN synchronised with LHV EE or LHV UK (decision 809). */
-  vop(r: VopIncoming): ResponderResult {
+  async vop(r: VopIncoming): Promise<ResponderResult> {
     const account = this.deps.store.find(r.iban)[0]
     const agent = this.#agent(r.iban, account)
     const now = this.deps.clock.now().toISOString()
@@ -132,6 +132,6 @@ export class AgencyResponder {
         },
       },
     }
-    return { body, agent, account, message: this.#notify(VOP_INCOMING, 'vop', agent, body) }
+    return { body, agent, account, message: await this.#notify(VOP_INCOMING, 'vop', agent, body) }
   }
 }

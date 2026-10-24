@@ -35,7 +35,53 @@ export type ProcessedRefusal = { id: string; reason: 'unknown' | 'archived' }
 /** Which customers' messages a request may see, and an optional type filter. */
 export interface Scope { customers: Set<string>; type?: string }
 
-export class Inbox {
+/** What a new message carries; the store gives it an id, a creation time (from its clock) and a seq. */
+export interface NewMessage { customer: CustomerKey; type: string; body: string | Buffer; requestId?: string; contentType?: string }
+
+/**
+ * The message box behind an async interface (decision 900): MemoryInbox below, PgInbox
+ * (pg/inbox.ts) for a shared database. Both keep the same semantics: times come from the
+ * injected clock, ordering is createdAt then seq, tombstones and processed messages are
+ * bounded (decisions 504 and 621), and onAdd listeners run after the message is stored.
+ */
+export interface InboxStore {
+  /** Remembered tombstones (tests, diagnostics). */
+  tombstones(): Promise<number>
+  /** Processed messages still kept (tests, diagnostics). */
+  processedKept(): Promise<number>
+  /** Called with every new message, after it is stored (EE webhook delivery). */
+  onAdd(listener: (m: Message) => void): void
+  add(m: NewMessage): Promise<Message>
+  /** Drops expired messages, archived processed ones and tombstones; returns how many messages expired. */
+  purge(): Promise<number>
+  /** Pending messages in scope, oldest first. */
+  list(s: Scope, limit?: number): Promise<Message[]>
+  next(s: Scope): Promise<Message | undefined>
+  count(s: Scope): Promise<number>
+  get(s: Scope, id: string): Promise<Message | undefined>
+  /**
+   * Confirms a message. 'deleted' also covers an id deleted (or expired) before, as
+   * documented; 'unknown' is an id that never existed for this caller (404).
+   */
+  delete(s: Scope, id: string): Promise<'deleted' | 'unknown'>
+  /**
+   * The v2 list: pending messages in scope and, with `includeProcessed`, the processed
+   * ones not archived yet, oldest first; optionally only those of one request.
+   */
+  entries(s: Scope, o?: { includeProcessed?: boolean; requestId?: string }): Promise<Entry[]>
+  /**
+   * PATCH /v2/messages/processed: all changes or none (G "400 - not updated: No messages
+   * updated"). true confirms (as DELETE; an id confirmed before is accepted again), false
+   * undeletes a processed message that is not archived (a pending one stays as it is).
+   */
+  setProcessed(s: Scope, changes: { id: string; processed: boolean }[]): Promise<ProcessedRefusal | undefined>
+}
+
+/** How long an unread message lives (from creation, or from its undelete). */
+export const RETENTION_MS = 5 * DAY_MS
+
+/** The in-memory store: everything in this process, gone on restart. The methods do their work before the first await, so the order of effects is the caller's. */
+export class MemoryInbox implements InboxStore {
   #messages = new Map<string, Message>()
   /**
    * Ids that existed and are gone (confirmed or expired), with their owner: a repeat
@@ -46,21 +92,18 @@ export class Inbox {
   #processed: BoundedMap<string, Message>
   #seq = 0
   #listeners: ((m: Message) => void)[] = []
-  constructor(private clock: Clock, private retentionMs = 5 * DAY_MS, tombstones: Bounds = DEFAULT_BOUNDS.tombstones,
+  constructor(private clock: Clock, private retentionMs = RETENTION_MS, tombstones: Bounds = DEFAULT_BOUNDS.tombstones,
     processed: Bounds = DEFAULT_BOUNDS.processed) {
     this.#gone = new BoundedMap(clock, tombstones)
     this.#processed = new BoundedMap(clock, processed)
   }
 
-  /** Remembered tombstones (tests, diagnostics). */
-  get tombstones() { return this.#gone.size }
-  /** Processed messages still kept (tests, diagnostics). */
-  get processedKept() { return this.#processed.size }
+  async tombstones() { return this.#gone.size }
+  async processedKept() { return this.#processed.size }
 
-  /** Called with every new message, after it is stored (EE webhook delivery). */
   onAdd(listener: (m: Message) => void) { this.#listeners.push(listener) }
 
-  add(m: { customer: CustomerKey; type: string; body: string | Buffer; requestId?: string; contentType?: string }): Message {
+  async add(m: NewMessage): Promise<Message> {
     const msg: Message = {
       id: responseId(), requestId: m.requestId, type: m.type,
       clientCode: m.customer.code, clientCountry: m.customer.country,
@@ -74,8 +117,8 @@ export class Inbox {
   #expired(m: Message) { return this.clock.now().getTime() - (m.restoredAt ?? m.createdAt).getTime() > this.retentionMs }
   #archived(m: Message) { return this.clock.now().getTime() - m.createdAt.getTime() >= ARCHIVE_MS }
 
-  /** Drops expired messages, archived processed ones and tombstones. Reads skip them anyway; this frees the memory. */
-  purge(): number {
+  /** Reads skip expired entries anyway; this frees the memory. */
+  async purge(): Promise<number> {
     let n = 0
     for (const m of this.#messages.values()) if (this.#expired(m)) { this.#remove(m); n++ }
     for (const [id, m] of this.#processed.entries()) if (this.#archived(m)) this.#processed.delete(id)
@@ -98,18 +141,19 @@ export class Inbox {
     return m
   }
 
-  /** Pending messages in scope, oldest first. */
-  list(s: Scope, limit = Infinity): Message[] {
+  async list(s: Scope, limit = Infinity): Promise<Message[]> { return this.#list(s, limit) }
+
+  #list(s: Scope, limit = Infinity): Message[] {
     const out: Message[] = []
     for (const m of this.#messages.values()) if (this.#inScope(m, s)) out.push(m)
     out.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.seq - b.seq)
     return out.slice(0, limit)
   }
 
-  next(s: Scope): Message | undefined { return this.list(s, 1)[0] }
-  count(s: Scope): number { return this.list(s).length }
+  async next(s: Scope) { return this.#list(s, 1)[0] }
+  async count(s: Scope) { return this.#list(s).length }
 
-  get(s: Scope, id: string): Message | undefined {
+  async get(s: Scope, id: string) {
     const m = this.#messages.get(id)
     return m && this.#inScope(m, { customers: s.customers }) ? m : undefined
   }
@@ -131,24 +175,16 @@ export class Inbox {
     return m && this.#owned(m, s) && !this.#expired(m) ? m : undefined
   }
 
-  /**
-   * Confirms a message. 'deleted' also covers an id deleted (or expired) before, as
-   * documented; 'unknown' is an id that never existed for this caller (404).
-   */
-  delete(s: Scope, id: string): 'deleted' | 'unknown' {
+  async delete(s: Scope, id: string): Promise<'deleted' | 'unknown'> {
     const m = this.#messages.get(id)
     if (m && this.#owned(m, s)) { this.#expired(m) ? this.#remove(m) : this.#confirm(m); return 'deleted' }
     const owner = this.#gone.get(id)
     return this.#kept(s, id) || (owner !== undefined && s.customers.has(owner)) ? 'deleted' : 'unknown'
   }
 
-  /**
-   * The v2 list: pending messages in scope and, with `includeProcessed`, the processed
-   * ones not archived yet, oldest first; optionally only those of one request.
-   */
-  entries(s: Scope, o: { includeProcessed?: boolean; requestId?: string } = {}): Entry[] {
+  async entries(s: Scope, o: { includeProcessed?: boolean; requestId?: string } = {}): Promise<Entry[]> {
     const want = (m: Message) => (!s.type || m.type === s.type) && (o.requestId === undefined || m.requestId === o.requestId)
-    const out: Entry[] = this.list(s).filter(want).map((message) => ({ message, processed: false }))
+    const out: Entry[] = this.#list(s).filter(want).map((message) => ({ message, processed: false }))
     if (o.includeProcessed) {
       for (const [id] of this.#processed.entries()) {
         const m = this.#kept(s, id)
@@ -159,12 +195,7 @@ export class Inbox {
     return out
   }
 
-  /**
-   * PATCH /v2/messages/processed: all changes or none (G "400 - not updated: No messages
-   * updated"). true confirms (as DELETE; an id confirmed before is accepted again), false
-   * undeletes a processed message that is not archived (a pending one stays as it is).
-   */
-  setProcessed(s: Scope, changes: { id: string; processed: boolean }[]): ProcessedRefusal | undefined {
+  async setProcessed(s: Scope, changes: { id: string; processed: boolean }[]): Promise<ProcessedRefusal | undefined> {
     for (const { id, processed } of changes) {
       if (this.#pending(s, id) || this.#kept(s, id)) continue
       const owner = this.#gone.get(id)

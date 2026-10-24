@@ -12,7 +12,7 @@ import type { Clock } from '../clock.js'
 import type { CustomerKey, Directory } from '../directory.js'
 import { errorsXml } from '../errors.js'
 import { ibanChecksumOk, ibanCountry, isSepaCountry, normalizeIban } from '../iban.js'
-import type { Inbox } from '../inbox.js'
+import type { InboxStore } from '../inbox.js'
 import { JsonBodyError, asObject, parseJsonBody } from '../jsonbody.js'
 import type { VibanRegistry } from '../viban/registry.js'
 import { el, parseXml, toXml } from '../xml.js'
@@ -83,7 +83,7 @@ interface Holder { name: string; category: Category }
 interface Found { holder?: Holder; answer?: string }
 
 export interface PayeeDeps {
-  directory: Directory; viban: VibanRegistry; inbox: Inbox; clock: Clock
+  directory: Directory; viban: VibanRegistry; inbox: InboxStore; clock: Clock
   /** Synchronised agency accounts: LHV answers for them too (decision 836). */
   agency?: () => AgencyStore | undefined
 }
@@ -146,7 +146,7 @@ export class PayeeService {
   // --- EE: XML, PartyNameMatch -------------------------------------------------------
 
   /** POST /verification-of-payee: the answer (or <Errors>) as a VERIFICATION_OF_PAYEE message. */
-  requestEe(body: unknown, customer: CustomerKey, requestId: string) {
+  async requestEe(body: unknown, customer: CustomerKey, requestId: string) {
     const send = (xml: string) => this.deps.inbox.add({ customer, type: VOP_EE, requestId, body: xml })
     const errors = (list: { code: keyof typeof EE_ERR; field?: string }[]) =>
       send(errorsXml(list.map((e) => ({ code: e.code, description: EE_ERR[e.code], field: e.field ? `${FIELD}/${e.field}` : undefined }))))
@@ -189,7 +189,7 @@ export class PayeeService {
   }
 
   /** Parses a UK JSON request; problems are answered in the inbox and give undefined. */
-  #parse(raw: unknown, customer: CustomerKey, type: string, requestId: string, check: (b: Record<string, unknown>) => string[]) {
+  async #parse(raw: unknown, customer: CustomerKey, type: string, requestId: string, check: (b: Record<string, unknown>) => string[]) {
     let problems: string[]
     let b: Record<string, unknown> | undefined
     try {
@@ -200,7 +200,7 @@ export class PayeeService {
       problems = [e.message]
     }
     if (!problems.length) return b
-    this.#json(customer, type, requestId, {
+    await this.#json(customer, type, requestId, {
       OriginalMessageId: requestId, Data: null, Errors: problems.map((m) => ({ ErrorCode: 'INVALID_REQUEST', ErrorMessage: m })),
     })
     return undefined
@@ -224,8 +224,8 @@ export class PayeeService {
   }
 
   /** POST /payment/vop-request: Identification (IBAN) and Name; VERIFICATION_OF_PAYEE (JSON). */
-  requestUk(raw: unknown, customer: CustomerKey, requestId: string) {
-    const b = this.#parse(raw, customer, VOP_EE, requestId, (b) => {
+  async requestUk(raw: unknown, customer: CustomerKey, requestId: string) {
+    const b = await this.#parse(raw, customer, VOP_EE, requestId, (b) => {
       const p: string[] = []
       if (typeof b.Identification !== 'string' || !b.Identification.trim()) p.push('Identification is mandatory')
       else if (!ibanChecksumOk(b.Identification)) p.push('Identification must be a valid IBAN')
@@ -244,8 +244,8 @@ export class PayeeService {
   }
 
   /** POST /payment/cop-request: AccountCategory, Identification (BBAN), Name; CONFIRMATION_OF_PAYEE. */
-  requestCop(raw: unknown, customer: CustomerKey, requestId: string) {
-    const b = this.#parse(raw, customer, COP, requestId, (b) => {
+  async requestCop(raw: unknown, customer: CustomerKey, requestId: string) {
+    const b = await this.#parse(raw, customer, COP, requestId, (b) => {
       const p: string[] = []
       if (b.AccountCategory === undefined || b.AccountCategory === null) p.push('AccountCategory is mandatory')
       else if (!CATEGORIES.includes(b.AccountCategory as Category)) p.push('AccountCategory must be PERSONAL or BUSINESS')

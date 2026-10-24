@@ -6,7 +6,7 @@ import { BoundedMap, type Bounds } from '../bounded.js'
 import type { Clock } from '../clock.js'
 import { keyOf, type Customer, type CustomerKey, type Directory } from '../directory.js'
 import { errorsXml } from '../errors.js'
-import type { Inbox } from '../inbox.js'
+import type { InboxStore } from '../inbox.js'
 import { fromMinor, toMinor } from '../ledger.js'
 import { notificationMsgId } from '../ids.js'
 import { addDays, isDate } from '../statements/camt060.js'
@@ -87,7 +87,7 @@ export function maskPan(pan: string): string {
 /** Six decimals, as the sample's entry and fee amounts (decision 825). */
 const six = (n: bigint) => `${fromMinor(n)}0000`
 
-export interface AcquiringDeps { directory: Directory; inbox: Inbox; clock: Clock }
+export interface AcquiringDeps { directory: Directory; inbox: InboxStore; clock: Clock }
 
 export class Acquiring {
   #merchants = new Map<string, MerchantSetup>()
@@ -154,13 +154,13 @@ export class Acquiring {
   }
 
   /** POST /acq/merchant-report: the report or an error goes to the customer's inbox. */
-  report(xml: string, customer: Customer, requestId: string) {
+  async report(xml: string, customer: Customer, requestId: string) {
     const add = (body: string) => this.d.inbox.add({ customer, type: ACQ_REPORT, requestId, body })
     try {
-      add(this.#report(xml, customer))
+      await add(this.#report(xml, customer))
     } catch (e) {
       const err = e instanceof ReportError ? e : new ReportError(E.technical)
-      add(errorsXml([{ code: err.err[0], description: err.err[1], field: err.field }]))
+      await add(errorsXml([{ code: err.err[0], description: err.err[1], field: err.field }]))
     }
   }
 

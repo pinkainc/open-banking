@@ -23,7 +23,7 @@ import { codePage, fold } from '../cp1257.js'
 import { keyOf, type Customer, type Directory } from '../directory.js'
 import { ibanChecksumOk, ibanCountry, isSepaCountry, normalizeIban } from '../iban.js'
 import { servicerRef } from '../ids.js'
-import type { Inbox } from '../inbox.js'
+import type { InboxStore } from '../inbox.js'
 import { InsufficientFunds, toMinor, type Ledger } from '../ledger.js'
 import type { Rails, Scheme } from '../rails.js'
 import { parseXml, XmlSyntaxError } from '../xml.js'
@@ -164,7 +164,7 @@ export class PaymentEngine {
   #inflight = new Map<string, { customer: string; amount: bigint }>()
   #parked = new Map<string, { kind: ParkedKind; file: FileRef; plan: Plan; status: TxStatus }>()
   constructor(
-    private directory: Directory, private ledger: Ledger, private rails: Rails, private inbox: Inbox,
+    private directory: Directory, private ledger: Ledger, private rails: Rails, private inbox: InboxStore,
     private clock: Clock, private bank: Bank, private opts: EngineOptions = {},
   ) {
     this.#seenMsgIds = new BoundedSet(clock, opts.msgIds ?? DEFAULT_BOUNDS.msgIds)
@@ -257,8 +257,8 @@ export class PaymentEngine {
         for (const b of r.blocks) b.status = aggregate(b.txs.map((t) => t.status))
         r.groupStatus = aggregate(r.blocks.flatMap((b) => b.txs.map((t) => t.status)))
       }
-      this.#report(file.customer, file.requestId, r)
-      for (const s of round) for (const n of s.notices ?? []) this.#notify(n.customer, n.booking)
+      await this.#report(file.customer, file.requestId, r)
+      for (const s of round) for (const n of s.notices ?? []) await this.#notify(n.customer, n.booking)
       const next: Step[] = []
       for (const s of round) {
         const n = s.next && (await s.next())
@@ -579,11 +579,11 @@ export class PaymentEngine {
     return this.#agency(id).find((a) => keyOf(a.agent) === keyOf(customer))
   }
 
-  #report(customer: Customer, requestId: string, r: StatusReport) {
+  async #report(customer: Customer, requestId: string, r: StatusReport) {
     // LHV UK answers for a file whose debtor accounts are all held in the UK (decision 843).
     const blocks = r.blocks.map((b) => b.txs[0]?.block).filter((b): b is Block => !!b)
     const uk = blocks.length > 0 && blocks.every((b) => isUkAccount(this.#ledgerAccount(b, customer)))
-    this.inbox.add({ customer, type: 'PAYMENT', requestId, body: pain002(r, this.bank.bic, this.clock.now(), { uk }) })
+    await this.inbox.add({ customer, type: 'PAYMENT', requestId, body: pain002(r, this.bank.bic, this.clock.now(), { uk }) })
   }
 
   /** The ledger account a block pays from: a VIBAN's or an agency account's master account, else the account. */
@@ -597,11 +597,11 @@ export class PaymentEngine {
     return this.#agencyDebtor(b, customer)?.master ?? id
   }
 
-  #notify(customer: Customer, b: Booking) {
+  async #notify(customer: Customer, b: Booking) {
     if (b.direction === 'DBIT') this.#inflight.delete(b.servicerRef)
     this.opts.onBooking?.(customer, b)
     // Notifications carry no Message-Request-Id.
-    this.inbox.add({ customer, type: 'CREDIT_DEBIT_NOTIFICATION', body: camt054(b, customer.camt054, this.bank) })
+    await this.inbox.add({ customer, type: 'CREDIT_DEBIT_NOTIFICATION', body: camt054(b, customer.camt054, this.bank) })
   }
 
   /** An incoming credit from outside (the simulator's SEPA / SEPA Instant credit). */
@@ -627,7 +627,7 @@ export class PaymentEngine {
     if (!owner) throw new Error(`no account ${iban}`)
     const ref = p.ref ?? servicerRef()
     await this.ledger.transfer({ ref, from: this.rails.settlementAccount(p.scheme), to: account, amount: p.amount, currency: p.currency })
-    this.#notify(owner, {
+    await this.#notify(owner, {
       account, virtual: v ? virtualParty(v) : a && agencyParty(a, iban, p.creditorName), owner: { name: owner.name, code: owner.code }, direction: 'CRDT', amount: p.amount, currency: p.currency,
       servicerRef: ref, scheme: p.scheme, bookedAt: this.clock.now(), endToEndId: p.endToEndId, pmtInfId: p.pmtInfId, instrId: p.instrId,
       counterparty: { name: codePage(p.debtor.name), iban: p.debtor.iban ? normalizeIban(p.debtor.iban) : undefined, account: p.debtor.account, bic: p.debtor.bic },

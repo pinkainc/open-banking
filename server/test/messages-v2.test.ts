@@ -27,7 +27,7 @@ let ctx: Ctx
 beforeEach(async () => { ctx = await setup({}, undefined, { flavour: 'UK' }) })
 
 /** Puts a message in a customer's inbox, one second after the previous one. */
-function put(type = 'PAYMENT', customer: { code: string; country: string } = C1, requestId?: string, body = '<x/>') {
+async function put(type = 'PAYMENT', customer: { code: string; country: string } = C1, requestId?: string, body = '<x/>') {
   ctx.clock.advance(1000)
   return ctx.emulator.inbox.add({ customer, type, body, requestId })
 }
@@ -73,8 +73,8 @@ describe('GET /v2/messages', () => {
   })
 
   test('shape as the G sample: paging fields, UK time with offset, bankCode, no messageProcessed or metadata by default', async () => {
-    const a = put('ACCOUNT_STATEMENT', C1, 'REQ06d2e575a6c94061b7235ca160350680')
-    const b = put('CREDIT_DEBIT_NOTIFICATION')
+    const a = await put('ACCOUNT_STATEMENT', C1, 'REQ06d2e575a6c94061b7235ca160350680')
+    const b = await put('CREDIT_DEBIT_NOTIFICATION')
     const body = await v2()
     assert.deepEqual(body, {
       pageNumber: 1, pageSize: 100, totalPages: 1, totalElements: 2,
@@ -89,12 +89,13 @@ describe('GET /v2/messages', () => {
 
   test('UK summer time: +01:00', async () => {
     ctx.clock.set(new Date('2026-06-24T11:04:02.791Z'))
-    put()
+    await put()
     assert.equal((await v2()).messages[0].messageCreatedTime, '2026-06-24T12:04:03.791+01:00')
   })
 
   test('pages: pageSize and 1-based pageNumber, 204 past the last page', async () => {
-    const ids = [1, 2, 3, 4, 5].map(() => put().id)
+    const ids: string[] = []
+    for (let i = 0; i < 5; i++) ids.push((await put()).id)
     const p1 = await v2('?pageSize=2')
     assert.deepEqual([p1.pageNumber, p1.pageSize, p1.totalPages, p1.totalElements], [1, 2, 3, 5])
     assert.deepEqual(p1.messages.map((m: any) => m.messageResponseId), ids.slice(0, 2))
@@ -106,7 +107,7 @@ describe('GET /v2/messages', () => {
   })
 
   test('pageSize above 1000 is served as 1000; invalid paging and booleans are 400 JSON', async () => {
-    put()
+    await put()
     assert.equal((await v2('?pageSize=5000')).pageSize, 1000)
     for (const q of ['?pageSize=0', '?pageSize=abc', '?pageNumber=0', '?pageNumber=-1', '?includeProcessed=yes', '?includeMetadata=2', '?serviceProvider=maybe']) {
       const r = await call(ctx, { url: `/v2/messages${q}` })
@@ -117,9 +118,9 @@ describe('GET /v2/messages', () => {
   })
 
   test('responseType and messageRequestId filters', async () => {
-    const a = put('PAYMENT', C1, 'REQa')
-    put('PAYMENT', C1, 'REQb')
-    put('ACCOUNT_BALANCE', C1, 'REQa')
+    const a = await put('PAYMENT', C1, 'REQa')
+    await put('PAYMENT', C1, 'REQb')
+    await put('ACCOUNT_BALANCE', C1, 'REQa')
     assert.deepEqual((await v2('?responseType=ACCOUNT_BALANCE')).messages.map((m: any) => m.messageResponseType), ['ACCOUNT_BALANCE'])
     assert.deepEqual((await v2('?messageRequestId=REQa&responseType=PAYMENT')).messages.map((m: any) => m.messageResponseId), [a.id])
     assert.equal((await v2('?messageRequestId=REQa')).totalElements, 2)
@@ -127,9 +128,9 @@ describe('GET /v2/messages', () => {
   })
 
   test('service provider: own value lists its customers too; serviceProvider=true only its own; Client-Code one customer', async () => {
-    const own = put('PAYMENT', SP)
-    const c1 = put('PAYMENT', C1)
-    const c2 = put('PAYMENT', C2)
+    const own = await put('PAYMENT', SP)
+    const c1 = await put('PAYMENT', C1)
+    const c2 = await put('PAYMENT', C2)
     const ids = async (q: string, h: Record<string, string>) => ((await v2(q, SP.code, h))?.messages ?? []).map((m: any) => m.messageResponseId)
     assert.deepEqual(await ids('', SP_OWN), [own.id, c1.id, c2.id])
     assert.deepEqual(await ids('?serviceProvider=true', SP_OWN), [own.id])
@@ -143,8 +144,8 @@ describe('GET /v2/messages', () => {
 
 describe('v1 and v2 share one inbox (decision 620)', () => {
   test('includeProcessed: a v1 DELETE is messageProcessed=true in v2, in creation order', async () => {
-    const a = put()
-    const b = put()
+    const a = await put()
+    const b = await put()
     assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${a.id}` })).statusCode, 200)
     assert.deepEqual((await v2()).messages.map((m: any) => m.messageResponseId), [b.id])
     const all = await v2('?includeProcessed=true')
@@ -154,8 +155,8 @@ describe('v1 and v2 share one inbox (decision 620)', () => {
   })
 
   test('PATCH true deletes as v1 DELETE does: v1 no longer serves it, a repeat DELETE is 200', async () => {
-    const a = put()
-    const b = put()
+    const a = await put()
+    const b = await put()
     const r = await mark(true, a.id)
     assert.equal(r.statusCode, 204)
     assert.equal(r.body, '')
@@ -168,8 +169,8 @@ describe('v1 and v2 share one inbox (decision 620)', () => {
   })
 
   test('PATCH false undeletes a message deleted with v1: next serves it again, in its old place', async () => {
-    const a = put()
-    const b = put()
+    const a = await put()
+    const b = await put()
     await call(ctx, { method: 'DELETE', url: `/messages/${a.id}` })
     assert.equal(await nextId(), b.id)
     assert.equal((await mark(false, a.id)).statusCode, 204)
@@ -194,7 +195,7 @@ describe('v1 and v2 share one inbox (decision 620)', () => {
     const err = gBlocks('mark-batch-of-messages-as-processed-1.md').find((b) => b.includes('"errors"'))
     if (err) assert.deepEqual(Object.keys(JSON.parse(err).errors[0]), ['errorCode', 'description'])
     // The sample with our own ids: 204, all three processed.
-    const ids = [put().id, put().id, put().id]
+    const ids = [(await await put()).id, (await await put()).id, (await await put()).id]
     const own = JSON.parse(blocks[1] ?? '{"messages":[{},{},{}]}')
     own.messages.forEach((m: any, i: number) => { m.messageResponseId = ids[i]; m.messageProcessed = true })
     assert.equal((await patch(JSON.stringify(own, null, '\t'))).statusCode, 204)
@@ -202,7 +203,7 @@ describe('v1 and v2 share one inbox (decision 620)', () => {
   })
 
   test('all or nothing: one unknown id among valid ones changes none', async () => {
-    const a = put()
+    const a = await put()
     const r = await patch({ messages: [{ messageResponseId: a.id, messageProcessed: true }, { messageResponseId: 'RESnope', messageProcessed: true }] })
     assert.equal(r.statusCode, 400)
     assert.deepEqual(JSON.parse(r.body), BAD('Invalid Message-Request-Id: RESnope'))
@@ -210,7 +211,7 @@ describe('v1 and v2 share one inbox (decision 620)', () => {
   })
 
   test("another customer's message is unknown", async () => {
-    const a = put('PAYMENT', C2)
+    const a = await put('PAYMENT', C2)
     assert.equal((await mark(true, a.id)).statusCode, 400)
     assert.equal(await nextId(C2.code), a.id)
   })
@@ -237,7 +238,7 @@ describe('v1 and v2 share one inbox (decision 620)', () => {
   })
 
   test('a week after creation a processed message is archived: no undelete, no longer listed', async () => {
-    const a = put()
+    const a = await put()
     ctx.clock.advance(3 * DAY_MS)
     await mark(true, a.id)
     ctx.clock.advance(4 * DAY_MS - 1)
@@ -252,7 +253,7 @@ describe('v1 and v2 share one inbox (decision 620)', () => {
   })
 
   test('an undeleted message has five days again from the undelete', async () => {
-    const a = put()
+    const a = await put()
     ctx.clock.advance(4 * DAY_MS)
     await mark(true, a.id)
     ctx.clock.advance(2 * DAY_MS)
@@ -264,7 +265,7 @@ describe('v1 and v2 share one inbox (decision 620)', () => {
   })
 
   test('expired unread messages are not listed as processed', async () => {
-    put()
+    await put()
     ctx.clock.advance(5 * DAY_MS + 1)
     assert.equal(await v2('?includeProcessed=true'), undefined)
   })
@@ -414,7 +415,7 @@ describe('GET /v2/requests and /v2/requests/{id} (decisions 630–632)', () => {
   test('the answer to EE VoP on the UK host is LHV EE\'s: not in /v2/messages, still read with v1 (decision 607)', async () => {
     const r = await call(ctx, { method: 'POST', url: '/verification-of-payee', body: '<VerificationOfPayeeRequest/>' })
     assert.equal(r.headers['x-bank-code'], 'LHVEE')
-    put('PAYMENT')
+    await put('PAYMENT')
     assert.deepEqual((await v2()).messages.map((m: any) => m.messageResponseType), ['PAYMENT'])
     assert.equal((await call(ctx, { url: '/messages/count' })).body, '{"count":2}')
   })
@@ -462,8 +463,8 @@ describe('GET /v2/requests and /v2/requests/{id} (decisions 630–632)', () => {
 
 describe('GET /messages/test/next without mockLargeMessage (G get-next-message-1)', () => {
   test('it is GET /messages/next: the oldest pending message with its headers, not consumed', async () => {
-    const a = put('PAYMENT', C1, 'REQt', '<a/>')
-    put('PAYMENT', C1, undefined, '<b/>')
+    const a = await put('PAYMENT', C1, 'REQt', '<a/>')
+    await put('PAYMENT', C1, undefined, '<b/>')
     for (const q of ['', '?mockLargeMessage=false']) {
       const r = await call(ctx, { url: `/messages/test/next${q}` })
       assert.equal(r.statusCode, 200)
@@ -483,12 +484,12 @@ describe('GET /messages/test/next without mockLargeMessage (G get-next-message-1
 
 describe('UK host v1 list time (decision 627)', () => {
   test('GET /messages on the UK host: ISO-8601 with the UK offset; EE host unchanged', async () => {
-    put()
+    await put()
     const r = jsonValid('messages-list.response', (await call(ctx, { url: '/messages' })).body)
     assert.equal(r.messages[0].messageCreatedTime, '2026-03-10T08:00:01.000+00:00')
     const ee = await setup()
     ee.clock.advance(1000)
-    ee.emulator.inbox.add({ customer: C1, type: 'PAYMENT', body: '<x/>' })
+    await ee.emulator.inbox.add({ customer: C1, type: 'PAYMENT', body: '<x/>' })
     assert.equal(JSON.parse((await call(ee, { url: '/messages' })).body).messages[0].messageCreatedTime, '2026-03-10 10:00:01:000')
   })
 })

@@ -15,7 +15,7 @@ export function registerPayee(app: FastifyInstance, emulator: Emulator, caller: 
   app.post('/verification-of-payee', async (req, reply) => {
     const c = caller(req)
     const id = requestId()
-    emulator.payee.requestEe(req.body, c.customer, id)
+    await emulator.payee.requestEe(req.body, c.customer, id)
     // On the UK host the request is answered by LHV EE (decision 607).
     if (flavour === 'UK') reply.header('X-Bank-Code', 'LHVEE')
     return accepted(emulator.requests, req, reply, c, id, VOP_EE)
@@ -26,13 +26,13 @@ export function registerPayee(app: FastifyInstance, emulator: Emulator, caller: 
       scope.post('/payment/vop-request', async (req, reply) => {
         const c = caller(req)
         const id = requestId()
-        emulator.payee.requestUk(req.body, c.customer, id)
+        await emulator.payee.requestUk(req.body, c.customer, id)
         return accepted(emulator.requests, req, reply, c, id, VOP_EE)
       })
       scope.post('/payment/cop-request', async (req, reply) => {
         const c = caller(req)
         const id = requestId()
-        emulator.payee.requestCop(req.body, c.customer, id)
+        await emulator.payee.requestCop(req.body, c.customer, id)
         return accepted(emulator.requests, req, reply, c, id, COP)
       })
     })

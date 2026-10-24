@@ -15,7 +15,7 @@ export function registerAcquiring(app: FastifyInstance, emulator: Emulator, call
   app.post('/acq/merchant-report', async (req, reply) => {
     const c = caller(req)
     const id = requestId()
-    emulator.acquiring.report(typeof req.body === 'string' ? req.body : '', c.customer, id)
+    await emulator.acquiring.report(typeof req.body === 'string' ? req.body : '', c.customer, id)
     return accepted(emulator.requests, req, reply, c, id, ACQ_REPORT)
   })
 }

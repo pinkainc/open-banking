@@ -68,7 +68,7 @@ const sub = (messageType: string, extra: Record<string, unknown> = {}, who: Who 
 
 /** A message of C1 (or another customer), then the deliveries it caused. */
 async function message(type = 'VIBAN_OPEN', customer = { code: C1.code, country: C1.country }, body = '<VibanOpenResponse/>') {
-  const m = ctx.emulator.inbox.add({ customer, type, body, requestId: 'REQ0123456789abcdef0123456789abcdef' })
+  const m = await ctx.emulator.inbox.add({ customer, type, body, requestId: 'REQ0123456789abcdef0123456789abcdef' })
   await hooks().idle()
   return m
 }
@@ -312,7 +312,7 @@ describe('delivery', () => {
 
   test('a notification without a request: messageRequestId left out', async () => {
     await sub('CREDIT_DEBIT_NOTIFICATION')
-    ctx.emulator.inbox.add({ customer: { code: C1.code, country: 'EE' }, type: 'CREDIT_DEBIT_NOTIFICATION', body: '<Document/>' })
+    await ctx.emulator.inbox.add({ customer: { code: C1.code, country: 'EE' }, type: 'CREDIT_DEBIT_NOTIFICATION', body: '<Document/>' })
     await hooks().idle()
     const p = delivered()
     assert.ok(!('messageRequestId' in p))

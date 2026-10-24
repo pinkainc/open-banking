@@ -27,7 +27,7 @@ export function registerAgency(app: FastifyInstance, emulator: Emulator, caller:
     const id = requestId()
     // BankCodes only count on the UK host, and not for a request handed to LHV EE (decision 804).
     const ukHost = flavour === 'UK' && bankFor(req, flavour, hostBank) === 'LHVUK'
-    emulator.agency.sync.syncXml(req.body, a, id, ukHost)
+    await emulator.agency.sync.syncXml(req.body, a, id, ukHost)
     return accepted(emulator.requests, req, reply, c, id, AGENT_ACCOUNT_SYNC)
   })
   if (flavour !== 'UK') return
@@ -36,7 +36,7 @@ export function registerAgency(app: FastifyInstance, emulator: Emulator, caller:
       const c = caller(req)
       const a = agent(c)
       const id = requestId()
-      emulator.agency.sync.syncJson(req.body, a, id)
+      await emulator.agency.sync.syncJson(req.body, a, id)
       return accepted(emulator.requests, req, reply, c, id, AGENT_ACCOUNT_SYNC)
     })
   })
@@ -99,7 +99,7 @@ export function agencySimRoutes(emulator: Emulator, flavour: Flavour) {
     app.post('/vop-incoming', async (req) => {
       const b = body(req)
       const iban = str(b.iban, 'iban', true)!.replace(/\s+/g, '').toUpperCase()
-      const r = emulator.agency.responder.vop({
+      const r = await emulator.agency.responder.vop({
         iban, name: str(b.name, 'name', true)!, bic: str(b.bic, 'bic'), requesterBic: str(b.requesterBic, 'requesterBic'),
       })
       return notified(r, { response: r.body })
@@ -115,7 +115,7 @@ export function agencySimRoutes(emulator: Emulator, flavour: Flavour) {
         if (!/^[0-9]{8}$/.test(accountNumber)) throw bad('accountNumber must be 8 digits')
         const classification = b.accountClassification ?? 'PERSONAL'
         if (classification !== 'PERSONAL' && classification !== 'BUSINESS') throw bad('accountClassification must be PERSONAL or BUSINESS')
-        const r = emulator.agency.responder.cop({
+        const r = await emulator.agency.responder.cop({
           sortCode, accountNumber, name: str(b.name, 'name', true)!, classification,
           secondaryIdentification: str(b.secondaryIdentification, 'secondaryIdentification'), requesterBankName: str(b.requesterBankName, 'requesterBankName'),
         })
@@ -143,7 +143,7 @@ export function agencySimRoutes(emulator: Emulator, flavour: Flavour) {
         who = { code: k.code, country: k.country }
       }
       try {
-        const sent = emulator.agency.rtf.deliver({ scheme: b.scheme as RtfScheme, content, customer: who })
+        const sent = await emulator.agency.rtf.deliver({ scheme: b.scheme as RtfScheme, content, customer: who })
         return reply.code(201).send({
           messages: sent.map((m) => ({ messageResponseId: m.id, code: m.clientCode, country: m.clientCountry, contentType: m.contentType, bytes: Buffer.byteLength(m.body) })),
         })

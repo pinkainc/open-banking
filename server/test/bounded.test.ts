@@ -52,7 +52,7 @@ describe('inbox tombstones', () => {
   const confirmed = async (n: number, opts = {}) => {
     const ctx = await setup(opts)
     const ids: string[] = []
-    for (let i = 0; i < n; i++) ids.push(ctx.emulator.inbox.add({ customer: C1, type: 'HEARTBEAT', body: '<x/>' }).id)
+    for (let i = 0; i < n; i++) ids.push((await ctx.emulator.inbox.add({ customer: C1, type: 'HEARTBEAT', body: '<x/>' })).id)
     for (const id of ids) assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${id}` })).statusCode, 200)
     return { ctx, ids }
   }
@@ -67,7 +67,7 @@ describe('inbox tombstones', () => {
 
   test('confirmed late, the tombstone answers 200 for five days after the confirmation', async () => {
     const ctx = await setup()
-    const id = ctx.emulator.inbox.add({ customer: C1, type: 'HEARTBEAT', body: '<x/>' }).id
+    const id = (await ctx.emulator.inbox.add({ customer: C1, type: 'HEARTBEAT', body: '<x/>' })).id
     ctx.clock.advance(4 * DAY_MS)
     assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${id}` })).statusCode, 200)
     ctx.clock.advance(5 * DAY_MS - 1)
@@ -78,21 +78,21 @@ describe('inbox tombstones', () => {
 
   test('purge drops expired tombstones and archived processed messages too', async () => {
     const { ctx } = await confirmed(3)
-    assert.equal(ctx.emulator.inbox.tombstones, 3)
-    assert.equal(ctx.emulator.inbox.processedKept, 3)
+    assert.equal(await ctx.emulator.inbox.tombstones(), 3)
+    assert.equal(await ctx.emulator.inbox.processedKept(), 3)
     ctx.clock.advance(5 * DAY_MS)
-    ctx.emulator.inbox.purge()
-    assert.equal(ctx.emulator.inbox.tombstones, 0)
-    assert.equal(ctx.emulator.inbox.processedKept, 3)
+    await ctx.emulator.inbox.purge()
+    assert.equal(await ctx.emulator.inbox.tombstones(), 0)
+    assert.equal(await ctx.emulator.inbox.processedKept(), 3)
     ctx.clock.advance(2 * DAY_MS)
-    ctx.emulator.inbox.purge()
-    assert.equal(ctx.emulator.inbox.processedKept, 0)
+    await ctx.emulator.inbox.purge()
+    assert.equal(await ctx.emulator.inbox.processedKept(), 0)
   })
 
   test('beyond the cap the oldest tombstone is forgotten', async () => {
     const { ctx, ids } = await confirmed(3, { memory: { tombstones: { max: 2 }, processed: { max: 2 } } })
-    assert.equal(ctx.emulator.inbox.tombstones, 2)
-    assert.equal(ctx.emulator.inbox.processedKept, 2)
+    assert.equal(await ctx.emulator.inbox.tombstones(), 2)
+    assert.equal(await ctx.emulator.inbox.processedKept(), 2)
     assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${ids[0]}` })).statusCode, 404)
     assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${ids[2]}` })).statusCode, 200)
   })

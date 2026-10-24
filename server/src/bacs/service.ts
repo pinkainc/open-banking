@@ -12,7 +12,7 @@ import { DAY_MS, type Clock } from '../clock.js'
 import { keyOf, type Customer, type Directory } from '../directory.js'
 import { normalizeIban } from '../iban.js'
 import { notificationMsgId, servicerRef } from '../ids.js'
-import type { Inbox } from '../inbox.js'
+import type { InboxStore } from '../inbox.js'
 import { InsufficientFunds, type Ledger } from '../ledger.js'
 import { camt054, type Booking } from '../payments/camt054.js'
 import type { Bank, IncomingEvent } from '../payments/engine.js'
@@ -137,7 +137,7 @@ export interface BacsDeps {
   directory: Directory
   ledger: Ledger
   rails: Rails
-  inbox: Inbox
+  inbox: InboxStore
   clock: Clock
   bank: Bank
   virtual: VirtualAccounts
@@ -187,7 +187,7 @@ export class BacsService {
   // --- The scheme (control plane) --------------------------------------------------------
 
   /** An incoming Bacs credit: BACS_INCOMING now (day 2), booked on the entry day (decision 742). */
-  incoming(x: { iban: string; amount: bigint; debtor: Party; reference?: string; numericReference?: string; serviceUserNumber?: string }): IncomingCredit {
+  async incoming(x: { iban: string; amount: bigint; debtor: Party; reference?: string; numericReference?: string; serviceUserNumber?: string }): Promise<IncomingCredit> {
     const own = this.#own(x.iban)
     const { processing, entry } = cycle(this.d.clock.now())
     const c: IncomingCredit = {
@@ -198,7 +198,7 @@ export class BacsService {
     this.#credits.set(c.ref, c)
     // Pending in /accounts/{acc}/payments until booked; the debtor is named by sort code + account number.
     this.d.onIncoming?.({ ref: c.ref, status: 'Pending', account: c.iban, master: c.master, amount: c.amount, currency: 'GBP', debtor: { name: x.debtor.name, iban: `${x.debtor.sortCode}${x.debtor.accountNumber}` } })
-    this.d.inbox.add({
+    await this.d.inbox.add({
       customer: own.customer, type: BACS_TYPES.incoming, contentType: 'application/json',
       body: bacsIncoming({
         beneficiary: own.party, debtor: x.debtor, amount: x.amount, serviceUserNumber: x.serviceUserNumber, numericReference: x.numericReference,
@@ -210,7 +210,7 @@ export class BacsService {
   }
 
   /** A new mandate from a Service User for an account here: pain.009 to the account owner. */
-  newMandate(x: { debtorIban: string; creditor: Party; serviceUserNumber: string; reference?: string }): Mandate {
+  async newMandate(x: { debtorIban: string; creditor: Party; serviceUserNumber: string; reference?: string }): Promise<Mandate> {
     const own = this.#own(x.debtorIban)
     if (own.iban !== own.master) throw new BacsError(400, 'Direct Debit mandates are held on the account itself, not on a VIBAN')
     const { processing, entry } = cycle(this.d.clock.now())
@@ -220,7 +220,7 @@ export class BacsService {
       processingDate: processing, entryDate: entry, createdAt: this.d.clock.now(), collections: 0,
     }
     this.mandates.set(m.id, m)
-    this.d.inbox.add({ customer: own.customer, type: BACS_TYPES.mandateInitiation, body: pain009({ ...m, mandateId: m.id }, this.d.clock.now()) })
+    await this.d.inbox.add({ customer: own.customer, type: BACS_TYPES.mandateInitiation, body: pain009({ ...m, mandateId: m.id }, this.d.clock.now()) })
     return m
   }
 
@@ -231,7 +231,7 @@ export class BacsService {
     if (!m) throw new BacsError(404, `no mandate ${id}`)
     if (m.status !== 'ACTIVE') throw new BacsError(409, `the mandate is ${m.status}; only an active mandate can be cancelled`)
     this.#close(m, 'SCHEME', 'MD17')
-    this.d.inbox.add({
+    await this.d.inbox.add({
       customer: m.customer, type: BACS_TYPES.schemeCancel, contentType: 'application/json',
       body: schemeCancel({ creditor: m.creditor, debtor: m.debtor, mandateId: m.id, reference: m.reference, serviceUserNumber: m.serviceUserNumber, reason, closed: dateLondon(this.d.clock.now()) }),
     })
@@ -252,7 +252,7 @@ export class BacsService {
     }
     m.collections++
     this.#collections.set(c.id, c)
-    this.d.inbox.add({
+    await this.d.inbox.add({
       customer: m.customer, type: BACS_TYPES.collection,
       body: pain008({ msgId: c.msgId, pmtInfId: c.id, endToEndId: c.endToEndId, amount: c.amount, seqTp: c.seqTp, collectionDate: entry, creditor: m.creditor, debtor: m.debtor, reference: c.reference }, this.d.clock.now()),
     })
@@ -279,7 +279,7 @@ export class BacsService {
     c.reversal = { msgId: notificationMsgId(), pmtInfId: servicerRef(), code, at: this.d.clock.now() }
     if (c.debit === 'PENDING') c.debit = 'CANCELLED'
     else c.refund = { kind: 'REVERSAL', code, text, ref: servicerRef(), due: londonInstant(nextBacsDay(today), CUTOFF.refunds) }
-    this.d.inbox.add({
+    await this.d.inbox.add({
       customer: c.mandate.customer, type: BACS_TYPES.reversal,
       body: pain007({ msgId: c.reversal.msgId, originalMsgId: c.msgId, originalCreatedAt: c.createdAt, reversalPmtInfId: c.reversal.pmtInfId, pmtInfId: c.id, amount: c.amount, code, text }, this.d.clock.now()),
     })
@@ -316,7 +316,7 @@ export class BacsService {
       if (reject) { m.status = 'RETURNED'; m.reason = u.reason; m.closedAt = now; m.closedBy = 'DEBTOR' } else { m.status = 'ACCEPTED'; m.acceptedAt = now }
       items.push({ id, confirmed: true })
     }
-    this.d.inbox.add({ customer, type: BACS_TYPES.mandateConfirm, requestId, contentType: 'application/json', body: mandateConfirm(r.msgId, items) })
+    await this.d.inbox.add({ customer, type: BACS_TYPES.mandateConfirm, requestId, contentType: 'application/json', body: mandateConfirm(r.msgId, items) })
   }
 
   /** POST /direct-debit/bacs-mandate-cancel: pain.011 in, LHV's pain.012 (DIRECT_DEBIT_MANDATE_CANCEL) out. */
@@ -337,7 +337,7 @@ export class BacsService {
       this.#close(m, 'DEBTOR', u.reason)
       return { mandateId: m.id, accepted: true }
     })
-    this.d.inbox.add({ customer, type: BACS_TYPES.mandateCancel, requestId, body: pain012Cancel(notificationMsgId(), r.msgId, results, this.d.clock.now()) })
+    await this.d.inbox.add({ customer, type: BACS_TYPES.mandateCancel, requestId, body: pain012Cancel(notificationMsgId(), r.msgId, results, this.d.clock.now()) })
   }
 
   /** POST /direct-debit/bacs-collection-reject: pain.002 in, DIRECT_DEBIT_COLLECTION_CONFIRMATION out. */
@@ -375,7 +375,7 @@ export class BacsService {
       } else c.status = 'ACCEPTED'
       return { id, confirmed: true }
     })
-    this.d.inbox.add({ customer, type: BACS_TYPES.collectionConfirm, requestId, contentType: 'application/json', body: collectionConfirm(r.msgId, r.originalMsgId, items) })
+    await this.d.inbox.add({ customer, type: BACS_TYPES.collectionConfirm, requestId, contentType: 'application/json', body: collectionConfirm(r.msgId, r.originalMsgId, items) })
   }
 
   #close(m: Mandate, by: 'DEBTOR' | 'SCHEME', reason: string) {
@@ -434,7 +434,7 @@ export class BacsService {
     }
     c.debit = 'BOOKED'
     c.debitedAt = this.d.clock.now()
-    this.#notify(m.customer, this.#booking(c, 'DBIT', c.id))
+    await this.#notify(m.customer, this.#booking(c, 'DBIT', c.id))
     return true
   }
 
@@ -444,7 +444,7 @@ export class BacsService {
     f.bookedAt = this.d.clock.now()
     // A return (UPDD) or a reversal (PRDD) of the direct debit, with the reason as RtrInf.
     const b = this.#booking(c, 'CRDT', f.ref)
-    this.#notify(c.mandate.customer, { ...b, bankTxCode: { family: 'RDDT', subFamily: f.kind === 'RETURN' ? 'UPDD' : 'PRDD' }, returnInfo: { code: f.code, additional: [f.text] } })
+    await this.#notify(c.mandate.customer, { ...b, bankTxCode: { family: 'RDDT', subFamily: f.kind === 'RETURN' ? 'UPDD' : 'PRDD' }, returnInfo: { code: f.code, additional: [f.text] } })
   }
 
   #booking(c: BacsCollection, direction: 'DBIT' | 'CRDT', ref: string): Booking {
@@ -459,9 +459,9 @@ export class BacsService {
     }
   }
 
-  #notify(customer: Customer, b: Booking) {
+  async #notify(customer: Customer, b: Booking) {
     this.d.onBooking?.(customer, b)
-    this.d.inbox.add({ customer, type: 'CREDIT_DEBIT_NOTIFICATION', body: camt054(b, customer.camt054, this.d.bank) })
+    await this.d.inbox.add({ customer, type: 'CREDIT_DEBIT_NOTIFICATION', body: camt054(b, customer.camt054, this.d.bank) })
   }
 }
 

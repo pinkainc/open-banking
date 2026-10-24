@@ -13,7 +13,7 @@
 import type { Clock } from '../clock.js'
 import { keyOf, type CustomerKey, type Directory } from '../directory.js'
 import { normalizeIban } from '../iban.js'
-import type { Inbox } from '../inbox.js'
+import type { InboxStore } from '../inbox.js'
 import { dateTallinn } from '../time.js'
 import { parseXml } from '../xml.js'
 import { isCountry } from './countries.js'
@@ -66,7 +66,7 @@ export class VibanService {
   /** The next requests answered TECHNICAL_ERROR (simulator fault injection). */
   faults = 0
 
-  constructor(private directory: Directory, private inbox: Inbox, private clock: Clock, private opts: VibanOptions = {}) {
+  constructor(private directory: Directory, private inbox: InboxStore, private clock: Clock, private opts: VibanOptions = {}) {
     this.registry = new VibanRegistry(opts.range ?? DEFAULT_RANGE, (iban) => !!directory.ownerOf(iban))
     this.errorDelivery = opts.errors ?? 'inbox'
   }
@@ -176,12 +176,12 @@ export class VibanService {
    * closure), notified to the master account owner with VIBAN_STATUS_NOTIFICATION.
    * Returns an explanation when the change is not one the bank makes from this status.
    */
-  bankStatus(iban: string, status: VibanStatus): string | undefined {
+  async bankStatus(iban: string, status: VibanStatus): Promise<string | undefined> {
     const v = this.registry.get(iban)
     if (!v) return `no VIBAN ${normalizeIban(iban)}`
     if (!BANK_TRANSITIONS[v.status].includes(status)) return `${v.status} cannot become ${status}`
     this.registry.setStatus(v, status, this.clock.now())
-    this.inbox.add({ customer: v.owner, type: STATUS_NOTIFICATION, body: statusNotification(v) })
+    await this.inbox.add({ customer: v.owner, type: STATUS_NOTIFICATION, body: statusNotification(v) })
     return undefined
   }
 }

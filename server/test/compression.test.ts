@@ -28,7 +28,7 @@ describe('compression on the UK host', () => {
   test('the default threshold is 10 MB (decimal)', () => assert.equal(COMPRESSION_THRESHOLD, 10_000_000))
 
   test('at 10 MB: gzip or deflate as asked, with the message headers', async () => {
-    const m = big(ctx, COMPRESSION_THRESHOLD)
+    const m = await big(ctx, COMPRESSION_THRESHOLD)
     const gz = await call(ctx, { url: '/messages/next', headers: { 'Accept-Encoding': 'gzip, deflate' } })
     assert.equal(gz.statusCode, 200)
     assert.equal(gz.headers['content-encoding'], 'gzip')
@@ -43,7 +43,7 @@ describe('compression on the UK host', () => {
   })
 
   test('at 10 MB without a supported Accept-Encoding: 500, and the message stays', async () => {
-    const m = big(ctx, COMPRESSION_THRESHOLD)
+    const m = await big(ctx, COMPRESSION_THRESHOLD)
     for (const headers of [{}, { 'Accept-Encoding': 'br' }, { 'Accept-Encoding': 'identity' }] as Record<string, string>[]) {
       for (const url of ['/messages/next', `/messages/${m.id}`]) {
         const r = await call(ctx, { url, headers })
@@ -58,7 +58,7 @@ describe('compression on the UK host', () => {
   })
 
   test('one byte under 10 MB: never compressed, also when asked', async () => {
-    const m = big(ctx, COMPRESSION_THRESHOLD - 1)
+    const m = await big(ctx, COMPRESSION_THRESHOLD - 1)
     for (const headers of [{}, { 'Accept-Encoding': 'gzip' }] as Record<string, string>[]) {
       const r = await call(ctx, { url: '/messages/next', headers })
       assert.equal(r.statusCode, 200)
@@ -89,7 +89,7 @@ describe('compression on the UK host', () => {
 describe('no compression on the EE host', () => {
   test('a 10 MB message is sent plain, whatever the request accepts; no test endpoint', async () => {
     const ctx = await setup()
-    const m = big(ctx, COMPRESSION_THRESHOLD)
+    const m = await big(ctx, COMPRESSION_THRESHOLD)
     for (const headers of [{}, { 'Accept-Encoding': 'gzip' }] as Record<string, string>[]) {
       const r = await call(ctx, { url: '/messages/next', headers })
       assert.equal(r.statusCode, 200)
