@@ -35,6 +35,8 @@ import { isTarget2Day } from '../directdebit/target2.js'
 import { asObject, JsonBodyError, parseJsonBody } from '../jsonbody.js'
 import { convert, Pricing, type PricingState } from './pricing.js'
 
+/** The answer the settlement has sent already (decision 999). */
+const SENT: object = Object.freeze({})
 export const FX_TYPES = { offer: 'FX_TRADE_OFFER', confirmation: 'FX_TRADE_OFFER_CONFIRMATION' } as const
 /** The bank's FX position: both legs of every deal are booked against it. */
 export const FX_POSITION = '@fx:position'
@@ -365,9 +367,13 @@ export class FxService {
 
   /** POST /fx/trade-offer-confirmation: always answered in the inbox. */
   confirm(raw: unknown, customer: Customer, requestId: string): Promise<void> {
-    return this.#serial(async () => { await this.#send(customer, FX_TYPES.confirmation, requestId, await this.#confirm(raw, customer, requestId)) })
+    return this.#serial(async () => {
+      const answer = await this.#confirm(raw, customer, requestId)
+      if (answer !== SENT) await this.#send(customer, FX_TYPES.confirmation, requestId, answer)
+    })
   }
 
+  /** The answer; SENT when the settlement sent it (TODAY, through the outbox, decision 999). */
   async #confirm(raw: unknown, customer: Customer, requestId: string): Promise<object> {
     let parsed: unknown
     try { parsed = parseJsonBody(raw) } catch (e) {
@@ -416,7 +422,7 @@ export class FxService {
     await this.#save(o)
     // TODAY: "settlement is executed in seconds after the confirmation request" — here at once,
     // so the one confirmation message is already COMPLETED (decision 401).
-    if (o.tenor === 'TODAY') await this.#settle(o)
+    if (o.tenor === 'TODAY') { await this.#settle(o); return SENT }
     return this.dealView(o)
   }
 
@@ -436,6 +442,10 @@ export class FxService {
     // Each leg's camt.054 goes with its booking (decision 990), delivered once the deal is saved COMPLETED.
     const debit = [this.d.outbox.notice(c, leg('DBIT', o.amountFrom!, o.currencyFrom, servicerRef()))]
     const credit = [this.d.outbox.notice(c, leg('CRDT', o.amountTo!, o.currencyTo, creditRef))]
+    // The confirmation COMPLETED goes with the last leg (decision 999), to the confirmation
+    // request (TODAY: its answer; SPOT: the second one, decision 402).
+    const done: Offer = { ...o, deal: { ...d, status: 'COMPLETED', settledAt: now } }
+    credit.push(this.d.outbox.message({ customer: c, type: FX_TYPES.confirmation, requestId: d.confirmRequestId, body: JSON.stringify(this.dealView(done)), contentType: 'application/json' }))
     // Keyed by the reservation (decision 995): a crash after either leg and before the save
     // settles the deal again on the next tick, which books each leg once.
     const legs = [await this.d.ledger.commit(d.reservation!, FX_POSITION, debit),
@@ -461,8 +471,7 @@ export class FxService {
       if (!due(s)) continue
       const settled = await this.#claimed(key, async (o) => {
         if (!due(o)) return false
-        await this.#settle(o)
-        await this.#send(o.customer, FX_TYPES.confirmation, o.deal!.confirmRequestId, this.dealView(o))
+        await this.#settle(o) // its confirmation through the outbox
         return true
       })
       if (settled) n++

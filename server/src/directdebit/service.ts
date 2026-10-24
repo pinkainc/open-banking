@@ -16,6 +16,7 @@
 // it every minute, tests and /_sim/direct-debit/settle call it directly). They are kept in
 // the emulator's keyed store (decision 975), so a restart before the settlement day still
 // settles them, once (a claim per collection, decision 976).
+import { randomUUID } from 'node:crypto'
 import { DEFAULT_BOUNDS, type Bounds } from '../bounded.js'
 import { memoryKeyed, UNBOUNDED, type KeyedFactory, type KeyedStore } from '../keyed.js'
 import type { Clock } from '../clock.js'
@@ -27,7 +28,7 @@ import type { InboxStore } from '../inbox.js'
 import { InsufficientFunds, toMinor, type Ledger } from '../ledger.js'
 import type { Bank } from '../payments/engine.js'
 import type { Booking } from '../payments/camt054.js'
-import type { Outbox } from '../outbox.js'
+import type { Outbox, OutboxItem } from '../outbox.js'
 import { decimalEq, decimalSum } from '../payments/pain001.js'
 import type { XsdValidator } from '../payments/xsd.js'
 import type { Rails } from '../rails.js'
@@ -42,6 +43,10 @@ import {
   creditorIdOk, isoMessage, PAIN007, PAIN008, readPain007, readPain008, structuralProblem, type CollectionFile, type DdBlock, type DdTx,
 } from './pain008.js'
 import { EARLIEST_DAYS, REFUND_DAYS, refusalCutoff, settlementAt, settlementDate, submissionCutoff } from './target2.js'
+
+const REPORT_KIND = 'dd-report'
+/** A creditor status report entry in the outbox (decision 999): the status without its collection, read again by id. */
+interface ReportPayload { group: string; customer: CustomerKey; requestId?: string; msgId: string; id: string; status: Omit<DdStatus, 'collection'> }
 
 export const DD_TYPES = {
   /** pain.002 about the creditor's collections (P 02 type list; docs/decisions.md 300). */
@@ -154,6 +159,36 @@ export class DirectDebitService {
     this.#seenRefusals = keyed('dd-refusal-msgids', d.msgIds ?? DEFAULT_BOUNDS.msgIds)
     this.#collections = keyed('dd-collections', UNBOUNDED)
     this.#claims = keyed('dd-claims', { ttlMs: CLAIM_MS, max: 100_000 })
+    // The creditor's status report of a tick (decision 999): one pain.002 per file and tick,
+    // its ACSC entries kept with each collection's booking; recovered as the group it was.
+    d.outbox.onGroup(REPORT_KIND, (items) => this.#deliverReports(items))
+  }
+
+  /** A creditor status report entry for a tick's report `group`; kept with the booking when ACSC. */
+  #reportItem(c: Collection, s: DdStatus, group: string): OutboxItem {
+    const { collection: _, ...status } = s
+    const payload: ReportPayload = { group, customer: { code: c.creditorCustomer!.code, country: c.creditorCustomer!.country }, requestId: c.requestId, msgId: c.msgId, id: c.id, status }
+    return this.d.outbox.item(REPORT_KIND, JSON.parse(JSON.stringify(payload)))
+  }
+
+  async #deliverReports(items: OutboxItem[]) {
+    const groups = new Map<string, ReportPayload[]>()
+    for (const i of items) {
+      const p = i.payload as ReportPayload
+      groups.set(p.group, [...(groups.get(p.group) ?? []), p])
+    }
+    for (const [group, entries] of groups) {
+      const report: DdReport = { originalMsgId: entries[0].msgId, originalMsgName: PAIN008, blocks: [] }
+      for (const e of entries) {
+        const o = await this.#collections.get(e.id)
+        const collection = o && (await this.#decode(o))
+        let b = report.blocks.find((x) => x.pmtInfId === e.status.pmtInfId)
+        if (!b) report.blocks.push((b = { pmtInfId: e.status.pmtInfId, txs: [] }))
+        b.txs.push({ ...e.status, ...(collection ? { collection } : {}) })
+      }
+      // Once by the group: two deliveries of it (a recovery racing the tick) add one message.
+      await this.d.inbox.add({ customer: entries[0].customer, type: DD_TYPES.outgoing, requestId: entries[0].requestId, body: ddStatusReport(report, this.d.bank.bic, this.d.clock.now()), key: group })
+    }
   }
 
   /** Every collection, oldest first; one whose customer is gone from the directory is left out. */
@@ -287,22 +322,27 @@ export class DirectDebitService {
     // A refusal after the cut-off is returned once settled; one left over by a restart in between too.
     const toReturn = (c: Collection) => c.status === 'SETTLED' && !!c.returnOnSettle
     const due: Collection[] = []
-    // Creditor reports of one tick: one pain.002 per original file.
-    const reports = new Map<string, { customer: Customer; requestId?: string; report: DdReport }>()
+    // Creditor reports of one tick: one pain.002 per original file (a group, decision 999). An
+    // ACSC entry is kept with its booking; a repeat's was (its group is recovered); an RJCT,
+    // booked nothing, is delivered with them.
+    const groups = new Map<string, string>()
+    const groupOf = (c: Collection) => {
+      const k = `${keyOf(c.creditorCustomer!)}|${c.msgId}|${c.requestId}`
+      let g = groups.get(k)
+      if (!g) groups.set(k, (g = `dd-report:${randomUUID()}`))
+      return g
+    }
+    const reports: OutboxItem[] = []
     for (const x of listed.filter(isDue)) {
-      let s: DdStatus | undefined
-      const c = await this.#claimed(x.id, async (c) => { if (isDue(c)) s = await this.#settle(c) })
+      let s: { status: DdStatus; report?: OutboxItem; repeat?: boolean } | undefined
+      const c = await this.#claimed(x.id, async (c) => { if (isDue(c)) s = await this.#settle(c, groupOf) })
       if (!c || !s) continue
       due.push(c)
       if (!c.creditorCustomer) continue
-      const k = `${keyOf(c.creditorCustomer)}|${c.msgId}|${c.requestId}`
-      let r = reports.get(k)
-      if (!r) reports.set(k, (r = { customer: c.creditorCustomer, requestId: c.requestId, report: { originalMsgId: c.msgId, originalMsgName: PAIN008, blocks: [] } }))
-      let b = r.report.blocks.find((x) => x.pmtInfId === c.pmtInfId)
-      if (!b) r.report.blocks.push((b = { pmtInfId: c.pmtInfId, txs: [] }))
-      b.txs.push(s)
+      if (s.report) reports.push(s.report)
+      else if (!s.repeat) reports.push(this.#reportItem(c, s.status, groupOf(c)))
     }
-    for (const r of reports.values()) await this.#report(r.customer, DD_TYPES.outgoing, r.requestId, r.report)
+    await this.d.outbox.deliver(reports)
     const settled = new Set(due.map((c) => c.id))
     for (const x of [...due.filter(toReturn), ...listed.filter((c) => toReturn(c) && !settled.has(c.id))]) {
       await this.#claimed(x.id, async (c) => { if (toReturn(c)) await this.#refund(c, c.returnOnSettle!) })
@@ -326,15 +366,18 @@ export class DirectDebitService {
     }
   }
 
-  async #settle(c: Collection): Promise<DdStatus> {
+  /** The creditor's status entry; `report` the ACSC entry kept with the booking, `repeat` when booked before (decision 995). */
+  async #settle(c: Collection, groupOf: (c: Collection) => string): Promise<{ status: DdStatus; report?: OutboxItem; repeat?: boolean }> {
     const base = { pmtInfId: c.pmtInfId, endToEndId: c.endToEndId, instrId: c.instrId, collection: c }
     const settlement = this.d.rails.settlementAccount(DD_SCHEME)
-    const fail = async (code: string): Promise<DdStatus> => {
+    const fail = async (code: string) => {
       c.status = 'REJECTED'
       c.reason = code
       await this.#save(c)
-      return { ...base, status: 'RJCT', code, text: REASONS[code] }
+      return { status: { ...base, status: 'RJCT', code, text: REASONS[code] } as DdStatus }
     }
+    const acsc: DdStatus = { ...base, status: 'ACSC' }
+    const report = c.creditorCustomer ? [this.#reportItem(c, acsc, groupOf(c))] : []
     // The camt.054s go with the booking (decision 990); they are delivered once it is saved SETTLED.
     const notices = [
       ...(c.debtorCustomer ? [this.d.outbox.notice(c.debtorCustomer, this.#booking(c, 'debtor', 'DBIT', c.id))] : []),
@@ -345,7 +388,7 @@ export class DirectDebitService {
     let repeat = false
     if (c.debtorCustomer) {
       try {
-        repeat = (await this.d.ledger.transfer({ ref: c.id, from: c.debtor.iban, to: c.creditorCustomer ? c.creditor.iban : settlement, amount: c.amount, currency: c.currency }, notices)).repeat
+        repeat = (await this.d.ledger.transfer({ ref: c.id, from: c.debtor.iban, to: c.creditorCustomer ? c.creditor.iban : settlement, amount: c.amount, currency: c.currency }, [...notices, ...report])).repeat
       } catch (e) {
         if (e instanceof InsufficientFunds) return fail('AM04')
         throw e
@@ -356,13 +399,14 @@ export class DirectDebitService {
         debtor: c.debtor, endToEndId: c.endToEndId, mandateId: c.mandateId, settlementDate: c.settlementDate,
       })
       if (outcome.status === 'rejected') return fail(outcome.code)
-      repeat = (await this.d.ledger.transfer({ ref: c.id, from: settlement, to: c.creditor.iban, amount: c.amount, currency: c.currency }, notices)).repeat
+      repeat = (await this.d.ledger.transfer({ ref: c.id, from: settlement, to: c.creditor.iban, amount: c.amount, currency: c.currency }, [...notices, ...report])).repeat
     }
     c.status = 'SETTLED'
     c.settledAt = this.d.clock.now()
     await this.#save(c)
-    if (!repeat) await this.d.outbox.deliver(notices)
-    return { ...base, status: 'ACSC' }
+    if (repeat) return { status: acsc, repeat }
+    await this.d.outbox.deliver(notices) // the report entry waits for the tick's report
+    return { status: acsc, report: report[0] }
   }
 
   /** Pays a settled collection back: debtor credited, creditor debited, RtrInf on both entries. */

@@ -5,7 +5,7 @@ import { DEFAULT_BOUNDS, type Bounds } from './bounded.js'
 import { systemClock, type Clock } from './clock.js'
 import { keyOf, MemoryDirectory, type CustomerInput, type DirectoryStore } from './directory.js'
 import { MemoryInbox, type InboxStore } from './inbox.js'
-import { bookingOf, Outbox, type NoticePayload } from './outbox.js'
+import { bookingOf, Outbox, type MessagePayload, type NoticePayload } from './outbox.js'
 import { RequestLog } from './requests.js'
 import { MemoryLedger, toMinor, type Ledger } from './ledger.js'
 import { PaymentEngine, type Bank } from './payments/engine.js'
@@ -147,6 +147,7 @@ export class Emulator {
       if (n.inflight) await this.engine.notified(n.inflight)
       await this.inbox.add({ customer: n.customer, type: 'CREDIT_DEBIT_NOTIFICATION', body: n.body, key: i.key })
     })
+    this.outbox.on('message', async (i) => { await this.inbox.add({ ...(i.payload as MessagePayload), key: i.key }) })
     this.viban = new VibanService(this.directory, this.inbox, this.clock, {
       schemas: opts.xsdDir ? new VibanSchemas(opts.xsdDir) : undefined, errors: opts.vibanErrors, keyed,
     })

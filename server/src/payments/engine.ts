@@ -144,7 +144,8 @@ export const MANUAL_REVIEW = new Set(['Robba Bank', 'Steela Koinz', 'Laundra Cas
 const normName = (n?: string) => (n ?? '').replace(/\s+/g, ' ').trim().toLowerCase()
 
 /** One status of one payment; `next` yields its following status (a later report). */
-interface Step { status: TxStatus; notices?: OutboxItem[]; next?: () => Promise<Step | undefined> }
+/** `reported`: its pain.002 went with its booking's first call (decision 999), the round leaves it out. */
+interface Step { status: TxStatus; notices?: OutboxItem[]; next?: () => Promise<Step | undefined>; reported?: boolean }
 interface FileRef { customer: Customer; requestId: string; version: PainVersion; msgId: string }
 /** A payment that passed the checks that need no money. */
 interface Plan {
@@ -298,6 +299,7 @@ export class PaymentEngine {
     while (round.length) {
       const r: StatusReport = { version: file.version, originalMsgId: file.msgId, blocks: [] }
       for (const s of round) {
+        if (s.reported) continue
         let b = r.blocks.find((x) => x.pmtInfId === s.status.block.pmtInfId)
         if (!b) r.blocks.push((b = { pmtInfId: s.status.block.pmtInfId!, txs: [] }))
         b.txs.push(s.status)
@@ -306,7 +308,7 @@ export class PaymentEngine {
         for (const b of r.blocks) b.status = aggregate(b.txs.map((t) => t.status))
         r.groupStatus = aggregate(r.blocks.flatMap((b) => b.txs.map((t) => t.status)))
       }
-      await this.#report(file.customer, file.requestId, r)
+      if (r.blocks.length) await this.#report(file.customer, file.requestId, r)
       for (const s of round) await this.opts.outbox.deliver(s.notices ?? [])
       const next: Step[] = []
       for (const s of round) {
@@ -480,12 +482,18 @@ export class PaymentEngine {
   async settle(ref: string, outcome: RailsOutcome): Promise<boolean> {
     // Booked before the record goes (decision 998): a crash in between leaves the payment
     // waiting, and the outcome again (a bridge retrying) commits nothing twice (the ref is
-    // the commit's key) and reports it. Of two outcomes at once, the one that takes the
-    // record reports; the other delivers what it booked, if anything.
+    // the commit's key). Settled: the pain.002 is one of the commit's items (decision 999),
+    // delivered by whoever booked it (or recovered), never by a repeat. Otherwise, of two
+    // outcomes at once, the one that takes the record reports.
     const r = await this.#pending.get(ref)
     if (!r) return false
     const w = await this.#decode(r)
     if (!w) { await this.#pending.take(ref, r.scheme); return false }
+    if (outcome.status === 'settled') {
+      const booked = await this.#outcome(w.file, w.plan, w.accepted, outcome, { report: true })
+      await this.opts.outbox.deliver(booked.notices ?? [])
+      return !!(await this.#pending.take(ref, r.scheme))
+    }
     const step = await this.#outcome(w.file, w.plan, w.accepted, outcome)
     if (!(await this.#pending.take(ref, r.scheme))) {
       await this.opts.outbox.deliver(step.notices ?? [])
@@ -520,13 +528,17 @@ export class PaymentEngine {
   }
 
   /** The rails' outcome of a reserved external payment: booked, rejected, or on to SEPA. */
-  async #outcome(file: FileRef, p: Plan, accepted: TxStatus, outcome: RailsOutcome): Promise<Step> {
+  async #outcome(file: FileRef, p: Plan, accepted: TxStatus, outcome: RailsOutcome, o: { report?: boolean } = {}): Promise<Step> {
     const { block, tx } = p
     const scheme = p.scheme!
     if (outcome.status === 'settled') {
       const notices = [this.#notice(file.customer, await this.#debitBooking(file.customer, p, scheme))]
+      // `report`: its pain.002 goes with the commit too, before the camt.054 (decision 999).
+      const status: TxStatus = { ...accepted, status: 'ACSC', reason: undefined, scheme }
+      if (o.report) notices.unshift(this.opts.outbox.message(await this.#reportMessage(file.customer, file.requestId, { version: file.version, originalMsgId: file.msgId, blocks: [{ pmtInfId: block.pmtInfId!, txs: [status] }] })))
       const b = await this.ledger.commit(p.ref, this.rails.settlementAccount(scheme), notices)
-      return { status: { ...accepted, status: 'ACSC', reason: undefined, scheme }, notices: b.repeat ? [] : notices }
+      // A repeat: booked by an outcome from the rails' events at the same time, which reported it.
+      return b.repeat ? { status, notices: [], reported: true } : { status, notices }
     }
     // SEPA Instant attempted and failed: an automatic choice goes on as SEPA (ACWC first).
     if (outcome.status === 'unavailable' && scheme === 'INST' && p.automatic) {
@@ -710,11 +722,15 @@ export class PaymentEngine {
   }
 
   async #report(customer: Customer, requestId: string, r: StatusReport) {
+    await this.inbox.add(await this.#reportMessage(customer, requestId, r))
+  }
+
+  async #reportMessage(customer: Customer, requestId: string, r: StatusReport) {
     // LHV UK answers for a file whose debtor accounts are all held in the UK (decision 843).
     const blocks = r.blocks.map((b) => b.txs[0]?.block).filter((b): b is Block => !!b)
     const accounts = await Promise.all(blocks.map((b) => this.#ledgerAccount(b, customer)))
     const uk = accounts.length > 0 && accounts.every((a) => isUkAccount(a))
-    await this.inbox.add({ customer, type: 'PAYMENT', requestId, body: pain002(r, this.bank.bic, this.clock.now(), { uk }) })
+    return { customer, type: 'PAYMENT', requestId, body: pain002(r, this.bank.bic, this.clock.now(), { uk }) }
   }
 
   /** The ledger account a block pays from: a VIBAN's or an agency account's master account, else the account. */

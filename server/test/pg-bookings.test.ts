@@ -155,3 +155,72 @@ if (url) describe('bookings across a crash before the service saves (Postgres)',
     assert.equal((await b.emulator.journal.entries(C2.iban, 0, Infinity)).filter((e) => e.remittance === 'crash').length, 1)
   })
 })
+
+// The status reports of bookings in the outbox (decision 999): the process dies after the
+// service saved its state and before anything reported it (delivery fails).
+if (url) describe('status reports across a crash after the save (Postgres)', () => {
+  const dies = (ctx: Ctx) => { ctx.emulator.outbox.deliver = async () => { throw new Error('crash before the report') } }
+
+  test('SEPA Direct Debit: the creditor status report of a file is sent after the restart, once, both collections in it', async () => {
+    const opts = await postgresStore()
+    const a = await setup(opts)
+    const res = await call(a, { method: 'POST', url: '/direct-debit/collection', body: pain008([{ pmtInfId: 'PMT-RP1', txs: [{ endToEndId: 'E2E-RP1', amount: '10.00' }, { endToEndId: 'E2E-RP2', amount: '5.00' }] }]) })
+    assert.equal(res.statusCode, 202, res.body)
+    await ddDrain(a); await ddDrain(a, C2.code)
+    dies(a)
+    a.clock.set('2026-03-12T10:30:00Z')
+    assert.equal((await call(a, { method: 'POST', url: '/_sim/direct-debit/settle' })).statusCode, 500)
+    assert.deepEqual((await call(a, { url: '/_sim/direct-debit/collections' })).json().collections.map((x: any) => x.status), ['SETTLED', 'PENDING'], 'the first saved, then the crash')
+
+    const b = await setup(opts) // recovers the first's camt.054s and report entry
+    b.clock.set('2026-03-12T10:30:00Z')
+    assert.equal((await call(b, { method: 'POST', url: '/_sim/direct-debit/settle' })).json().settled, 1)
+    const creditor = await ddDrain(b)
+    const reports = creditor.filter((m) => m.type === 'DIRECT_DEBIT_OUTGOING').map((m) => ddStatus(m).blocks.flatMap((x: any) => x.txs.map((t: any) => t.sts)))
+    assert.deepEqual(reports, [['ACSC'], ['ACSC']], 'the recovered entry, then the rerun tick\'s; each collection reported once')
+    assert.equal(creditor.filter((m) => m.type === 'CREDIT_DEBIT_NOTIFICATION').length, 2)
+    const c = await setup(opts)
+    assert.equal(await c.emulator.outbox.recover(), 0)
+    assert.deepEqual((await ddDrain(c)).map((m) => m.type), [])
+  })
+
+  test('SEPA Direct Debit: a tick whose report was not sent sends it after the restart as the one report of the file', async () => {
+    const opts = await postgresStore()
+    const a = await setup(opts)
+    const res = await call(a, { method: 'POST', url: '/direct-debit/collection', body: pain008([{ pmtInfId: 'PMT-RP3', txs: [{ endToEndId: 'E2E-RP3', amount: '10.00' }, { endToEndId: 'E2E-RP4', amount: '5.00' }] }]) })
+    assert.equal(res.statusCode, 202, res.body)
+    await ddDrain(a); await ddDrain(a, C2.code)
+    const deliver = a.emulator.outbox.deliver.bind(a.emulator.outbox)
+    // The camt.054s go; the process dies before the tick's report.
+    a.emulator.outbox.deliver = async (items) => { if (items.some((i) => i.kind === 'dd-report')) throw new Error('crash before the report'); return deliver(items) }
+    a.clock.set('2026-03-12T10:30:00Z')
+    assert.equal((await call(a, { method: 'POST', url: '/_sim/direct-debit/settle' })).statusCode, 500)
+    assert.deepEqual((await call(a, { url: '/_sim/direct-debit/collections' })).json().collections.map((x: any) => x.status), ['SETTLED', 'SETTLED'])
+    assert.deepEqual((await ddDrain(a)).map((m) => m.type), ['CREDIT_DEBIT_NOTIFICATION', 'CREDIT_DEBIT_NOTIFICATION'])
+
+    const b = await setup(opts)
+    const reports = (await ddDrain(b)).filter((m) => m.type === 'DIRECT_DEBIT_OUTGOING').map((m) => ddStatus(m).blocks.flatMap((x: any) => x.txs.map((t: any) => [t.e2e ?? t.endToEndId, t.sts])))
+    assert.equal(reports.length, 1, 'one pain.002 for the file')
+    assert.equal(reports[0].length, 2)
+    assert.ok(reports[0].every(([, sts]: string[]) => sts === 'ACSC'))
+  })
+
+  test('FX: the confirmation COMPLETED of a SPOT deal saved before the crash is sent after it, once', async () => {
+    const opts = await postgresStore()
+    const a = await setup(opts)
+    const post = async (path: string, body: object) => assert.equal((await call(a, { method: 'POST', url: path, body })).statusCode, 202)
+    await post('/fx/trade-offer', { requestReference: 'RP-FX-1', accountIBAN: C1.iban, currencyFrom: 'EUR', currencyTo: 'USD', amountFrom: 100, tenor: 'SPOT' })
+    await post('/fx/trade-offer-confirmation', { requestReference: 'RP-FX-1', confirm: true })
+    await jsonDrain(a)
+    dies(a)
+    a.clock.set('2026-03-12T06:00:00Z')
+    assert.equal((await call(a, { method: 'POST', url: '/_sim/fx/settle' })).statusCode, 500)
+
+    const b = await setup(opts)
+    b.clock.set('2026-03-12T06:00:00Z')
+    assert.equal((await call(b, { method: 'POST', url: '/_sim/fx/settle' })).json().settled, 0, 'saved COMPLETED before the crash')
+    const msgs = await drain(b)
+    assert.deepEqual(msgs.filter((m) => m.type === 'FX_TRADE_OFFER_CONFIRMATION').map((m) => JSON.parse(m.body).tradeStatus), ['COMPLETED'])
+    assert.equal(msgs.filter((m) => m.type === 'CREDIT_DEBIT_NOTIFICATION').length, 2)
+  })
+})
