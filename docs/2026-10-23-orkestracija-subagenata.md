@@ -168,7 +168,7 @@ Nalazi:
 
 1. **API 529 Overloaded tri puta zaredom** prekinuo je prvog agenta. Nastavak preko
    `SendMessage` istom agentu (kontekst ostaje) radio je; posao nije izgubljen jer je
-   radni stablo ostalo netaknuto. U promptu nastavka treba reći što je na disku i da
+   radno stablo ostalo netaknuto. U promptu nastavka treba reći što je na disku i da
    prvo commita zeleni korak.
 2. **Nijedan servis nije pamtio tijelo zahtjeva**, pa je `GET /v2/requests/{id}` tražio
    novi dnevnik. Lokalni `accepted()` helperi (app, payee, fx, viban, DD) spojeni su u
