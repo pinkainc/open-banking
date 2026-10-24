@@ -73,8 +73,10 @@ export function registerMessagesV2(app: FastifyInstance, emulator: Emulator, cal
     const scope: Scope = { customers: v2Customers(c, boolParam(q, 'serviceProvider')), type: one(q, 'responseType') || undefined }
     const requestId = one(q, 'messageRequestId') || undefined
     // LHV UK messages only: an answer to a request the host handed to LHV EE (decision 607) is not listed.
-    const entries = (await emulator.inbox.entries(scope, { includeProcessed, requestId }))
-      .filter((e) => !e.message.requestId || (emulator.requests.bankCodeOf(e.message.requestId) ?? bankCode) === bankCode)
+    const listed = await emulator.inbox.entries(scope, { includeProcessed, requestId })
+    const banks = new Map<string, string | undefined>()
+    for (const id of new Set(listed.map((e) => e.message.requestId).filter((x): x is string => !!x))) banks.set(id, await emulator.requests.bankCodeOf(id))
+    const entries = listed.filter((e) => !e.message.requestId || (banks.get(e.message.requestId) ?? bankCode) === bankCode)
     const result = page(entries, p)
     if (!result) return reply.code(204).send()
     const { items, ...paging } = result

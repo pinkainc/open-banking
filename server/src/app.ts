@@ -17,7 +17,7 @@ import { directDebitSimRoutes, registerDirectDebit } from './directdebit/routes.
 import { fxSimRoutes, registerFx } from './fx/routes.js'
 import { contractsSimRoutes, registerContracts } from './contracts/routes.js'
 import { jsonTextScope } from './jsonbody.js'
-import { BoundedSet, DEFAULT_BOUNDS, type Bounds } from './bounded.js'
+import { DEFAULT_BOUNDS, type Bounds } from './bounded.js'
 import { COMPRESSION_THRESHOLD, compress, negotiate } from './compression.js'
 import { mockLargeStatement } from './statements/mock-large.js'
 import { eeWebhookSimRoutes, registerEeWebhooks } from './webhooks/ee-routes.js'
@@ -134,29 +134,32 @@ export function buildApp(opts: AppOptions): FastifyInstance {
   // X-Idempotency-Key (UK host only; the EE host knows duplicates by business keys such
   // as the pain.001 MsgId): a key seen on a successful POST within 24 hours is answered 409.
   // Remembered for 24 h, the documented guarantee (DEFAULT_BOUNDS.idempotencyKeys).
-  const idempotency = new BoundedSet<string>(emulator.clock, { ...DEFAULT_BOUNDS.idempotencyKeys, ...opts.idempotencyKeys })
+  // Kept in the emulator's keyed store (kind idempotency-keys, decision 989): a restart, or
+  // a second emulator on the namespace, still answers a repeat 409.
+  const idempotency = emulator.keyed<true>('idempotency-keys', { ...DEFAULT_BOUNDS.idempotencyKeys, ...opts.idempotencyKeys })
   const idemKey = async (req: FastifyRequest) => {
     const v = req.headers['x-idempotency-key']
     const key = Array.isArray(v) ? v[0] : v
     if (flavour !== 'UK' || key === undefined || req.method !== 'POST' || req.url.startsWith('/_sim')) return undefined
     return `${keyOf((await caller(req)).user)}|${key.toLowerCase()}`
   }
-  // The key is resolved once, before the handler, and remembered before the answer is sent
-  // (onSend): resolving it again after the response (the directory is async, decision 970)
-  // let a repeat sent right after the first answer through (decision 979).
+  // The key is resolved once, before the handler (decision 979), and taken there with add
+  // (decision 989): a repeat while the first is still being handled is a 409 as well, also
+  // on another emulator of the namespace. An answer that is not a success gives it back
+  // before it is sent, so the request can be repeated with the key.
   const idemKeys = new WeakMap<FastifyRequest, string>()
   app.addHook('preHandler', async (req) => {
     const k = await idemKey(req)
     if (!k) return
     if (!UUID.test(k.slice(k.indexOf('|') + 1))) throw new ConnectError(400, 'BAD_REQUEST', 'X-Idempotency-Key must be a UUID')
-    if (idempotency.has(k)) {
+    if (!(await idempotency.add(k, true))) {
       throw new ConnectError(409, 'CONFLICT', 'Request with this X-Idempotency-Key has already been received')
     }
     idemKeys.set(req, k)
   })
   app.addHook('onSend', async (req, reply, payload) => {
     const k = idemKeys.get(req)
-    if (k && reply.statusCode < 300) idempotency.add(k)
+    if (k && reply.statusCode >= 300) await idempotency.take(k)
     return payload
   })
 

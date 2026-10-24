@@ -212,7 +212,7 @@ describe('Bacs mandates', () => {
     const c = await one('DIRECT_DEBIT_MANDATE_CONFIRM')
     assert.equal(c.requestId, id)
     assert.deepEqual(jsonValid('bacs-confirmation', c.json), { 'GrpHdr.MsgId': 'TEST-111', AcceptanceStatus: 'OK', Messages: [{ 'OrgnlMsgInf.MsgId': m.msgId, Confirmed: true }] })
-    const req = ctx.emulator.requests.list(new Set(['GB:09876543']))
+    const req = await ctx.emulator.requests.list(new Set(['GB:09876543']))
     assert.deepEqual(req.map((x) => [x.type, x.body]), [['DIRECT_DEBIT_MANDATE_CONFIRM', body]])
 
     await at('2026-03-11T11:34:00Z')
@@ -268,7 +268,7 @@ describe('Bacs mandates', () => {
     for (const url of ['/direct-debit/bacs-mandate-accept', '/direct-debit/bacs-mandate-cancel', '/direct-debit/bacs-collection-reject', '/_sim/bacs/tick']) {
       assert.equal((await call(eeHost, { method: 'POST', url, body: '<x/>' })).statusCode, 404, url)
     }
-    assert.equal(ctx.emulator.requests.size, 0)
+    assert.equal(await ctx.emulator.requests.size(), 0)
   })
 
   test('pain.011 cancels an active mandate (pain.012 answer); refusals with the documented reasons', async () => {

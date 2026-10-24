@@ -25,7 +25,7 @@ export function registerRequestsV2(app: FastifyInstance, emulator: Emulator, cal
     const endDate = date('endDate')
     const clientCode = one('clientCode')
     const clientCountry = one('clientCountry')?.toUpperCase()
-    const all = emulator.requests.list(c.visible).filter((r) => {
+    const all = (await emulator.requests.list(c.visible)).filter((r) => {
       const day = dateLondon(r.createdAt)
       return (!startDate || day >= startDate) && (!endDate || day <= endDate)
         && (!clientCode || r.clientCode === clientCode) && (!clientCountry || r.clientCountry === clientCountry)
@@ -47,7 +47,7 @@ export function registerRequestsV2(app: FastifyInstance, emulator: Emulator, cal
 
   app.get('/v2/requests/:id', async (req, reply) => {
     const c = await caller(req)
-    const r = emulator.requests.get(c.visible, (req.params as { id: string }).id)
+    const r = await emulator.requests.get(c.visible, (req.params as { id: string }).id)
     // G: "204 - no request: Request ID doesn't exist".
     if (!r) return reply.code(204).send()
     return reply.code(200).type(r.contentType).send(r.body)

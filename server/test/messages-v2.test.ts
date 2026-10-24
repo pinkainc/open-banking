@@ -450,14 +450,14 @@ for (const [store, inbox] of INBOXES) describe(`messages v2 (${store} inbox)`, (
       const r = await call(ctx, { method: 'POST', url: '/payment', body: '' })
       assert.equal(r.statusCode, 400)
       assert.equal(await requests(), undefined)
-      assert.equal(ctx.emulator.requests.size, 0)
+      assert.equal(await ctx.emulator.requests.size(), 0)
     })
 
     test('bounded: beyond the cap the oldest request is forgotten', async () => {
       const c = await setup({ memory: { requests: { max: 2 } } }, undefined, { flavour: 'UK' })
       const ids: string[] = []
       for (let i = 0; i < 3; i++) ids.push((await call(c, { url: '/heartbeat/mq' })).headers['message-request-id'] as string)
-      assert.equal(c.emulator.requests.size, 2)
+      assert.equal(await c.emulator.requests.size(), 2)
       assert.equal((await call(c, { url: `/v2/requests/${ids[0]}` })).statusCode, 204)
       assert.equal((await call(c, { url: `/v2/requests/${ids[2]}` })).statusCode, 200)
     })

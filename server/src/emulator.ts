@@ -124,12 +124,12 @@ export class Emulator {
     const msgIds = { ...DEFAULT_BOUNDS.msgIds, ...opts.memory?.msgIds }
     const processed = { ...DEFAULT_BOUNDS.processed, ...opts.memory?.processed }
     this.inbox = opts.inbox ? opts.inbox(this.clock, { tombstones, processed }) : new MemoryInbox(this.clock, undefined, tombstones, processed)
-    this.requests = new RequestLog(this.clock, { ...DEFAULT_BOUNDS.requests, ...opts.memory?.requests })
+    this.requests = new RequestLog(this.clock, { ...DEFAULT_BOUNDS.requests, ...opts.memory?.requests }, keyed)
     this.webhooksEe = new EeWebhooks(this.inbox, this.clock, { deliver: opts.webhookDeliver, keyed })
     this.webhooksUk = new UkWebhooks(this.inbox, this.directory, this.clock, {
       deliver: opts.ukWebhookDeliver, events: { ...DEFAULT_EVENT_BOUNDS, ...opts.memory?.webhookEvents }, keyed,
       // The entity that processed the request behind the message; notifications are LHV UK's (decision 724).
-      bankOf: (m) => (m.requestId && this.requests.bankCodeOf(m.requestId)) || 'LHVUK',
+      bankOf: async (m) => (m.requestId && await this.requests.bankCodeOf(m.requestId)) || 'LHVUK',
     })
     this.bank = { ...DEFAULT_BANK, ...opts.bank }
     if (this.bank.address === undefined) this.bank.address = defaultBankAddress(this.bank.bic)
