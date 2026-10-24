@@ -105,7 +105,7 @@ export function simRoutes(emulator: Emulator) {
       const b = (req.body ?? {}) as {
         iban?: string; amount?: string; currency?: string; scheme?: string
         debtor?: { name?: string; iban?: string; bic?: string; account?: string }; remittance?: string; reference?: string; endToEndId?: string
-        creditorName?: string
+        creditorName?: string; pmtInfId?: string; instrId?: string
       }
       if (!b.iban) throw bad('iban is required')
       // `iban` may also be an agency account: an IBAN or a sort code and account number (decision 835).
@@ -114,11 +114,11 @@ export function simRoutes(emulator: Emulator) {
       const agency = !emulator.directory.ownerOf(iban) && !viban ? emulator.agency.accounts.find(iban)[0] : undefined
       if (!emulator.directory.ownerOf(iban) && !viban && !agency) throw new ConnectError(404, 'NOT_FOUND', `no account ${iban}`)
       const scheme = b.scheme ?? 'SEPA'
-      if (!['SEPA', 'INST', 'SWIFT', 'TARGET2'].includes(scheme)) throw bad(`unknown scheme ${scheme}`)
+      if (!['SEPA', 'INST', 'SWIFT', 'TARGET2', 'FAST'].includes(scheme)) throw bad(`unknown scheme ${scheme}`)
       const r = await emulator.engine.incoming({
         iban, amount: amount(b.amount), currency: b.currency ?? 'EUR', scheme,
         debtor: b.debtor ?? { name: 'Simulated Debtor' }, remittance: b.remittance, reference: b.reference, endToEndId: b.endToEndId,
-        creditorName: b.creditorName,
+        creditorName: b.creditorName, pmtInfId: b.pmtInfId, instrId: b.instrId,
       })
       const account = viban?.master ?? agency?.master ?? iban
       // A VIBAN that is not ACTIVE: the bank returns the payment (ISO reason AC04 / AC06).

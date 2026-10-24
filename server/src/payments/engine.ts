@@ -27,6 +27,7 @@ import type { Inbox } from '../inbox.js'
 import { InsufficientFunds, toMinor, type Ledger } from '../ledger.js'
 import type { Rails, Scheme } from '../rails.js'
 import { parseXml, XmlSyntaxError } from '../xml.js'
+import { isUkAccount } from '../routing.js'
 import { camt054, type Booking } from './camt054.js'
 import { decimalEq, decimalSum, painVersion, readPain001, structuralProblem, type Block, type PainVersion, type PaymentFile, type Tx } from './pain001.js'
 import { aggregate, pain002, type StatusReport, type TxStatus } from './pain002.js'
@@ -296,6 +297,8 @@ export class PaymentEngine {
     // An agency debtor: named and addressed in the payment (LHV keeps neither), not CLOSED (decisions 830, 831).
     const debtorA = debtorV ? undefined : this.#agencyDebtor(block, customer)
     if (debtorA) {
+      // The status report names the agent's BIC as the debtor agent, as the request (G use case 7, decision 842).
+      if (rawBlock.debtorAgentBic) block.debtorAgentShown = rawBlock.debtorAgentBic
       if (!rawBlock.debtorName?.trim()) return rj(R.debtorName)
       if (!block.debtorAddress?.country) return rj(R.debtorAddress)
       if (debtorA.status === 'CLOSED') return rj(R.debtorInactive)
@@ -331,7 +334,7 @@ export class PaymentEngine {
     const instantLimit = this.opts.limits?.(customer).instant
     // An INST_RESTRICTED agency debtor sends no SEPA Instant (decision 834).
     const instantOk = (instantLimit === undefined || amount <= instantLimit) && debtorA?.status !== 'INST_RESTRICTED'
-    const chosen = this.#scheme(requested, tx.currency!, creditorIban, instantOk)
+    const chosen = this.#scheme(requested, tx.currency!, creditorIban, instantOk, creditorId)
     if ('reject' in chosen) return rj(chosen.reject)
     return planned({ ...base, scheme: chosen.scheme, automatic: requested !== 'INST' && requested !== 'SEPA' && requested !== 'TARGET2' })
   }
@@ -390,7 +393,7 @@ export class PaymentEngine {
       account: p.creditorAccount!, virtual: creditorV ? virtualParty(creditorV) : p.creditorA && agencyParty(p.creditorA, p.creditorIban ?? tx.creditorOther!, tx.creditorName),
       owner: { name: creditorOwner!.name, code: creditorOwner!.code }, direction: 'CRDT',
       amount: p.amount, currency: p.currency, servicerRef: servicerRef(), scheme: 'INTERNAL', bookedAt: this.clock.now(),
-      instrId: tx.instrId, endToEndId: tx.endToEndId,
+      instrId: tx.instrId, endToEndId: tx.endToEndId, ultimateDebtor: tx.ultimateDebtor ?? block.ultimateDebtor, ultimateCreditor: tx.ultimateCreditor,
       counterparty: { name: block.debtorName ?? customer.name, ...(block.debtorOther ? { account: p.debtorIban } : { iban: p.debtorIban }), bic: this.bank.bic, code: customer.code },
       remittance: tx.ustrd, reference: tx.reference,
     } })
@@ -518,8 +521,11 @@ export class PaymentEngine {
   }
 
   /** Scheme selection as documented: requested scheme if possible, else automatic. */
-  #scheme(requested: string | undefined, currency: string, creditorIban: string | undefined, withinInstantLimit: boolean): { scheme: Scheme } | { reject: string } {
+  #scheme(requested: string | undefined, currency: string, creditorIban: string | undefined, withinInstantLimit: boolean, creditorId?: string): { scheme: Scheme } | { reject: string } {
     const sepa = !!creditorIban && isSepaCountry(ibanCountry(creditorIban))
+    // GBP to a UK account (GB IBAN or sort code + account number) goes by Faster Payments when no scheme is asked for (decision 840).
+    const ukCreditor = !!creditorId && (/^GB[0-9]{2}[A-Z]{4}[0-9]{14}$/.test(creditorId) || /^[0-9]{14}$/.test(creditorId))
+    if (currency === 'GBP' && ukCreditor && (requested === undefined || requested === 'ALL')) return { scheme: 'FAST' }
     if (requested === 'INST' || requested === 'SEPA' || requested === 'TARGET2') {
       if (currency !== 'EUR') return { reject: R.currency }
       if (!sepa && requested !== 'TARGET2') return { reject: R.declined }
@@ -543,6 +549,7 @@ export class PaymentEngine {
       pmtInfId: block.pmtInfId, instrId: tx.instrId, endToEndId: tx.endToEndId,
       counterparty: { name: tx.creditorName, iban: tx.creditorIban ? normalizeIban(tx.creditorIban) : undefined, account: tx.creditorOther, bic: creditorBic ?? tx.creditorBic },
       remittance: tx.ustrd, reference: tx.reference,
+      ultimateDebtor: tx.ultimateDebtor ?? block.ultimateDebtor, ultimateCreditor: tx.ultimateCreditor,
     }
   }
 
@@ -573,7 +580,21 @@ export class PaymentEngine {
   }
 
   #report(customer: Customer, requestId: string, r: StatusReport) {
-    this.inbox.add({ customer, type: 'PAYMENT', requestId, body: pain002(r, this.bank.bic, this.clock.now()) })
+    // LHV UK answers for a file whose debtor accounts are all held in the UK (decision 843).
+    const blocks = r.blocks.map((b) => b.txs[0]?.block).filter((b): b is Block => !!b)
+    const uk = blocks.length > 0 && blocks.every((b) => isUkAccount(this.#ledgerAccount(b, customer)))
+    this.inbox.add({ customer, type: 'PAYMENT', requestId, body: pain002(r, this.bank.bic, this.clock.now(), { uk }) })
+  }
+
+  /** The ledger account a block pays from: a VIBAN's or an agency account's master account, else the account. */
+  #ledgerAccount(b: Block, customer: Customer): string {
+    const id = normalizeIban(b.debtorIban ?? '')
+    if (!b.debtorOther) {
+      const v = this.opts.virtual?.resolve(id)
+      if (v) return v.master
+      if (this.directory.ownerOf(id)) return id
+    }
+    return this.#agencyDebtor(b, customer)?.master ?? id
   }
 
   #notify(customer: Customer, b: Booking) {
@@ -584,7 +605,8 @@ export class PaymentEngine {
   }
 
   /** An incoming credit from outside (the simulator's SEPA / SEPA Instant credit). */
-  async incoming(p: { iban: string; amount: bigint; currency: string; scheme: string; debtor: { name?: string; iban?: string; bic?: string; /** A non-IBAN account (Bacs: sort code + account number). */ account?: string }; remittance?: string; reference?: string; endToEndId?: string; /** Reuse a reference (a held payment, decision 712). */ ref?: string; /** The creditor's name as the payment gives it. */ creditorName?: string }) {
+  async incoming(p: { iban: string; amount: bigint; currency: string; scheme: string; debtor: { name?: string; iban?: string; bic?: string; /** A non-IBAN account (Bacs: sort code + account number). */ account?: string }; remittance?: string; reference?: string; endToEndId?: string; /** Reuse a reference (a held payment, decision 712). */ ref?: string; /** The creditor's name as the payment gives it. */ creditorName?: string
+    /** The sender's references, shown in Refs as the G use case 7 sample (decision 847). */ pmtInfId?: string; instrId?: string }) {
     const iban = normalizeIban(p.iban)
     const v = this.opts.virtual?.resolve(iban)
     // To a VIBAN that is not ACTIVE: returned to the sender, nothing booked or notified.
@@ -607,7 +629,7 @@ export class PaymentEngine {
     await this.ledger.transfer({ ref, from: this.rails.settlementAccount(p.scheme), to: account, amount: p.amount, currency: p.currency })
     this.#notify(owner, {
       account, virtual: v ? virtualParty(v) : a && agencyParty(a, iban, p.creditorName), owner: { name: owner.name, code: owner.code }, direction: 'CRDT', amount: p.amount, currency: p.currency,
-      servicerRef: ref, scheme: p.scheme, bookedAt: this.clock.now(), endToEndId: p.endToEndId,
+      servicerRef: ref, scheme: p.scheme, bookedAt: this.clock.now(), endToEndId: p.endToEndId, pmtInfId: p.pmtInfId, instrId: p.instrId,
       counterparty: { name: codePage(p.debtor.name), iban: p.debtor.iban ? normalizeIban(p.debtor.iban) : undefined, account: p.debtor.account, bic: p.debtor.bic },
       remittance: codePage(p.remittance), reference: codePage(p.reference),
     })

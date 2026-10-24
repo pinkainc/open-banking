@@ -5,7 +5,32 @@ import { many, text } from '../xml.js'
 
 export type PainVersion = 'pain.001.001.03' | 'pain.001.001.09'
 
+/**
+ * An ultimate party (UltmtDbtr / UltmtCdtr) as the notifications echo it (decision 841):
+ * the name, an organisation's `Othr` identification, the structured postal address.
+ */
+export interface UltimateParty {
+  name?: string
+  orgOther?: { id: string; scheme?: string }
+  address?: { StrtNm?: string; BldgNb?: string; PstCd?: string; TwnNm?: string; Ctry?: string }
+}
+
+export function readUltimate(p: any): UltimateParty | undefined {
+  if (!p || typeof p !== 'object') return undefined
+  const othr = many(p.Id?.OrgId?.Othr)[0]
+  const a = p.PstlAdr
+  const address = a && typeof a === 'object'
+    ? Object.fromEntries((['StrtNm', 'BldgNb', 'PstCd', 'TwnNm', 'Ctry'] as const).map((k) => [k, text(a[k])]).filter(([, v]) => v)) : undefined
+  return {
+    name: text(p.Nm),
+    ...(othr && text(othr.Id) ? { orgOther: { id: text(othr.Id)!, scheme: text(othr.SchmeNm?.Cd) } } : {}),
+    ...(address && Object.keys(address).length ? { address } : {}),
+  }
+}
+
 export interface Tx {
+  ultimateDebtor?: UltimateParty
+  ultimateCreditor?: UltimateParty
   instrId?: string
   endToEndId?: string
   uetr?: string
@@ -31,6 +56,10 @@ export interface Block {
   debtorOther?: boolean
   /** Dbtr/PstlAdr: country and town (mandatory for an indirect scheme participant, decision 831). */
   debtorAddress?: { country?: string; town?: string }
+  /** DbtrAgt BIC as sent; the status report shows it for an agency debtor (`debtorAgentShown`, decision 842). */
+  debtorAgentBic?: string
+  debtorAgentShown?: string
+  ultimateDebtor?: UltimateParty
   scheme?: string
   txs: Tx[]
 }
@@ -69,7 +98,10 @@ export function readPain001(doc: any, version: PainVersion): PaymentFile {
       ...(p.DbtrAcct?.Id?.IBAN === undefined && p.DbtrAcct?.Id?.Othr?.Id !== undefined ? { debtorOther: true } : {}),
       ...(p.Dbtr?.PstlAdr ? { debtorAddress: { country: text(p.Dbtr.PstlAdr.Ctry), town: text(p.Dbtr.PstlAdr.TwnNm) ?? many(p.Dbtr.PstlAdr.AdrLine).map((l) => text(l)).find(Boolean) } } : {}),
       scheme: scheme(p.PmtTpInf),
+      debtorAgentBic: bic(p.DbtrAgt),
+      ultimateDebtor: readUltimate(p.UltmtDbtr),
       txs: many(p.CdtTrfTxInf).map((t: any): Tx => ({
+        ultimateDebtor: readUltimate(t.UltmtDbtr), ultimateCreditor: readUltimate(t.UltmtCdtr),
         instrId: text(t.PmtId?.InstrId), endToEndId: text(t.PmtId?.EndToEndId), uetr: text(t.PmtId?.UETR),
         amount: text(t.Amt?.InstdAmt), currency: t.Amt?.InstdAmt?.['@Ccy'],
         scheme: scheme(t.PmtTpInf),

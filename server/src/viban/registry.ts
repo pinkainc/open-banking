@@ -135,7 +135,7 @@ export class VibanRegistry implements VirtualAccounts {
     const name = holderName(v.user)
     return {
       iban: v.iban, master: v.master, status: v.status,
-      holder: name && v.user ? { name, country: v.user.address.Country, address: `${v.user.address.StreetNo}, ${v.user.address.CityCounty}` } : undefined,
+      holder: name && v.user ? { name, country: v.user.address.Country, address: v.user.address.StreetNo } : undefined,
     }
   }
 }

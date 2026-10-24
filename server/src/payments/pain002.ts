@@ -1,7 +1,7 @@
 // Customer Payment Status Report. A pain.001.001.09 file is answered with
 // pain.002.001.10, a pain.001.001.03 file with pain.002.001.03 (ISO element names of
 // that version: BIC, BICOrBEI, no Pty wrapper, plain ISODate).
-import { isoTallinn } from '../time.js'
+import { isoLondon, isoTallinn } from '../time.js'
 import { statusReportMsgId } from '../ids.js'
 import { document, el, opt, toXml } from '../xml.js'
 import type { Block, PainVersion, Tx } from './pain001.js'
@@ -37,8 +37,12 @@ export function aggregate(statuses: TxStatusCode[]): GroupStatusCode {
   return 'ACSP'
 }
 
-export function pain002(r: StatusReport, bankBic: string, now: Date): string {
+/** LHV UK in a status report (G PSP use cases): InitgPty `LHVBGB2LXXX`, DbtrAgt `LHVBGB2L`, UK time (decision 843). */
+export const UK_STATUS = { initiatingParty: 'LHVBGB2LXXX', debtorAgent: 'LHVBGB2L' }
+
+export function pain002(r: StatusReport, bankBic: string, now: Date, o: { uk?: boolean } = {}): string {
   const v10 = r.version === 'pain.001.001.09'
+  const ownAgent = o.uk ? UK_STATUS.debtorAgent : bankBic
   const reason = (text?: string) => text ? el('StsRsnInf', el('Rsn', el('Cd', 'NARR')), el('AddtlInf', text.slice(0, 105))) : null
   const party = (name?: string) => (name ? (v10 ? el('Pty', el('Nm', name)) : el('Nm', name)) : null)
   const agent = (bic?: string) => el('FinInstnId', bic ? el(v10 ? 'BICFI' : 'BIC', bic) : null)
@@ -46,7 +50,6 @@ export function pain002(r: StatusReport, bankBic: string, now: Date): string {
 
   const tx = (s: TxStatus) => el('TxInfAndSts',
     opt('OrgnlInstrId', s.tx.instrId),
-    opt('OrgnlEndToEndId', s.tx.endToEndId),
     v10 ? opt('OrgnlUETR', s.tx.uetr) : null,
     el('TxSts', s.status),
     s.status === 'RJCT' || s.status === 'ACWC' || s.status === 'PDNG' ? reason(s.reason) : null,
@@ -57,7 +60,7 @@ export function pain002(r: StatusReport, bankBic: string, now: Date): string {
       s.scheme ? el('PmtTpInf', el('SvcLvl', el('Prtry', s.scheme))) : null,
       s.block.debtorName ? el('Dbtr', party(s.block.debtorName)) : null,
       s.block.debtorIban ? el('DbtrAcct', s.block.debtorOther ? account(undefined, s.block.debtorIban) : account(s.block.debtorIban)) : null,
-      el('DbtrAgt', agent(bankBic)),
+      el('DbtrAgt', agent(s.block.debtorAgentShown ?? ownAgent)),
       el('CdtrAgt', agent(s.creditorBic ?? s.tx.creditorBic)),
       s.tx.creditorName ? el('Cdtr', party(s.tx.creditorName)) : null,
       el('CdtrAcct', account(s.tx.creditorIban, s.tx.creditorOther)),
@@ -66,8 +69,8 @@ export function pain002(r: StatusReport, bankBic: string, now: Date): string {
   const body = el('CstmrPmtStsRpt',
     el('GrpHdr',
       el('MsgId', statusReportMsgId()),
-      el('CreDtTm', isoTallinn(now)),
-      el('InitgPty', el('Id', el('OrgId', el(v10 ? 'AnyBIC' : 'BICOrBEI', bankBic)))),
+      el('CreDtTm', o.uk ? isoLondon(now) : isoTallinn(now)),
+      el('InitgPty', el('Id', el('OrgId', el(v10 ? 'AnyBIC' : 'BICOrBEI', o.uk ? UK_STATUS.initiatingParty : bankBic)))),
     ),
     el('OrgnlGrpInfAndSts',
       el('OrgnlMsgId', r.originalMsgId),

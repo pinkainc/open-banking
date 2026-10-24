@@ -2,7 +2,8 @@
 // and books it when the rails report settlement. The simulator settles everything at
 // once unless told to reject payments to a given account; real bridges (SEPA, SEPA
 // Instant, UK Faster Payments) will implement the same interface.
-export type Scheme = 'SEPA' | 'INST' | 'SWIFT' | 'TARGET2'
+/** FAST: UK Faster Payments (decision 840). */
+export type Scheme = 'SEPA' | 'INST' | 'SWIFT' | 'TARGET2' | 'FAST'
 
 export interface OutgoingPayment {
   ref: string
