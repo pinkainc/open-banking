@@ -2,24 +2,23 @@
 // answer in the inbox. The EE XML service is on both hosts (the UK host "always" hands it
 // to LHV EE); the UK JSON services only on the UK host, a 404 on the EE one. Also the EE
 // TEST-only GET /test/accounts/ibans (decision 608) and the /_sim/payee control plane.
-import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
+import type { FastifyInstance, FastifyRequest } from 'fastify'
 import type { Caller } from '../auth.js'
 import { ConnectError } from '../errors.js'
 import type { Emulator } from '../emulator.js'
 import { requestId } from '../ids.js'
+import { accepted } from '../requests.js'
 import { jsonTextScope } from '../jsonbody.js'
-import { ANSWERS, CATEGORIES, accountKey, type Category, type SimAccount } from './service.js'
+import { ANSWERS, CATEGORIES, COP, VOP_EE, accountKey, type Category, type SimAccount } from './service.js'
 
 export function registerPayee(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Caller, flavour: 'EE' | 'UK') {
-  const accepted = (reply: FastifyReply, id: string) => reply.code(202).header('Message-Request-Id', id).send()
-
   app.post('/verification-of-payee', async (req, reply) => {
     const c = caller(req)
     const id = requestId()
     emulator.payee.requestEe(req.body, c.customer, id)
     // On the UK host the request is answered by LHV EE (decision 607).
     if (flavour === 'UK') reply.header('X-Bank-Code', 'LHVEE')
-    return accepted(reply, id)
+    return accepted(emulator.requests, req, reply, c, id, VOP_EE)
   })
 
   if (flavour === 'UK') {
@@ -28,13 +27,13 @@ export function registerPayee(app: FastifyInstance, emulator: Emulator, caller: 
         const c = caller(req)
         const id = requestId()
         emulator.payee.requestUk(req.body, c.customer, id)
-        return accepted(reply, id)
+        return accepted(emulator.requests, req, reply, c, id, VOP_EE)
       })
       scope.post('/payment/cop-request', async (req, reply) => {
         const c = caller(req)
         const id = requestId()
         emulator.payee.requestCop(req.body, c.customer, id)
-        return accepted(reply, id)
+        return accepted(emulator.requests, req, reply, c, id, COP)
       })
     })
   } else {

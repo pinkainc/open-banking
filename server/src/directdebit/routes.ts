@@ -7,15 +7,16 @@ import { ConnectError } from '../errors.js'
 import type { Emulator } from '../emulator.js'
 import { normalizeIban } from '../iban.js'
 import { requestId } from '../ids.js'
+import { accepted } from '../requests.js'
 import { fromMinor, toMinor } from '../ledger.js'
 import { SimulatorRails } from '../rails.js'
 import { isDate } from '../statements/camt060.js'
 import { XmlSyntaxError } from '../xml.js'
 import type { Collection } from './messages.js'
-import { DirectDebitError, type ExternalCollection } from './service.js'
+import { DD_TYPES, DirectDebitError, type ExternalCollection } from './service.js'
 
 export function registerDirectDebit(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Caller) {
-  const route = (path: string, handle: (xml: string, c: Caller, id: string) => Promise<void>, what: string) =>
+  const route = (path: string, handle: (xml: string, c: Caller, id: string) => Promise<void>, what: string, type: string) =>
     app.post(path, async (req, reply) => {
       const c = caller(req)
       if (typeof req.body !== 'string' || !req.body.trim()) throw new ConnectError(400, 'BAD_REQUEST', `The request body must be a ${what} XML document`)
@@ -26,10 +27,10 @@ export function registerDirectDebit(app: FastifyInstance, emulator: Emulator, ca
         if (e instanceof XmlSyntaxError) throw new ConnectError(400, 'BAD_REQUEST', `The request body is not well-formed XML: ${e.message}`)
         throw e
       }
-      return reply.code(202).header('Message-Request-Id', id).send()
+      return accepted(emulator.requests, req, reply, c, id, type)
     })
-  route('/direct-debit/collection', (xml, c, id) => emulator.directDebit.collect(xml, c.customer, id), 'pain.008')
-  route('/direct-debit/incoming-collection', (xml, c, id) => emulator.directDebit.refuse(xml, c.customer, id), 'pain.007')
+  route('/direct-debit/collection', (xml, c, id) => emulator.directDebit.collect(xml, c.customer, id), 'pain.008', DD_TYPES.outgoing)
+  route('/direct-debit/incoming-collection', (xml, c, id) => emulator.directDebit.refuse(xml, c.customer, id), 'pain.007', DD_TYPES.incoming)
 }
 
 /** A collection as the control plane shows it (amounts as decimal strings, customers as codes). */

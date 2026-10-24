@@ -6,6 +6,7 @@ import { ConnectError, errorsXml } from '../errors.js'
 import type { Emulator } from '../emulator.js'
 import { normalizeIban } from '../iban.js'
 import { requestId } from '../ids.js'
+import { accepted } from '../requests.js'
 import { vibanDate, type Op } from './messages.js'
 import type { VibanStatus } from './registry.js'
 
@@ -24,7 +25,7 @@ export function registerViban(app: FastifyInstance, emulator: Emulator, caller: 
       }
       const id = requestId()
       emulator.inbox.add({ customer: c.customer, type: out.type, requestId: id, body: 'errors' in out ? errorsXml(out.errors) : out.body })
-      return reply.code(202).header('Message-Request-Id', id).send()
+      return accepted(emulator.requests, req, reply, c, id, out.type)
     })
   }
 }

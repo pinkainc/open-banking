@@ -12,11 +12,15 @@ export interface Bounds {
   max: number
 }
 
-/** Defaults: tombstones as long as an unread message lives, keys 24 h, MsgIds by count only. */
+/** Defaults: tombstones as long as an unread message lives, keys 24 h, MsgIds by count only, processed messages a week, requests five days. */
 export const DEFAULT_BOUNDS = {
   tombstones: { ttlMs: 5 * DAY_MS, max: 100_000 },
   msgIds: { max: 200_000 },
   idempotencyKeys: { ttlMs: DAY_MS, max: 100_000 },
+  /** Processed messages kept for v2 (decision 621): a week, bodies included, so fewer. */
+  processed: { ttlMs: 7 * DAY_MS, max: 10_000 },
+  /** Submitted requests for /v2/requests (decision 630): as long as an unread answer lives. */
+  requests: { ttlMs: 5 * DAY_MS, max: 10_000 },
 } satisfies Record<string, Bounds>
 
 export class BoundedMap<K, V> {

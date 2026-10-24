@@ -8,7 +8,7 @@ import { keyOf } from './directory.js'
 import type { Emulator } from './emulator.js'
 import { requestId } from './ids.js'
 import type { Message, Scope } from './inbox.js'
-import { heartbeatTallinn, listTimeTallinn } from './time.js'
+import { heartbeatTallinn, isoLondon, listTimeTallinn } from './time.js'
 import { XmlSyntaxError, el, toXml } from './xml.js'
 import { simRoutes } from './sim.js'
 import { registerViban, vibanSimRoutes } from './viban/routes.js'
@@ -21,6 +21,10 @@ import { COMPRESSION_THRESHOLD, compress, negotiate } from './compression.js'
 import { mockLargeStatement } from './statements/mock-large.js'
 import { eeWebhookSimRoutes, registerEeWebhooks } from './webhooks/ee-routes.js'
 import { payeeSimRoutes, registerPayee } from './payee/routes.js'
+import { accepted as acceptedFor } from './requests.js'
+import { BALANCE_TYPE, STATEMENT_TYPE } from './statements/reports.js'
+import { registerMessagesProcessed, registerMessagesV2 } from './messages-v2.js'
+import { registerRequestsV2 } from './requests-v2.js'
 
 export interface AppOptions {
   emulator: Emulator
@@ -116,7 +120,8 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     if (m.requestId) reply.header('Message-Request-Id', m.requestId)
     return sendBody(req, reply, m.contentType, m.body)
   }
-  const accepted = (reply: FastifyReply, id: string) => reply.code(202).header('Message-Request-Id', id).send()
+  /** 202 with the Message-Request-Id, the request recorded for /v2/requests (decision 630). */
+  const accepted = (req: FastifyRequest, reply: FastifyReply, c: Caller, id: string, type: string) => acceptedFor(emulator.requests, req, reply, c, id, type)
 
   // X-Idempotency-Key (UK host only; the EE host knows duplicates by business keys such
   // as the pain.001 MsgId): a key seen on a successful POST within 24 hours is answered 409.
@@ -163,7 +168,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     const c = granted(req, SERVICE.heartbeat)
     const id = requestId()
     emulator.inbox.add({ customer: c.customer, type: 'HEARTBEAT', requestId: id, body: heartbeatMessage(c, '') })
-    return accepted(reply, id)
+    return accepted(req, reply, c, id, 'HEARTBEAT')
   })
 
   app.post('/heartbeat', async (req, reply) => {
@@ -171,7 +176,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     const id = requestId()
     const body = typeof req.body === 'string' ? req.body : req.body ? JSON.stringify(req.body) : ''
     emulator.inbox.add({ customer: c.customer, type: 'HEARTBEAT', requestId: id, body: heartbeatMessage(c, body) })
-    return accepted(reply, id)
+    return accepted(req, reply, c, id, 'HEARTBEAT')
   })
 
   // --- Messages -----------------------------------------------------------------
@@ -214,7 +219,8 @@ export function buildApp(opts: AppOptions): FastifyInstance {
         messageResponseType: m.type,
         clientCode: m.clientCode,
         clientCountry: m.clientCountry,
-        messageCreatedTime: listTimeTallinn(m.createdAt),
+        // EE host: Tallinn time without offset; UK host: UK time, ISO-8601 with offset (decision 627).
+        messageCreatedTime: flavour === 'UK' ? isoLondon(m.createdAt) : listTimeTallinn(m.createdAt),
       })),
     }
   })
@@ -246,6 +252,13 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     return reply.code(ok === messages.length ? 200 : ok === 0 ? 400 : 207).send({ messages })
   })
 
+  // --- Messages V2 and the requests API (UK host only, decision 620) -------------------
+  if (flavour === 'UK') {
+    registerMessagesV2(app, emulator, caller, bankCode)
+    jsonTextScope(app, (scope) => registerMessagesProcessed(scope, emulator, caller))
+    registerRequestsV2(app, emulator, caller)
+  }
+
   // --- Payment initiation ---------------------------------------------------------
   app.post('/payment', async (req, reply) => {
     const c = caller(req)
@@ -262,7 +275,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
       if (e instanceof XmlSyntaxError) throw new ConnectError(400, 'BAD_REQUEST', `The request body is not well-formed XML: ${e.message}`)
       throw e
     }
-    return accepted(reply, id)
+    return accepted(req, reply, c, id, 'PAYMENT')
   })
 
   // --- Account information ---------------------------------------------------------
@@ -274,7 +287,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
     const id = requestId()
     const body = typeof req.body === 'string' ? req.body : ''
     await (kind === 'statement' ? emulator.reports.statement(body, c.customer, id) : emulator.reports.balance(body, c.customer, id))
-    return accepted(reply, id)
+    return accepted(req, reply, c, id, kind === 'statement' ? STATEMENT_TYPE : BALANCE_TYPE)
   }
   app.post('/account-statement', report('statement'))
   app.post('/account-balance', report('balance'))

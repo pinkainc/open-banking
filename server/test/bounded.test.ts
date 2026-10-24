@@ -43,6 +43,7 @@ describe('BoundedMap', () => {
     assert.throws(() => new BoundedSet(new ManualClock(), { max: 0 }))
     assert.deepEqual(DEFAULT_BOUNDS, {
       tombstones: { ttlMs: 5 * DAY_MS, max: 100_000 }, msgIds: { max: 200_000 }, idempotencyKeys: { ttlMs: DAY_MS, max: 100_000 },
+      processed: { ttlMs: 7 * DAY_MS, max: 10_000 }, requests: { ttlMs: 5 * DAY_MS, max: 10_000 },
     })
   })
 })
@@ -56,25 +57,42 @@ describe('inbox tombstones', () => {
     return { ctx, ids }
   }
 
-  test('a repeat DELETE is 200 for five days after the confirmation, then 404', async () => {
+  test('a repeat DELETE is 200 while the message is kept as processed (a week from creation, decision 621), then 404', async () => {
     const { ctx, ids } = await confirmed(1)
-    ctx.clock.advance(5 * DAY_MS - 1)
+    ctx.clock.advance(7 * DAY_MS - 1)
     assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${ids[0]}` })).statusCode, 200)
     ctx.clock.advance(1)
     assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${ids[0]}` })).statusCode, 404)
   })
 
-  test('purge drops expired tombstones too', async () => {
+  test('confirmed late, the tombstone answers 200 for five days after the confirmation', async () => {
+    const ctx = await setup()
+    const id = ctx.emulator.inbox.add({ customer: C1, type: 'HEARTBEAT', body: '<x/>' }).id
+    ctx.clock.advance(4 * DAY_MS)
+    assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${id}` })).statusCode, 200)
+    ctx.clock.advance(5 * DAY_MS - 1)
+    assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${id}` })).statusCode, 200)
+    ctx.clock.advance(1)
+    assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${id}` })).statusCode, 404)
+  })
+
+  test('purge drops expired tombstones and archived processed messages too', async () => {
     const { ctx } = await confirmed(3)
     assert.equal(ctx.emulator.inbox.tombstones, 3)
+    assert.equal(ctx.emulator.inbox.processedKept, 3)
     ctx.clock.advance(5 * DAY_MS)
     ctx.emulator.inbox.purge()
     assert.equal(ctx.emulator.inbox.tombstones, 0)
+    assert.equal(ctx.emulator.inbox.processedKept, 3)
+    ctx.clock.advance(2 * DAY_MS)
+    ctx.emulator.inbox.purge()
+    assert.equal(ctx.emulator.inbox.processedKept, 0)
   })
 
   test('beyond the cap the oldest tombstone is forgotten', async () => {
-    const { ctx, ids } = await confirmed(3, { memory: { tombstones: { max: 2 } } })
+    const { ctx, ids } = await confirmed(3, { memory: { tombstones: { max: 2 }, processed: { max: 2 } } })
     assert.equal(ctx.emulator.inbox.tombstones, 2)
+    assert.equal(ctx.emulator.inbox.processedKept, 2)
     assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${ids[0]}` })).statusCode, 404)
     assert.equal((await call(ctx, { method: 'DELETE', url: `/messages/${ids[2]}` })).statusCode, 200)
   })

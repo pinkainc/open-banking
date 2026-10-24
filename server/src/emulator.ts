@@ -5,6 +5,7 @@ import { DEFAULT_BOUNDS, type Bounds } from './bounded.js'
 import { systemClock, type Clock } from './clock.js'
 import { Directory, type CustomerInput } from './directory.js'
 import { Inbox } from './inbox.js'
+import { RequestLog } from './requests.js'
 import { MemoryLedger, toMinor, type Ledger } from './ledger.js'
 import { PaymentEngine, type Bank } from './payments/engine.js'
 import { XsdValidator } from './payments/xsd.js'
@@ -42,7 +43,7 @@ export interface EmulatorOptions {
   /** How EE webhook payloads are sent (default HTTP POST); tests record them instead. */
   webhookDeliver?: Deliver
   /** Limits of what is remembered (decision 504); each part overrides DEFAULT_BOUNDS. */
-  memory?: { tombstones?: Partial<Bounds>; msgIds?: Partial<Bounds> }
+  memory?: { tombstones?: Partial<Bounds>; msgIds?: Partial<Bounds>; processed?: Partial<Bounds>; requests?: Partial<Bounds> }
 }
 
 export const DEFAULT_BANK: Bank = { bic: 'LHVBEE22', name: 'open-banking emulator' }
@@ -55,6 +56,8 @@ export class Emulator {
   readonly ledger: Ledger
   readonly rails: Rails
   readonly inbox: Inbox
+  /** Every request answered 202, as submitted (GET /v2/requests, decision 630). */
+  readonly requests: RequestLog
   readonly engine: PaymentEngine
   readonly bank: Bank
   readonly journal = new Journal()
@@ -72,7 +75,8 @@ export class Emulator {
     this.rails = opts.rails ?? new SimulatorRails()
     const tombstones = { ...DEFAULT_BOUNDS.tombstones, ...opts.memory?.tombstones }
     const msgIds = { ...DEFAULT_BOUNDS.msgIds, ...opts.memory?.msgIds }
-    this.inbox = new Inbox(this.clock, undefined, tombstones)
+    this.inbox = new Inbox(this.clock, undefined, tombstones, { ...DEFAULT_BOUNDS.processed, ...opts.memory?.processed })
+    this.requests = new RequestLog(this.clock, { ...DEFAULT_BOUNDS.requests, ...opts.memory?.requests })
     this.webhooksEe = new EeWebhooks(this.inbox, this.clock, { deliver: opts.webhookDeliver })
     this.bank = { ...DEFAULT_BANK, ...opts.bank }
     if (this.bank.address === undefined) this.bank.address = defaultBankAddress(this.bank.bic)

@@ -5,21 +5,22 @@ import type { Caller } from '../auth.js'
 import { ConnectError } from '../errors.js'
 import type { Emulator } from '../emulator.js'
 import { requestId } from '../ids.js'
+import { accepted } from '../requests.js'
 import { fromMinor } from '../ledger.js'
 import { jsonTextScope } from '../jsonbody.js'
-import { endOfDay, type Offer } from './service.js'
+import { FX_TYPES, endOfDay, type Offer } from './service.js'
 
 export function registerFx(app: FastifyInstance, emulator: Emulator, caller: (req: FastifyRequest) => Caller) {
   jsonTextScope(app, (scope) => {
-    const route = (path: string, handle: (body: unknown, c: Caller, id: string) => Promise<void>) =>
+    const route = (path: string, type: string, handle: (body: unknown, c: Caller, id: string) => Promise<void>) =>
       scope.post(path, async (req, reply) => {
         const c = caller(req)
         const id = requestId()
         await handle(req.body, c, id)
-        return reply.code(202).header('Message-Request-Id', id).send()
+        return accepted(emulator.requests, req, reply, c, id, type)
       })
-    route('/fx/trade-offer', (b, c, id) => emulator.fx.offer(b, c.customer, id))
-    route('/fx/trade-offer-confirmation', (b, c, id) => emulator.fx.confirm(b, c.customer, id))
+    route('/fx/trade-offer', FX_TYPES.offer, (b, c, id) => emulator.fx.offer(b, c.customer, id))
+    route('/fx/trade-offer-confirmation', FX_TYPES.confirmation, (b, c, id) => emulator.fx.confirm(b, c.customer, id))
   })
 }
 
