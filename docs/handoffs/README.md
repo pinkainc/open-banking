@@ -38,7 +38,7 @@ povijest.
 | S5 | UK flavour | gotovo | 81caade | 51/58 | 555 | noćni rad; odluke 700–714, 720–729, 740–749 (većina „potvrditi”), pitanja 62–76; plan je brojio 52 jer je `payment.oneoff` (404) računao kao pokriven |
 | S6 | L6 agency + ostatak | gotovo | e3b395a | 57/58 | 602 | noćni rad; odluke 800–813, 820–849 (većina „potvrditi”), pitanja 77–86; katalog pokriven (`payment.oneoff` namjerni 404); partner-site PSP primjeri nisu replayani |
 | S7 | Trajnost i jezgra | gotovo | 9ce3088 | 57/58 | 745 ×2 + 21 | noćni rad; odluke 900–968 (većina „potvrditi”), pitanje 87; suite na memoryju i Postgresu, open-ledger kao `Ledger`, async `Rails` + `HttpRails`; partner PSP primjeri replayani; ostatak stanja u S7b (odluka 968) |
-| S7b | Ostatak trajnog stanja | čeka | | | | umetnut u noćnom radu (odluka 968) |
+| S7b | Ostatak trajnog stanja | gotovo | 5496d3e | 57/58 | 817 ×2 + 690 + 27 | danju, 7 agenata; odluke 970–1004, pitanja 88–89; outbox i idempotentna knjiženja, `deferred` kao 4. korak checka |
 | S8 | Conformance harness | blokirano | | | | treba sandbox certifikat |
 
 ## Zajednička pravila (vrijede u svakoj sesiji)

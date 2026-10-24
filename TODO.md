@@ -97,10 +97,13 @@ Legend: `[x]` done · `[ ]` open · `[~]` in progress · `(?)` needs a sandbox r
 - [x] open-ledger as the `Ledger` over HTTP, ledger contract + e2e payment against a real open-ledger in `npm run check` (S7, 920–928)
 - [x] `Rails` with asynchronous outcomes and scheme credits; `HttpRails` bridge client + protocol doc, pending rails payments survive a restart (S7, 930–938, 948)
 - [x] Agency, acquiring, statements journal, payment engine state (duplicates, parked, limits), SEPA DD MsgIds in Postgres (S7, 940–947, 960–966)
-- [ ] Remaining memory-only business state (decision 967): directory of customers and accounts (~250 lines, widest), SEPA DD collections awaiting settlement (~150), Bacs (~250), FX (~120), contracts (~120), VIBANs (~180), webhooks (~200), UK account reports (~150), request log, idempotency keys, payee sim accounts → S7b
-- [ ] No shared transaction between ledger and inbox (decisions 906, 916): crash between booking and message loses the message → S7b (outbox)
-- [ ] Rails: DD returns after settlement and recalls (camt.056) not in the interface (933); bridge reconciliation `GET /payments/{ref}` described, not called (936) → S7b
-- [ ] `OPEN_BANKING_STORE=deferred` (missing-await detector) is not part of `npm run check`
+- [x] Remaining business state in Postgres: customers and accounts, DD collections, Bacs, FX, contracts, VIBANs, webhooks, UK account reports, request log, idempotency keys, payee sim (S7b, 970–989)
+- [x] Ledger outbox (906, 916) and idempotent bookings by key (S7b, 990–999)
+- [ ] After a crash a file round's pain.002 and parked-payment decision reports are not resent; a DD rejection report (nothing booked) can be lost (999)
+- [ ] Two emulators writing the same VIBAN, FX pricing, webhook config or `/_sim/viban` fault at once: last write wins (984, 987, 989)
+- [ ] A return of our own outgoing payment arrives as a plain `credit` without RtrInf; recall-return camt.054 carries no VIBAN/agency party (1000–1001)
+- [x] Rails: DD returns and recalls (camt.056), reconciliation `GET /payments/{ref}` after a timeout, first stored outcome wins (S7b, 1000–1003)
+- [x] `OPEN_BANKING_STORE=deferred` is the fourth step of `npm run check` (S7b, 1004)
 - [ ] Conformance harness: record exchanges against connect.test.lhv.eu once a sandbox certificate exists, divergences file → S8
 
 ## Za pregled ujutro
@@ -170,3 +173,10 @@ Odluke iz noćnog rada S7 (2026-10-24), označene „(noćni rad, potvrđeno 202
 - [x] 950–955 partner PSP primjeri: **camt.054 sad nosi `PstlAdr` banke pod `Svcr` (950), `NOTPROVIDED` se ne ponavlja (951)**; razlike potvrđene u testu
 - [x] 960–967 journal, keyed store, stanje payment enginea i DD MsgId u Postgresu; **knjiženje sad ide u journal prije izlaska iz in-flight limita (963)**
 - [x] Umetnut paket **S7b** (ostatak trajnog stanja) prije S8, jer S7 nije stigao sve poslovno stanje (odluka 967) (potvrđeno)
+
+Promjene ponašanja iz S7b (2026-10-24, korisnik budan, paket odobren; pogledati):
+
+- [ ] 989 ponovljeni `X-Idempotency-Key` dok je prvi zahtjev još u obradi sad je 409, i na drugom emulatoru; ključ se vraća za odgovor ≥ 300
+- [ ] 987 prvi pokušaj UK webhooka čeka da se zahtjev upiše u request log (do 5 s)
+- [ ] 1002 `POST` prema bridgeu koji istekne više nije odmah RJCT nego ACSP i rekonsilijacija; bridge nakon 404 mora odbiti zakašnjeli `POST`
+- [ ] 1001 opoziv (camt.056): DUPL / TECH / FRAD vraćaju se odmah, inače NOOR / ARDT / AM04 / NOAS

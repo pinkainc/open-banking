@@ -257,6 +257,27 @@ Sedam agenata strogo jedan za drugim (bez worktreeja), Opus 5.5, effort high.
   Za S7b isti rez: jedno do dva područja po agentu.
 - Sve poslovno stanje nije stalo u S7, pa je umetnut S7b (odluka 968).
 
+## S7b: ostatak trajnog stanja (2026-10-24, danju)
+
+Glavna sesija je orkestrirala sedam agenata strogo jednog za drugim (bez worktreeja), Opus 5.5, effort high. Korisnik je odobrio paket i pustio rad autonomno.
+
+| Agent | Poziva | Tokena | Ishod |
+|---|---|---|---|
+| A direktorij klijenata i računa | 94 | 188k | async `DirectoryStore` + `PgDirectory`, svi pozivatelji `await`, 748 ×2 (970–974) |
+| B SEPA DD naplate i Bacs | 65 | 190k | keyed vrste + `replace`, claim po stavci, popravak idempotency ključa pod `deferred` (979), 757 ×2 (975–979) |
+| C FX, ugovori, VIBAN-i | 75 | 185k | keyed vrste, brojevi VIBAN-a i FX deal brojevi jedinstveni preko dva emulatora, 766 ×2 (980–984) |
+| D webhookovi, UK izvještaji, logovi | 103 | 212k | retry webhooka jednom nakon restarta, Bacs „Pending” nakon restarta, 774 ×2 (985–989) |
+| E outbox i inbox | 92 | 234k | outbox u transakciji knjiženja, `recover()`; gubitak poruka iz inboxa se nije dao reproducirati (993), 781 ×2 (990–994) |
+| F idempotentna knjiženja | 75 | 200k | ključ knjiženja na sva tri ledgera, `ledger_bookings`, izvještaji u outboxu, 794 ×2 (995–999) |
+| G rails povrati i rekonsilijacija | 79 | 205k | camt.056, DD povrati, `GET /payments/{ref}`, prvi ishod pobjeđuje, `deferred` u checku, 817 ×2 + 690 (1000–1004) |
+
+Što se pokazalo:
+
+- **Agent F nije bio u planu.** Agent E je našao stariju rupu koja se tiče novca: pad nakon knjiženja, a prije spremanja stanja servisa, knjižio bi ponovno. Orkestrator je umetnuo F prije railsa. Nalaz jednog agenta treba odmah prebaciti u brief sljedećeg, ne ostaviti za handoff.
+- **Nalaz agenta nije činjenica.** C je javio da se pri pražnjenju inboxa iz dva emulatora gube poruke. E to nije mogao reproducirati: dva čitača vide istu najstariju poruku, kako LHV red i radi. Prije popravka treba reproducirajući test.
+- Svi agenti su završili ispod guarda (185k–234k) s jednim do pet manjih područja po agentu. E i F su bili najbliže granici jer su dirali sva mjesta knjiženja.
+- `deferred` je korak checka paralelno s memory i Postgres runom, pa check traje oko 1 min 40 s umjesto 80 s.
+
 ## Noćni lanac: `scripts/overnight.sh` (2026-10-24)
 
 S3–S7 su odrađeni bez čovjeka, od 01:03 do 06:18. Svaku sesiju je pokrenula shell petlja kao

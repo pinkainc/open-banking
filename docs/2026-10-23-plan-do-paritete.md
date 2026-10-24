@@ -24,12 +24,12 @@ firme, odluka korisnika). Zato:
 - nova pitanja za sandbox dopisuju se u `sandbox-questions.md` (mirror repo, lokalno,
   nikad ne pushati).
 
-## Gdje smo (2026-10-24, nakon S7)
+## Gdje smo (2026-10-24, nakon S7b)
 
-S1–S7 gotovi (`9ce3088`): katalog pokriven 57/58 (`payment.oneoff` namjerni 404), 745 testova
-na memory storeu i 745 na Postgresu, plus 21 protiv pravog open-ledgera; sandbox pitanja do 87.
-Sljedeći je S7b (ostatak poslovnog stanja u Postgres, outbox ledger + inbox, odluka 968);
-S8 čeka sandbox certifikat.
+S1–S7b gotovi (`5496d3e`): katalog pokriven 57/58 (`payment.oneoff` namjerni 404), 817 testova
+na memory storeu i 817 na Postgresu, 690 na deferred storeu, plus 27 protiv pravog open-ledgera;
+sandbox pitanja do 89. Restart na istom namespaceu ne gubi poslovno stanje (odluke 970–1004).
+Lanac stoji: S8 čeka sandbox certifikat.
 
 ## Polazno stanje (commit `bcc23e0`)
 
