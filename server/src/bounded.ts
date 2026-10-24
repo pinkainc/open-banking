@@ -23,6 +23,14 @@ export const DEFAULT_BOUNDS = {
   requests: { ttlMs: 5 * DAY_MS, max: 10_000 },
 } satisfies Record<string, Bounds>
 
+/**
+ * Keeps an append-only log to its newest `max` entries (decision 915): once it is a tenth
+ * over, the oldest go in one splice, so a push stays amortised O(1).
+ */
+export function keepLast<T>(log: T[], max: number) {
+  if (log.length > max + Math.ceil(max / 10)) log.splice(0, log.length - max)
+}
+
 export class BoundedMap<K, V> {
   #m = new Map<K, { value: V; until: number }>()
   constructor(private clock: Clock, readonly bounds: Bounds) {

@@ -35,7 +35,8 @@ export interface Seed {
 
 export interface EmulatorOptions {
   clock?: Clock
-  ledger?: Ledger
+  /** The ledger, or a factory given the emulator's clock (a PgLedger, pg/ledger.ts); default in memory. */
+  ledger?: Ledger | ((clock: Clock) => Ledger)
   rails?: Rails
   /** Directory of the published XSDs; schema validation is skipped without it. */
   xsdDir?: string
@@ -93,7 +94,7 @@ export class Emulator {
 
   constructor(opts: EmulatorOptions & { bank?: Partial<Bank> } = {}) {
     this.clock = opts.clock ?? systemClock
-    this.ledger = opts.ledger ?? new MemoryLedger()
+    this.ledger = typeof opts.ledger === 'function' ? opts.ledger(this.clock) : opts.ledger ?? new MemoryLedger()
     this.rails = opts.rails ?? new SimulatorRails()
     const tombstones = { ...DEFAULT_BOUNDS.tombstones, ...opts.memory?.tombstones }
     const msgIds = { ...DEFAULT_BOUNDS.msgIds, ...opts.memory?.msgIds }
@@ -145,11 +146,13 @@ export class Emulator {
 
   static async fromSeed(seed: Seed, opts: EmulatorOptions = {}): Promise<Emulator> {
     const e = new Emulator({ ...opts, bank: seed.bank })
-    for (const c of seed.customers) await e.addCustomer(c)
+    // A persistent ledger (PgLedger) already holds the seed's money after a restart (decision 914).
+    for (const c of seed.customers) await e.addCustomer(c, { fundOnce: true })
     return e
   }
 
-  async addCustomer(c: CustomerInput) {
+  /** fundOnce: seed balances only for account currencies the ledger has no balance in yet. */
+  async addCustomer(c: CustomerInput, o: { fundOnce?: boolean } = {}) {
     if (c.limits !== undefined) {
       for (const [k, v] of Object.entries(c.limits)) {
         if (k !== 'daily' && k !== 'monthly' && k !== 'instant') throw new Error(`unknown limit ${k}`)
@@ -166,7 +169,8 @@ export class Emulator {
       if (typeof a === 'string') continue
       if (a.viban) this.viban.registry.agreement(a.iban)
       if (!a.balances) continue
-      for (const [ccy, amount] of Object.entries(a.balances)) await this.fund(a.iban, amount, ccy)
+      const held = o.fundOnce ? await this.ledger.balances(normalizeIban(a.iban)) : {}
+      for (const [ccy, amount] of Object.entries(a.balances)) if (!held[ccy]) await this.fund(a.iban, amount, ccy)
     }
     return customer
   }

@@ -2,6 +2,8 @@
 // more, so the in-memory implementation can later be replaced by open-ledger (through
 // its SDK or HTTP API) without touching the Connect-facing code. Amounts are integers
 // in minor units (cents).
+import { keepLast } from './bounded.js'
+
 export class InsufficientFunds extends Error {}
 
 export interface Ledger {
@@ -22,6 +24,9 @@ export const isSystemAccount = (a: string) => a.startsWith('@')
 
 export interface Posting { ref: string; account: string; currency: string; amount: bigint; at: number }
 
+/** Postings MemoryLedger keeps (decision 915): the journal is for inspection, balances do not depend on it. */
+export const MEMORY_POSTINGS_MAX = 100_000
+
 export class MemoryLedger implements Ledger {
   #balances = new Map<string, bigint>()
   #holds = new Map<string, { account: string; amount: bigint; currency: string }>()
@@ -35,7 +40,8 @@ export class MemoryLedger implements Ledger {
     return s
   }
 
-  async available(account: string, currency: string) { return this.#bal(account, currency) - this.#held(account, currency) }
+  async available(account: string, currency: string) { return this.#avail(account, currency) }
+  #avail(a: string, c: string) { return this.#bal(a, c) - this.#held(a, c) }
 
   async balances(account: string) {
     const out: Record<string, { balance: bigint; available: bigint }> = {}
@@ -46,14 +52,18 @@ export class MemoryLedger implements Ledger {
     return out
   }
 
-  async reserve(r: { ref: string; account: string; amount: bigint; currency: string }) {
+  async reserve(r: { ref: string; account: string; amount: bigint; currency: string }) { this.#reserve(r) }
+  #reserve(r: { ref: string; account: string; amount: bigint; currency: string }) {
     if (r.amount <= 0n) throw new Error('amount must be positive')
     if (this.#holds.has(r.ref)) throw new Error(`reservation ${r.ref} exists`)
-    if (!isSystemAccount(r.account) && (await this.available(r.account, r.currency)) < r.amount) throw new InsufficientFunds()
+    // Checked and held with no await between (decision 913): concurrent reserves once all
+    // read the same available and together overdrew it.
+    if (!isSystemAccount(r.account) && this.#avail(r.account, r.currency) < r.amount) throw new InsufficientFunds()
     this.#holds.set(r.ref, { account: r.account, amount: r.amount, currency: r.currency })
   }
 
-  async commit(ref: string, to: string) {
+  async commit(ref: string, to: string) { this.#commit(ref, to) }
+  #commit(ref: string, to: string) {
     const h = this.#holds.get(ref)
     if (!h) throw new Error(`no reservation ${ref}`)
     this.#holds.delete(ref)
@@ -63,8 +73,9 @@ export class MemoryLedger implements Ledger {
   async release(ref: string) { this.#holds.delete(ref) }
 
   async transfer(t: { ref: string; from: string; to: string; amount: bigint; currency: string }) {
-    await this.reserve({ ref: t.ref, account: t.from, amount: t.amount, currency: t.currency })
-    await this.commit(t.ref, t.to)
+    // reserve + commit with no await between, so nothing sees or takes the hold in between.
+    this.#reserve({ ref: t.ref, account: t.from, amount: t.amount, currency: t.currency })
+    this.#commit(t.ref, t.to)
   }
 
   #move(ref: string, from: string, to: string, amount: bigint, currency: string) {
@@ -72,6 +83,7 @@ export class MemoryLedger implements Ledger {
     this.#balances.set(this.#k(from, currency), this.#bal(from, currency) - amount)
     this.#balances.set(this.#k(to, currency), this.#bal(to, currency) + amount)
     this.postings.push({ ref, account: from, currency, amount: -amount, at }, { ref, account: to, currency, amount, at })
+    keepLast(this.postings, MEMORY_POSTINGS_MAX)
   }
 }
 

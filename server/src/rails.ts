@@ -2,6 +2,8 @@
 // and books it when the rails report settlement. The simulator settles everything at
 // once unless told to reject payments to a given account; real bridges (SEPA, SEPA
 // Instant, UK Faster Payments) will implement the same interface.
+import { keepLast } from './bounded.js'
+
 /** FAST: UK Faster Payments (decision 840). */
 export type Scheme = 'SEPA' | 'INST' | 'SWIFT' | 'TARGET2' | 'FAST'
 
@@ -47,6 +49,9 @@ export interface Rails {
   collect(c: OutgoingCollection): Promise<CollectionOutcome>
 }
 
+/** What SimulatorRails keeps of what it sent and collected (/_sim/rails/…, decision 915). */
+export const RAILS_LOG_MAX = 10_000
+
 export class SimulatorRails implements Rails {
   readonly sent: (OutgoingPayment & { outcome: RailsOutcome })[] = []
   readonly collections: (OutgoingCollection & { outcome: CollectionOutcome })[] = []
@@ -72,6 +77,7 @@ export class SimulatorRails implements Rails {
     const code = this.#collectionRejects.get(c.debtor.iban.toUpperCase())
     const outcome: CollectionOutcome = code ? { status: 'rejected', code } : { status: 'settled' }
     this.collections.push({ ...c, outcome })
+    keepLast(this.collections, RAILS_LOG_MAX)
     return outcome
   }
 
@@ -81,6 +87,7 @@ export class SimulatorRails implements Rails {
     const outcome: RailsOutcome = p.scheme === 'INST' && this.#instantFails.has(target) ? { status: 'unavailable' }
       : reason ? { status: 'rejected', reason } : { status: 'settled' }
     this.sent.push({ ...p, outcome })
+    keepLast(this.sent, RAILS_LOG_MAX)
     return outcome
   }
 

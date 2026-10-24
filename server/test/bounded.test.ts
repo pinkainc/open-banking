@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { describe, test } from 'node:test'
-import { BoundedMap, BoundedSet, DEFAULT_BOUNDS } from '../src/bounded.js'
+import { BoundedMap, BoundedSet, DEFAULT_BOUNDS, keepLast } from '../src/bounded.js'
 import { DAY_MS, ManualClock } from '../src/clock.js'
 import { C1, INBOXES, call, drain, pain001, report, reportError, setup } from './helpers.js'
 
@@ -137,4 +137,12 @@ describe('remembered idempotency keys (UK host)', () => {
     assert.equal(await post(b), 409)
     assert.equal(await post(a), 202, 'evicted')
   })
+})
+
+test('keepLast keeps the newest entries of a log, trimming once a tenth over', () => {
+  const log: number[] = []
+  for (let i = 0; i < 25; i++) { log.push(i); keepLast(log, 10) }
+  assert.ok(log.length >= 10 && log.length <= 11)
+  assert.equal(log.at(-1), 24)
+  assert.deepEqual(log.slice(-10), [15, 16, 17, 18, 19, 20, 21, 22, 23, 24])
 })

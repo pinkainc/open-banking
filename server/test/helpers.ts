@@ -2,6 +2,7 @@
 // fastify inject (the certificate identity comes from test headers instead of TLS:
 // x-test-serial / x-test-cn, x-test-valid-from / -to, x-test-fingerprint;
 // mtls.test.ts covers the real transport), and a pain.001 writer for fixtures.
+import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -11,7 +12,11 @@ import addFormats from 'ajv-formats'
 import { buildApp, type AppOptions } from '../src/app.js'
 import { ManualClock } from '../src/clock.js'
 import { Emulator, type EmulatorOptions, type Seed } from '../src/emulator.js'
-import { PgInbox, PgInboxDb } from '../src/pg/inbox.js'
+import { MemoryInbox } from '../src/inbox.js'
+import { MemoryLedger, type Ledger } from '../src/ledger.js'
+import { PgDb } from '../src/pg/db.js'
+import { PgInbox } from '../src/pg/inbox.js'
+import { PgLedger } from '../src/pg/ledger.js'
 import { XsdValidator } from '../src/payments/xsd.js'
 import { parseXml } from '../src/xml.js'
 
@@ -59,27 +64,52 @@ export function seed(): Seed {
   return JSON.parse(readFileSync(join(ROOT, 'config/dev-seed.json'), 'utf8'))
 }
 
-let pgDb: Promise<PgInboxDb> | undefined
-/** One pool per test process for DATABASE_URL; every PgInbox on it has its own namespace. */
-export const pgInboxDb = () => (pgDb ??= PgInboxDb.connect(process.env.DATABASE_URL!, { max: 4 }))
+let pgPool: Promise<PgDb> | undefined
+/** One pool per test process for DATABASE_URL; every PgInbox and PgLedger on it has its own namespace. */
+export const pgDb = () => (pgPool ??= PgDb.connect(process.env.DATABASE_URL!, { max: 4 }))
+export const pgInboxDb = pgDb
+/**
+ * The store setup() builds an emulator on (decision 912): OPEN_BANKING_STORE=postgres
+ * puts the inbox and the ledger of every emulator in Postgres (DATABASE_URL) under a fresh
+ * namespace; default memory. `npm run check` runs the whole suite once on each.
+ */
+export const STORE = process.env.OPEN_BANKING_STORE ?? 'memory'
+if (STORE !== 'memory' && STORE !== 'postgres') throw new Error(`OPEN_BANKING_STORE must be memory or postgres, not ${STORE}`)
+if (STORE === 'postgres' && !process.env.DATABASE_URL) throw new Error('OPEN_BANKING_STORE=postgres needs DATABASE_URL')
+/** Emulator options with the inbox and the ledger in Postgres, one fresh namespace for both. */
+export async function postgresStore(): Promise<EmulatorOptions> {
+  const db = await pgDb()
+  const namespace = randomUUID()
+  return {
+    inbox: (clock, bounds) => new PgInbox(db, clock, { ...bounds, namespace }),
+    ledger: (clock) => new PgLedger(db, { namespace, clock }),
+  }
+}
+/** The options of the selected store (STORE), for every emulator a test builds. */
+export const storeOptions = async (): Promise<EmulatorOptions> => (STORE === 'postgres' ? postgresStore() : {})
 /**
  * Inbox stores to run inbox behaviour against, as emulator options: memory always,
  * Postgres when DATABASE_URL is set (npm run check sets it; without it the Postgres
- * variants are not registered, never skipped).
+ * variants are not registered, never skipped). The ledger is the selected store's.
  */
-export const INBOXES: [string, () => Promise<EmulatorOptions>][] = [['memory', async () => ({})]]
+export const INBOXES: [string, () => Promise<EmulatorOptions>][] = [
+  ['memory', async () => ({ inbox: (clock, bounds) => new MemoryInbox(clock, undefined, bounds.tombstones, bounds.processed) })],
+]
 if (process.env.DATABASE_URL) {
   INBOXES.push(['postgres', async () => {
-    const db = await pgInboxDb()
+    const db = await pgDb()
     return { inbox: (clock, bounds) => new PgInbox(db, clock, bounds) }
   }])
 }
+/** Ledgers to run ledger behaviour against: memory always, Postgres when DATABASE_URL is set. */
+export const LEDGERS: [string, () => Promise<Ledger>][] = [['memory', async () => new MemoryLedger()]]
+if (process.env.DATABASE_URL) LEDGERS.push(['postgres', async () => new PgLedger(await pgDb())])
 
 export interface Ctx { app: FastifyInstance; emulator: Emulator; clock: ManualClock }
 
 export async function setup(opts: EmulatorOptions = {}, s: Seed = seed(), appOpts: Partial<AppOptions> = {}): Promise<Ctx> {
   const clock = new ManualClock('2026-03-10T08:00:00Z')
-  const emulator = await Emulator.fromSeed(s, { clock, xsdDir: HAVE_REFERENCE ? XSD_DIR : undefined, ...opts })
+  const emulator = await Emulator.fromSeed(s, { clock, xsdDir: HAVE_REFERENCE ? XSD_DIR : undefined, ...(await storeOptions()), ...opts })
   const identify = (req: FastifyRequest) => {
     const serial = req.headers['x-test-serial']
     const cn = req.headers['x-test-cn']

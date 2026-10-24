@@ -5,7 +5,9 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildApp } from './app.js'
 import { Emulator, type Seed } from './emulator.js'
-import { PgInbox, PgInboxDb } from './pg/inbox.js'
+import { PgDb } from './pg/db.js'
+import { PgInbox } from './pg/inbox.js'
+import { PgLedger } from './pg/ledger.js'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const env = process.env
@@ -24,11 +26,16 @@ const max = (v: string | undefined) => {
   if (!/^[1-9]\d*$/.test(v)) throw new Error(`a MAX_* setting must be a positive integer, not ${v}`)
   return { max: Number(v) }
 }
-// DATABASE_URL: the inbox in Postgres (decision 900), under INBOX_NAMESPACE (default
-// "default"), so a restart keeps the messages; without it, in memory.
-const inboxDb = env.DATABASE_URL ? await PgInboxDb.connect(env.DATABASE_URL) : undefined
+// DATABASE_URL: the inbox and the ledger in Postgres (decisions 900, 910), under
+// STORE_NAMESPACE (the former INBOX_NAMESPACE still works; default "default"), so a restart
+// keeps the messages and the money; without it, in memory. DATABASE_POOL_MAX: connections
+// (default 10).
+const pool = max(env.DATABASE_POOL_MAX)
+const db = env.DATABASE_URL ? await PgDb.connect(env.DATABASE_URL, pool) : undefined
+const namespace = env.STORE_NAMESPACE ?? env.INBOX_NAMESPACE ?? 'default'
 const emulator = await Emulator.fromSeed(seed, {
-  inbox: inboxDb && ((clock, bounds) => new PgInbox(inboxDb, clock, { ...bounds, namespace: env.INBOX_NAMESPACE ?? 'default' })),
+  inbox: db && ((clock, bounds) => new PgInbox(db, clock, { ...bounds, namespace })),
+  ledger: db && ((clock) => new PgLedger(db, { namespace, clock })),
   xsdDir: existsSync(xsdDir) ? xsdDir : undefined,
   strictIban: env.STRICT_IBAN !== '0',
   pain00103Until: env.PAIN_001_001_03_UNTIL,
@@ -56,7 +63,13 @@ setInterval(() => { emulator.fx.tick().catch((e) => console.error('FX settlement
 setInterval(() => { emulator.webhooksEe.tick().catch((e) => console.error('EE webhook delivery failed:', e)) }, 15 * 1000).unref()
 // UK webhooks: retries for up to 24 h, due on the clock; checked every 15 seconds.
 setInterval(() => { emulator.webhooksUk.tick().catch((e) => console.error('UK webhook delivery failed:', e)) }, 15 * 1000).unref()
-for (const signal of ['SIGTERM', 'SIGINT'] as const) process.on(signal, () => process.exit(0))
+// Shutdown: stop taking requests, let the ones in flight finish, then close the pool.
+let closing = false
+for (const signal of ['SIGTERM', 'SIGINT'] as const) process.on(signal, () => {
+  if (closing) process.exit(1) // a second signal: now
+  closing = true
+  app.close().then(() => db?.close()).then(() => process.exit(0), (e) => { console.error('shutdown failed:', e); process.exit(1) })
+})
 const port = Number(env.PORT ?? 8443)
 await app.listen({ port, host: env.HOST ?? '127.0.0.1' })
 console.error(`listening on https://${env.HOST ?? '127.0.0.1'}:${port} (mutual TLS)`)

@@ -15,75 +15,18 @@
 //   An inbox write moves no money, so no ledger-wide lock and no gate as open-ledger has.
 import { randomUUID } from 'node:crypto'
 import pg from 'pg'
+import type { PgDb } from './db.js'
 import { DEFAULT_BOUNDS, type Bounds } from '../bounded.js'
 import type { Clock } from '../clock.js'
 import { keyOf } from '../directory.js'
 import { responseId } from '../ids.js'
 import { ARCHIVE_MS, RETENTION_MS, type Entry, type InboxStore, type Message, type NewMessage, type ProcessedRefusal, type Scope } from '../inbox.js'
 
-// A processed message is a row with processed_ord set (its place among the processed,
-// as BoundedMap's insertion order); a pending one has it null. Times are ms since epoch;
-// a null `until` never expires (Bounds without ttlMs).
-const SCHEMA = `
-create sequence if not exists inbox_seq;
-create table if not exists inbox_messages (
-  ns              text    not null,
-  id              text    not null,
-  owner           text    not null,
-  request_id      text,
-  type            text    not null,
-  client_code     text    not null,
-  client_country  text    not null,
-  created_at      bigint  not null,
-  restored_at     bigint,
-  body            bytea   not null,
-  body_text       boolean not null,
-  content_type    text    not null,
-  seq             bigint  not null,
-  processed_ord   bigint,
-  processed_until bigint,
-  primary key (ns, id)
-);
-create index if not exists inbox_messages_queue on inbox_messages (ns, created_at, seq);
-create index if not exists inbox_messages_processed on inbox_messages (ns, processed_ord) where processed_ord is not null;
-create table if not exists inbox_tombstones (
-  ns    text   not null,
-  id    text   not null,
-  owner text   not null,
-  until bigint,
-  ord   bigint not null,
-  primary key (ns, id)
-);
-create index if not exists inbox_tombstones_ord on inbox_tombstones (ns, ord);
-`
-
-/** Serialises schema creation between processes connecting at once (as open-ledger's 815). */
-const SCHEMA_LOCK = 4410
-
 type Q = pg.Pool | pg.PoolClient
 type Row = Record<string, any>
 
-/** A connection pool with the inbox schema in place; one per process and database is enough. */
-export class PgInboxDb {
-  private constructor(readonly pool: pg.Pool) {}
-
-  static async connect(url: string, o: { max?: number } = {}): Promise<PgInboxDb> {
-    // allowExitOnIdle: a process (a test file) ends when its work is done, without close().
-    const pool = new pg.Pool({ connectionString: url, max: o.max ?? 10, allowExitOnIdle: true })
-    const c = await pool.connect()
-    try {
-      await c.query('select pg_advisory_lock($1)', [SCHEMA_LOCK])
-      // One statement each: `create index if not exists` locks its table even when the index exists.
-      for (const statement of SCHEMA.split(';').filter((s) => s.trim())) await c.query(statement)
-    } finally {
-      await c.query('select pg_advisory_unlock($1)', [SCHEMA_LOCK])
-      c.release()
-    }
-    return new PgInboxDb(pool)
-  }
-
-  close() { return this.pool.end() }
-}
+/** The pool PgInbox takes; the name before the ledger joined it (decision 910). */
+export { PgDb as PgInboxDb } from './db.js'
 
 export interface PgInboxOptions {
   /** Whose rows these are; default a random one (a fresh, empty inbox). */
@@ -102,7 +45,7 @@ export class PgInbox implements InboxStore {
   #gone: Bounds
   #processed: Bounds
 
-  constructor(private db: PgInboxDb, private clock: Clock, o: PgInboxOptions = {}) {
+  constructor(private db: PgDb, private clock: Clock, o: PgInboxOptions = {}) {
     this.namespace = o.namespace ?? randomUUID()
     this.#retentionMs = o.retentionMs ?? RETENTION_MS
     this.#gone = o.tombstones ?? DEFAULT_BOUNDS.tombstones

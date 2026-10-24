@@ -12,7 +12,7 @@ import type { FastifyInstance } from 'fastify'
 import { buildApp } from '../src/app.js'
 import { Emulator } from '../src/emulator.js'
 import { parseXml } from '../src/xml.js'
-import { C1, ROOT, SP, seed } from './helpers.js'
+import { C1, ROOT, SP, seed, storeOptions } from './helpers.js'
 
 let openssl = true
 try { execFileSync('openssl', ['version'], { stdio: 'ignore' }) } catch { openssl = false }
@@ -36,7 +36,7 @@ describe('mutual TLS', { skip: openssl ? false : 'openssl not available' }, () =
       periodCert(dir, 'future', C1.code, '20990101000000Z', '20991231000000Z')
       periodCert(foreign, 'expiredIntruder', C1.code, '20200101000000Z', '20210101000000Z')
     }
-    emulator = await Emulator.fromSeed(seed())
+    emulator = await Emulator.fromSeed(seed(), await storeOptions())
     app = buildApp({ emulator, https: { key: read(dir, 'server.key'), cert: read(dir, 'server.crt'), ca: read(dir, 'ca.crt') } })
     await app.listen({ port: 0, host: '127.0.0.1' })
     port = (app.server.address() as AddressInfo).port
