@@ -71,6 +71,30 @@ export interface CreditRecall {
 /** Returned (pacs.004, our AcctSvcrRef of the debit) or refused (camt.029) with its reason code. */
 export type RecallResult = { status: 'returned'; servicerRef: string } | { status: 'refused'; code: string }
 
+/**
+ * The scheme returned a payment of ours the rails had settled (a pacs.004 from the
+ * creditor's bank, decision 1014).
+ */
+export interface PaymentReturn {
+  /** Our payment's ref, as `send` gave it. */
+  ref: string
+  /** The attempt's scheme (937: a payment is ref + scheme); optional. */
+  scheme?: Scheme
+  /** The return's own reference (pacs.004 RtrId). */
+  returnRef: string
+  /** The return reason: ISO (AC04, MS03 …) or the scheme's own code (Faster Payments 00000001 …). */
+  code: string
+  /** What came back, at most the payment's amount (charges taken); default the payment's amount. */
+  amount?: bigint
+  /** The payment's currency when given. */
+  currency?: string
+}
+/**
+ * `applied` when booked back now; false for an unknown or not settled payment, another
+ * scheme, a wrong amount or currency, or a repeat, which carries the first return's AcctSvcrRef.
+ */
+export interface PaymentReturnResult { applied: boolean; servicerRef?: string }
+
 /** The event cannot be applied now but must be later (e.g. the funds are not there yet): the bridge retries it. */
 export class RailsRetryLater extends Error {}
 
@@ -91,6 +115,8 @@ export interface RailsEvents {
   collectionReturned(ref: string, code: string): Promise<boolean>
   /** A recall of a credit received (camt.056, decision 1001); a repeat answers the first result. */
   recall(r: CreditRecall): Promise<RecallResult>
+  /** A payment of ours the rails settled came back (pacs.004, decision 1014); a repeat books nothing. */
+  paymentReturned(r: PaymentReturn): Promise<PaymentReturnResult>
 }
 
 /** A SEPA Direct Debit our creditor sends to a debtor at another bank (L4). */
@@ -199,6 +225,12 @@ export class SimulatorRails implements Rails {
   async recall(r: CreditRecall): Promise<RecallResult> {
     if (!this.#events) throw new Error('no RailsEvents registered')
     return this.#events.recall(r)
+  }
+
+  /** The creditor's bank returns a payment the rails settled (decision 1014). */
+  async returnPayment(r: PaymentReturn): Promise<PaymentReturnResult> {
+    if (!this.#events) throw new Error('no RailsEvents registered')
+    return this.#events.paymentReturned(r)
   }
 
   /** Payments to this account are rejected by the "scheme" with this reason. */

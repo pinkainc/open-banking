@@ -5,7 +5,7 @@
 //   us → bridge   POST /payments, GET /payments/{ref}?scheme= (reconciliation), POST /collections,
 //                 GET /reachability/{iban}
 //   bridge → us   POST /rails/events (payment outcomes, credits, collection returns,
-//                 recalls of credits), railsCallbackApp()
+//                 recalls of credits, returns of our payments), railsCallbackApp()
 //
 // Every request both ways carries X-Rails-HMAC: hex(HMAC-SHA256(key = UTF-8 shared secret,
 // message = raw body bytes)), as LHV's X-LHV-HMAC; a GET signs the empty body. A request
@@ -15,13 +15,15 @@ import { createHmac, timingSafeEqual } from 'node:crypto'
 import Fastify, { type FastifyInstance } from 'fastify'
 import { fromMinor, toMinor } from './ledger.js'
 import {
-  RailsRetryLater, type CollectionOutcome, type CreditRecall, type CreditResult, type IncomingCredit, type OutgoingCollection, type OutgoingPayment, type Rails,
+  RailsRetryLater, type CollectionOutcome, type CreditRecall, type CreditResult, type IncomingCredit, type OutgoingCollection, type OutgoingPayment, type PaymentReturn, type Rails,
   type RailsAnswer, type RailsEvents, type RailsOutcome, type RailsStatus, type Scheme,
 } from './rails.js'
 
 export const HMAC_HEADER = 'x-rails-hmac'
 /** A SEPA reason code (R-transactions, recall reasons). */
 const R_CODE = /^[A-Z0-9]{4}$/
+/** A payment return's reason: ISO (four characters) or Faster Payments' eight digits (decision 1014). */
+const RETURN_CODE = /^[A-Z0-9]{4}$|^[0-9]{8}$/
 const SCHEMES: readonly Scheme[] = ['SEPA', 'INST', 'SWIFT', 'TARGET2', 'FAST']
 
 export function railsHmac(secret: string, body: string | Buffer): string {
@@ -179,6 +181,11 @@ export class HttpRails implements Rails {
       const recall: CreditRecall = { ref: r.ref, recallRef: r.recallRef, code: r.code }
       return { status: 200, body: await this.#events.recall(recall) }
     }
+    if (e?.type === 'payment.returned') {
+      const r = returnOf(e)
+      if (typeof r === 'string') return { status: 400, body: { error: r } }
+      return { status: 200, body: await this.#events.paymentReturned(r) }
+    }
     return { status: 400, body: { error: `unknown event type ${String(e?.type)}` } }
   }
 
@@ -228,6 +235,20 @@ function outcomeOf(o: any): RailsOutcome | undefined {
   if (o?.status === 'settled' || o?.status === 'unavailable') return { status: o.status }
   if (o?.status === 'rejected') return { status: 'rejected', reason: typeof o.reason === 'string' && o.reason ? o.reason : 'Payment declined.' }
   return undefined
+}
+
+/** A PaymentReturn from the callback body (payment.returned), or what is wrong with it. */
+function returnOf(e: any): PaymentReturn | string {
+  for (const k of ['ref', 'returnRef', 'code'] as const) if (typeof e[k] !== 'string' || !e[k]) return `payment.returned needs ${k}`
+  if (!RETURN_CODE.test(e.code)) return `bad return code ${e.code}`
+  if (e.scheme !== undefined && !SCHEMES.includes(e.scheme)) return `unknown scheme ${String(e.scheme)}`
+  if (e.currency !== undefined && (typeof e.currency !== 'string' || !/^[A-Z]{3}$/.test(e.currency))) return `bad currency ${String(e.currency)}`
+  let amount: bigint | undefined
+  if (e.amount !== undefined) {
+    try { amount = toMinor(e.amount) } catch { return `bad amount ${String(e.amount)}` }
+    if (amount <= 0n) return `bad amount ${String(e.amount)}`
+  }
+  return { ref: e.ref, scheme: e.scheme, returnRef: e.returnRef, code: e.code, amount, currency: e.currency }
 }
 
 /** An IncomingCredit from the callback body, or what is wrong with it. */

@@ -30,7 +30,7 @@ import { ibanChecksumOk, ibanCountry, isSepaCountry, normalizeIban } from '../ib
 import { servicerRef } from '../ids.js'
 import type { InboxStore } from '../inbox.js'
 import { InsufficientFunds, toMinor, type Ledger } from '../ledger.js'
-import { sameOutcome, type CreditRecall, type CreditResult, type IncomingCredit, type Rails, type RailsOutcome, type RecallResult, type Scheme } from '../rails.js'
+import { sameOutcome, type CreditRecall, type CreditResult, type IncomingCredit, type PaymentReturn, type PaymentReturnResult, type Rails, type RailsOutcome, type RecallResult, type Scheme } from '../rails.js'
 import { parseXml, XmlSyntaxError } from '../xml.js'
 import { isUkAccount } from '../routing.js'
 import type { Booking } from './camt054.js'
@@ -157,6 +157,8 @@ type EntryOf = (status: TxStatus) => OutboxItem
 interface Round { id: string; file: FileRef; first: boolean }
 /** The outbox kind of a round's pain.002 (decision 1005): a group per round. */
 const ROUND_KIND = 'pain002'
+/** A settled external payment kept for a return (decision 1014): an item of its settlement's commit. */
+const SETTLED_KIND = 'payment-settled'
 /** The timer's recovery leaves a round this long to the process running it (decision 1005). */
 export const ROUND_RECOVER_MIN_AGE_MS = 10 * 60 * 1000
 type StoredFile = PendingRecord['file']
@@ -232,6 +234,8 @@ export class PaymentEngine {
   #crediting = new Map<string, Promise<CreditResult>>()
   /** Parked payments claimed by a decision's round (decision 1006): the round's id, so a resumed round knows its own. */
   #decided: KeyedStore<string>
+  /** External payments the rails settled, by ref: what a return books back (decision 1014). */
+  #settled: KeyedStore<SettledRecord>
   constructor(
     private directory: DirectoryStore, private ledger: Ledger, private rails: Rails, private inbox: InboxStore,
     private clock: Clock, private bank: Bank, private opts: EngineOptions,
@@ -245,6 +249,9 @@ export class PaymentEngine {
     this.#parked = keyed('payment-parked', UNBOUNDED)
     this.#pending = opts.pending ?? new MemoryRailsPending()
     this.#decided = keyed('payment-decided', msgIds)
+    this.#settled = keyed('payment-settled', msgIds)
+    // Kept with the settlement's booking; `add` leaves a record a return has already changed.
+    opts.outbox.on(SETTLED_KIND, async (i) => { const r = i.payload as SettledRecord; await this.#settled.add(r.ref, r) })
     // A round's pain.002 (decision 1005): delivered by the round, or after a crash resumed and delivered by recover.
     opts.outbox.onGroup(ROUND_KIND, (items) => this.#roundReports(items), { minAgeMs: ROUND_RECOVER_MIN_AGE_MS })
   }
@@ -763,7 +770,8 @@ export class PaymentEngine {
     const { block, tx } = p
     const scheme = p.scheme!
     if (outcome.status === 'settled') {
-      const notices = [this.#notice(file.customer, await this.#debitBooking(file.customer, p, scheme))]
+      const debit = await this.#debitBooking(file.customer, p, scheme)
+      const notices = [this.#notice(file.customer, debit), this.opts.outbox.item(SETTLED_KIND, settledRecord(file, debit))]
       // `report`: its pain.002 goes with the commit too, before the camt.054 (decision 999).
       const status: TxStatus = { ...accepted, status: 'ACSC', reason: undefined, scheme }
       if (o.report) notices.unshift(this.opts.outbox.message(await this.#reportMessage(file.customer, file.requestId, { version: file.version, originalMsgId: file.msgId, blocks: [{ pmtInfId: block.pmtInfId!, txs: [status] }] })))
@@ -1025,7 +1033,10 @@ export class PaymentEngine {
     if (r.returned) return { status: 'returned', code: r.returned.code, reason: r.returned.reason }
     return {
       status: 'booked', servicerRef: r.servicerRef!,
-      booked: { account: r.account!, amount: String(c.amount), currency: c.currency, scheme: c.scheme, debtor: c.debtor, endToEndId: c.endToEndId },
+      booked: {
+        account: r.account!, amount: String(c.amount), currency: c.currency, scheme: c.scheme, debtor: c.debtor, endToEndId: c.endToEndId,
+        ...(r.party ? { party: JSON.parse(JSON.stringify(r.party)) } : {}),
+      },
     }
   }
 
@@ -1049,7 +1060,7 @@ export class PaymentEngine {
       const ref = servicerRef()
       const amount = BigInt(b.amount)
       const notices = [this.#notice(owner, {
-        account: b.account, owner: { name: owner.name, code: owner.code }, direction: 'DBIT', amount, currency: b.currency,
+        account: b.account, virtual: b.party, owner: { name: owner.name, code: owner.code }, direction: 'DBIT', amount, currency: b.currency,
         servicerRef: ref, scheme: b.scheme, bookedAt: this.clock.now(), endToEndId: b.endToEndId,
         counterparty: { name: codePage(b.debtor.name), iban: b.debtor.iban ? normalizeIban(b.debtor.iban) : undefined, account: b.debtor.account, bic: b.debtor.bic },
         bankTxCode: { family: 'RCDT', subFamily: 'RRTN' }, returnInfo: { code: r.code, additional: [r.recallRef, seen.servicerRef] },
@@ -1066,6 +1077,42 @@ export class PaymentEngine {
     }
     await this.#credits.replace(r.ref, { ...seen, recall: answer })
     return answer
+  }
+
+  /**
+   * A payment of ours the rails settled came back (a pacs.004, RailsEvents.paymentReturned,
+   * decision 1014): the amount booked back from the scheme's settlement account to the
+   * account debited (a VIBAN's or agency account's master, with that party), key
+   * `return:<ref>`, camt.054 CRDT with RvslInd true and RtrInf (NARR, the return code,
+   * `ORIG:<ref>`) as LHV's return sample. Once per payment: a repeat (or a second return)
+   * books nothing and answers `applied: false` with the first return's AcctSvcrRef.
+   * False also for a ref the rails did not settle (unknown, waiting, rejected), another
+   * scheme, another currency, or an amount above the payment's.
+   */
+  async returned(r: PaymentReturn): Promise<PaymentReturnResult> {
+    const seen = await this.#settled.get(r.ref)
+    if (!seen || (r.scheme !== undefined && r.scheme !== seen.scheme)) return { applied: false }
+    if (seen.returned) return { applied: false, servicerRef: seen.returned.servicerRef }
+    const amount = r.amount ?? BigInt(seen.amount)
+    if (amount <= 0n || amount > BigInt(seen.amount) || (r.currency !== undefined && r.currency !== seen.currency)) {
+      console.warn(`rails: return ${r.returnRef} of payment ${r.ref} (${r.amount ?? ''} ${r.currency ?? ''}) does not fit ${seen.amount} ${seen.currency}; ignored`)
+      return { applied: false }
+    }
+    const customer = await this.directory.get(seen.customer)
+    if (!customer) return { applied: false }
+    const ref = servicerRef()
+    const notices = [this.#notice(customer, {
+      account: seen.account, virtual: seen.party, owner: { name: customer.name, code: customer.code }, direction: 'CRDT', amount, currency: seen.currency,
+      servicerRef: ref, scheme: seen.scheme, bookedAt: this.clock.now(), pmtInfId: seen.pmtInfId, instrId: seen.instrId, endToEndId: seen.endToEndId,
+      counterparty: seen.counterparty, reversal: true, returnInfo: { code: 'NARR', additional: [r.code, `ORIG:${r.ref}`] },
+    })]
+    const t = await this.ledger.transfer({ ref, key: `return:${r.ref}`, from: this.rails.settlementAccount(seen.scheme), to: seen.account, amount, currency: seen.currency }, notices)
+    if (!t.repeat) await this.opts.outbox.deliver(notices)
+    // Of two returns at once one stores its answer; the other answers the stored one.
+    const returned = { returnRef: r.returnRef, code: r.code, amount: amount.toString(), servicerRef: t.ref }
+    if (await this.#settled.replace(r.ref, { ...seen, returned }, seen)) return { applied: true, servicerRef: t.ref }
+    const now = await this.#settled.get(r.ref)
+    return { applied: false, servicerRef: now?.returned?.servicerRef ?? t.ref }
   }
 
   /** An incoming credit from outside (the simulator's SEPA / SEPA Instant credit). */
@@ -1090,24 +1137,45 @@ export class PaymentEngine {
     const owner = await this.directory.ownerOf(account)
     if (!owner) throw new Error(`no account ${iban}`)
     const ref = p.ref ?? servicerRef()
+    const party = v ? virtualParty(v) : a && agencyParty(a, iban, p.creditorName)
     const notices = [this.#notice(owner, {
-      account, virtual: v ? virtualParty(v) : a && agencyParty(a, iban, p.creditorName), owner: { name: owner.name, code: owner.code }, direction: 'CRDT', amount: p.amount, currency: p.currency,
+      account, virtual: party, owner: { name: owner.name, code: owner.code }, direction: 'CRDT', amount: p.amount, currency: p.currency,
       servicerRef: ref, scheme: p.scheme, bookedAt: this.clock.now(), endToEndId: p.endToEndId, pmtInfId: p.pmtInfId, instrId: p.instrId,
       counterparty: { name: codePage(p.debtor.name), iban: p.debtor.iban ? normalizeIban(p.debtor.iban) : undefined, account: p.debtor.account, bic: p.debtor.bic },
       remittance: codePage(p.remittance), reference: codePage(p.reference),
     })]
     const b = await this.ledger.transfer({ ref, key: p.key, from: this.rails.settlementAccount(p.scheme), to: account, amount: p.amount, currency: p.currency }, notices)
     if (!b.repeat) await this.opts.outbox.deliver(notices)
-    return { servicerRef: b.ref, account }
+    return { servicerRef: b.ref, account, party }
   }
 }
+
+/**
+ * What a return of a settled external payment needs (decision 1014), from its debit's
+ * booking; JSON, the amount a decimal string of minor units. `returned` once it came back.
+ */
+type SettledRecord = {
+  ref: string; customer: { code: string; country: string }; account: string; party?: Booking['virtual']
+  amount: string; currency: string; scheme: Scheme; msgId: string; pmtInfId?: string; instrId?: string; endToEndId?: string
+  counterparty: Booking['counterparty']
+  returned?: { returnRef: string; code: string; amount: string; servicerRef: string }
+}
+const settledRecord = (file: FileRef, d: Booking): SettledRecord => JSON.parse(JSON.stringify({
+  ref: d.servicerRef, customer: { code: file.customer.code, country: file.customer.country }, account: d.account, party: d.virtual,
+  amount: d.amount.toString(), currency: d.currency, scheme: d.scheme, msgId: file.msgId,
+  pmtInfId: d.pmtInfId, instrId: d.instrId, endToEndId: d.endToEndId, counterparty: d.counterparty,
+}))
 
 /** Recall reasons the bank returns without asking the customer (decision 1001). */
 const AUTOMATIC_RECALLS = new Set(['DUPL', 'TECH', 'FRAD'])
 
 /** What the credits' store keeps of a credit from the rails (JSON: the amount a decimal string of minor units). */
 type CreditRecord = CreditResult & {
-  booked?: { account: string; amount: string; currency: string; scheme: Scheme; debtor: IncomingCredit['debtor']; endToEndId?: string }
+  booked?: {
+    account: string; amount: string; currency: string; scheme: Scheme; debtor: IncomingCredit['debtor']; endToEndId?: string
+    /** The VIBAN or agency account the credit's camt.054 named (account its master), for the recall's debit (decision 1015). */
+    party?: Booking['virtual']
+  }
   recall?: RecallResult
 }
 /** The answer to the scheme: the result without what is kept for a recall. */

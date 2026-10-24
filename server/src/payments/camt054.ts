@@ -42,6 +42,8 @@ export interface Booking {
   ultimateCreditor?: UltimateParty
   /** A returned or refunded payment: RtrInf (reason code, additional information lines). */
   returnInfo?: { code: string; additional: string[] }
+  /** RvslInd true: the entry reverses an earlier one (a payment of ours returned, decision 1014). */
+  reversal?: boolean
 }
 
 /** LHV UK as the servicer of a GB account (G PSP use cases, decision 843). */
@@ -110,7 +112,7 @@ export function camt054(b: Booking, version: '02' | '08', bankIn: { bic: string;
         uk ? el('NtryRef', '1') : null,
         el('Amt', { Ccy: b.currency }, amt),
         el('CdtDbtInd', b.direction),
-        v8 || uk ? el('RvslInd', 'false') : null,
+        b.reversal ? el('RvslInd', 'true') : v8 || uk ? el('RvslInd', 'false') : null,
         el('Sts', v8 ? el('Cd', 'BOOK') : 'BOOK'),
         el('BookgDt', el('Dt', uk ? dateLondon(b.bookedAt) : dateTallinn(b.bookedAt))),
         uk ? el('ValDt', el('DtTm', isoLondon(b.bookedAt))) : v8 ? el('ValDt', el('DtTm', isoTallinn(b.bookedAt))) : el('ValDt', el('Dt', dateTallinn(b.bookedAt))),

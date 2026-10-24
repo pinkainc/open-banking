@@ -164,6 +164,8 @@ export class Emulator {
       outcome: (ref, o, scheme) => this.engine.settle(ref, o, scheme), credit: (c) => this.engine.received(c),
       // R-transactions after settlement (decision 1000) and recalls (1001).
       collectionReturned: (ref, code) => this.directDebit.returned(ref, code), recall: (r) => this.engine.recalled(r),
+      // Returns of our own payments the rails settled (decision 1014).
+      paymentReturned: (r) => this.engine.returned(r),
     })
     this.directDebit = new DirectDebitService({
       directory: this.directory, ledger: this.ledger, rails: this.rails, inbox: this.inbox, clock: this.clock, bank: this.bank,

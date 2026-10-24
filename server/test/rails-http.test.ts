@@ -281,6 +281,36 @@ describe('HttpRails: R-transactions after settlement and recalls (decisions 1000
   })
 })
 
+describe('HttpRails: returns of our own payments (decision 1014)', () => {
+  const returned = (ref: string, o: object = {}) => callback({ type: 'payment.returned', ref, returnRef: `RTR-${ref}`, code: 'AC04', ...o })
+  test('payment.returned: a payment the bridge settled is credited back once (RvslInd, RtrInf); repeat, unknown, waiting, partial, 400', async () => {
+    await pay([{ amount: '7.00', creditorIban: DE_IBAN }, { amount: '3.00', creditorIban: DE_IBAN }])
+    const [p, q] = [...bridge.payments.values()]
+    assert.deepEqual((await returned(p.ref)).body, { applied: false }, 'waiting at the rails: not settled')
+    for (const x of [p, q]) assert.equal((await callback({ type: 'payment.outcome', ref: x.ref, scheme: x.scheme, outcome: { status: 'settled' } })).body.applied, true)
+    await messages()
+    assert.equal(await balance(ctx, C1.iban), '9990.00')
+    const r = await returned(p.ref, { scheme: p.scheme, amount: '7.00', currency: 'EUR' })
+    assert.equal(r.status, 200)
+    assert.equal(r.body.applied, true)
+    const msgs = await drain(ctx)
+    assert.equal(msgs.length, 1)
+    assert.match(msgs[0].body, /<CdtDbtInd>CRDT<\/CdtDbtInd><RvslInd>true<\/RvslInd>/)
+    assert.ok(msgs[0].body.includes(`<RtrInf><Rsn><Cd>NARR</Cd></Rsn><AddtlInf>AC04</AddtlInf><AddtlInf>ORIG:${p.ref}</AddtlInf></RtrInf>`))
+    assert.deepEqual(await returned(p.ref), { status: 200, body: { applied: false, servicerRef: r.body.servicerRef } }, 'a repeat')
+    assert.deepEqual((await returned('NO-SUCH')).body, { applied: false })
+    assert.deepEqual((await returned(q.ref, { amount: '3.01' })).body, { applied: false }, 'more than the payment')
+    assert.equal((await returned(q.ref, { amount: '2.00' })).body.applied, true, 'a partial return')
+    assert.equal(await balance(ctx, C1.iban), '9999.00')
+    for (const bad of [{ code: 'x' }, { returnRef: '' }, { amount: '-1' }, { amount: 2 }, { scheme: 'ACH' }, { currency: 'eur' }]) {
+      assert.equal((await returned(q.ref, bad)).status, 400, JSON.stringify(bad))
+    }
+    // A return the bridge cannot match to a payment still comes as a plain credit.
+    assert.equal((await callback({ type: 'credit', credit: { ref: 'SCT-RTN-UNMATCHED', iban: C1.iban, amount: '1.00', currency: 'EUR', scheme: 'SEPA', debtor: { iban: DE_IBAN } } })).body.status, 'booked')
+    assert.equal(await balance(ctx, C1.iban), '10000.00')
+  })
+})
+
 describe('HttpRails: a timeout and reconciliation (decisions 1002, 1003)', () => {
   // Answers in 150 ms are too late for this one: every POST below times out.
   const impatient = new HttpRails({ url: bridge.url, secret: SECRET, retries: 0, timeoutMs: 80 })

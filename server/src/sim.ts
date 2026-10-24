@@ -7,7 +7,7 @@ import { ConnectError } from './errors.js'
 import type { Emulator } from './emulator.js'
 import { fromMinor, toMinor } from './ledger.js'
 import { normalizeIban } from './iban.js'
-import { RailsRetryLater, SimulatorRails } from './rails.js'
+import { RailsRetryLater, SimulatorRails, type Scheme } from './rails.js'
 import { isDate } from './statements/camt060.js'
 import { DEFAULT_LIMITS, type Limits, type ReportSettings } from './statements/reports.js'
 import { dateTallinn } from './time.js'
@@ -220,6 +220,22 @@ export function simRoutes(emulator: Emulator) {
       const b = (req.body ?? {}) as { ref?: unknown; code?: unknown; recallRef?: unknown }
       if (typeof b.ref !== 'string' || !b.ref || typeof b.code !== 'string' || !/^[A-Z0-9]{4}$/.test(b.code)) throw bad('ref and a four-character code are required')
       return simRails().recall({ ref: b.ref, code: b.code, recallRef: typeof b.recallRef === 'string' && b.recallRef ? b.recallRef : `RCL-${b.ref}` })
+    })
+    // The creditor's bank returns a payment of ours the rails settled (pacs.004, decision 1014).
+    app.post('/rails/payment-return', async (req) => {
+      const b = (req.body ?? {}) as { ref?: unknown; code?: unknown; returnRef?: unknown; scheme?: unknown; amount?: unknown; currency?: unknown }
+      if (typeof b.ref !== 'string' || !b.ref || typeof b.code !== 'string' || !/^[A-Z0-9]{4}$|^[0-9]{8}$/.test(b.code)) throw bad('ref and a return code are required')
+      if (b.scheme !== undefined && !['SEPA', 'INST', 'SWIFT', 'TARGET2', 'FAST'].includes(b.scheme as string)) throw bad(`unknown scheme ${String(b.scheme)}`)
+      if (b.currency !== undefined && (typeof b.currency !== 'string' || !/^[A-Z]{3}$/.test(b.currency))) throw bad(`bad currency ${String(b.currency)}`)
+      let amount: bigint | undefined
+      if (b.amount !== undefined) {
+        try { amount = toMinor(b.amount as string) } catch { throw bad(`bad amount ${String(b.amount)}`) }
+        if (amount <= 0n) throw bad(`bad amount ${String(b.amount)}`)
+      }
+      return simRails().returnPayment({
+        ref: b.ref, code: b.code, returnRef: typeof b.returnRef === 'string' && b.returnRef ? b.returnRef : `RTR-${b.ref}`,
+        scheme: b.scheme as Scheme | undefined, amount, currency: b.currency as string | undefined,
+      })
     })
     // Timeouts (decision 1002): payments are taken but answered `unknown`; the engine reconciles them.
     app.post('/rails/timeout', async (req) => {

@@ -6,6 +6,7 @@
 import assert from 'node:assert/strict'
 import { beforeEach, describe, test } from 'node:test'
 import { makeIban } from '../src/iban.js'
+import type { SimulatorRails } from '../src/rails.js'
 import { C1, DE_IBAN, balance, call, drain, jsonDrain, pain001, schemaValid, seed, setup, type Ctx } from './helpers.js'
 
 const EEM = makeIban('EE', '7700771001260199')
@@ -165,5 +166,38 @@ describe('requester-side VoP and CoP find agency accounts (decision 810 closed)'
     assert.equal(vop.ReasonCode ?? vop.Code, 'MTCH')
     const closed = await ask('/payment/vop-request', { Identification: NL_CLOSED, Name: 'Closed Holder' })
     assert.equal(closed.ReasonCode ?? closed.Code, 'NOAP')
+  })
+})
+
+describe('returns and recalls of agency payments (decisions 1014, 1015)', () => {
+  const rails = (c = ee) => c.emulator.rails as SimulatorRails
+  test('a payment from an agency account returned: back on the master account with the holder as the creditor party', async () => {
+    const msgs = await pay(ee, agencyPain(NL))
+    const ref = msgs[1].doc.Document.CstmrPmtStsRpt.OrgnlPmtInfAndSts.TxInfAndSts.AcctSvcrRef as string
+    assert.equal(await balance(ee, EEM), '990.00')
+    assert.equal((await rails().returnPayment({ ref, returnRef: 'RTR-AG', code: 'AC04' })).applied, true)
+    assert.equal(await balance(ee, EEM), '1000.00')
+    const [m] = await drain(ee, AG.code)
+    assert.ok(await schemaValid(m.body))
+    const e = entry(m)
+    assert.deepEqual([e.account, e.ntry.CdtDbtInd, String(e.ntry.RvslInd)], [EEM, 'CRDT', 'true'])
+    assert.deepEqual(e.parties.Cdtr, { Nm: 'Jan Novak', PstlAdr: { Ctry: 'GB', AdrLine: 'London' } })
+    assert.deepEqual(e.parties.CdtrAcct, { Id: { IBAN: NL } })
+    assert.deepEqual(e.parties.DbtrAcct, { Id: { IBAN: DE_IBAN } })
+  })
+
+  test('a recall of a credit to an agency account debits the master with the agency account as the debtor party', async () => {
+    const c = await rails().credit({ ref: 'RC-AG', iban: NL, amount: 300n, currency: 'EUR', scheme: 'SEPA', debtor: { name: 'Katie Bell', iban: 'ES9121000418450200051332' } })
+    assert.equal(c.status, 'booked')
+    await drain(ee, AG.code)
+    assert.equal((await rails().recall({ ref: 'RC-AG', recallRef: 'CXL-AG', code: 'TECH' })).status, 'returned')
+    const [m] = await drain(ee, AG.code)
+    assert.ok(await schemaValid(m.body))
+    const e = entry(m)
+    assert.deepEqual([e.account, e.ntry.CdtDbtInd], [EEM, 'DBIT'])
+    assert.deepEqual(e.parties.Dbtr, { Nm: 'Jan Novak' })
+    assert.deepEqual(e.parties.DbtrAcct, { Id: { IBAN: NL } })
+    assert.deepEqual(e.parties.CdtrAcct, { Id: { IBAN: 'ES9121000418450200051332' } })
+    assert.equal(await balance(ee, EEM), '1000.00')
   })
 })

@@ -3,7 +3,7 @@
 Ugovor između open-banking servera (`server/src/rails-http.ts`, `RAILS=http`) i vanjskog
 procesa koji govori sa stvarnim shemama: SEPA SCT, SEPA Instant, Faster Payments, SWIFT,
 TARGET2 i SEPA Direct Debit. JSON preko HTTP-a, potpisan dijeljenom tajnom. Odluke
-930–938 i 1000–1003 u `docs/decisions.md`.
+930–938, 1000–1003 i 1014–1015 u `docs/decisions.md`.
 
 ## Osnovno
 
@@ -60,6 +60,7 @@ TARGET2 i SEPA Direct Debit. JSON preko HTTP-a, potpisan dijeljenom tajnom. Odlu
 | `payment.outcome` | `{type, ref, scheme?, outcome: {status: "settled"\|"rejected"\|"unavailable", reason?}}` | `{"applied": true}`; `false` za nepoznat ili već završen ref (duplikat, ignoriran), za drugi `scheme` od pokušaja koji čeka, i za ishod različit od prvog spremljenog (odluka 1003) |
 | `credit` | `{type, credit: {ref, iban, amount, currency, scheme, debtor: {name?, iban?, bic?, account?}, creditorName?, remittance?, reference?, endToEndId?}}` | `{"status":"booked","servicerRef":"…"}` ili `{"status":"returned","code":"AC01","reason":"…"}` |
 | `collection.returned` | `{type, ref, code}`: `ref` kolekcije (kao u `POST /collections`), `code` SEPA R-kod (`MD06`, `MD01`, `AC04` …) | `{"applied": true}` (vraćeno vjerovniku na teret, camt.054 DBIT s `RtrInf`); `false` za nepoznatu, nenamirenu, stariju od 13 mjeseci ili već vraćenu (ponavljanje); `503` kad vjerovnik nema sredstava (ponavljaj) |
+| `payment.returned` | `{type, ref, scheme?, returnRef, code, amount?, currency?}`: `ref` našeg plaćanja (kao u `POST /payments`), `returnRef` pacs.004 `RtrId`, `code` razlog povrata (ISO `AC04`, `MS03` … ili 8 znamenki Faster Paymentsa), `amount` ono što je stiglo natrag (zadano iznos plaćanja, najviše toliko) | `{"applied": true, "servicerRef": "…"}` (knjiženo natrag platitelju, camt.054 CRDT s `RvslInd` i `RtrInf`); `{"applied": false}` za nepoznat, nenamiren (čeka ili odbijen) ref, drugi `scheme`, veći iznos ili drugu valutu; ponavljanje (ili drugi povrat istog plaćanja) `{"applied": false, "servicerRef": "<prvi>"}` |
 | `credit.recall` | `{type, recall: {ref, recallRef, code}}`: `ref` je `credit.ref` primljene uplate, `recallRef` camt.056 `CxlId`, `code` razlog (`DUPL`, `TECH`, `FRAD`, `CUST`, `AC03`, `AM09` …) | `{"status":"returned","servicerRef":"…"}` (bridge šalje pacs.004) ili `{"status":"refused","code":"NOOR"\|"ARDT"\|"AM04"\|"NOAS"}` (bridge šalje camt.029) |
 
 - `credit.ref` je referenca sheme (bridgea): isti ref drugi put vraća prvi rezultat, ne
@@ -70,8 +71,17 @@ TARGET2 i SEPA Direct Debit. JSON preko HTTP-a, potpisan dijeljenom tajnom. Odlu
 - `credit.recall` (odluka 1001): `DUPL`, `TECH` i `FRAD` vraćamo odmah ako su sredstva na
   računu (inače `AM04`); ostali razlozi traže pristanak klijenta, kojeg Connect nema kako
   pitati, pa je odgovor `NOAS`. `NOOR`: uplata s tim refom nije knjižena kod nas; `ARDT`:
-  vraćena je već pri primitku. Ponovljen opoziv istog refa vraća prvi odgovor. Povrat našeg
-  odlaznog plaćanja (pacs.004) bridge šalje kao običan `credit` na račun platitelja.
+  vraćena je već pri primitku. Ponovljen opoziv istog refa vraća prvi odgovor. Ako je uplata
+  išla na VIBAN ili agency račun, terećenje povrata nosi istu stranku kao camt.054 uplate
+  (odluka 1015).
+- `payment.returned` (odluka 1014): povrat našeg odlaznog plaćanja koje je shema namirila
+  (pacs.004 od banke primatelja). Knjižimo ga s računa namire sheme natrag na račun s kojeg
+  je plaćanje terećeno (za VIBAN ili agency račun njegov master, s tom strankom), jednom po
+  plaćanju (ključ `return:<ref>`); camt.054 CRDT kao LHV-ov primjer povrata: `RvslInd true`,
+  `PMNT/RCDT/OTHR`, `Refs` izvornog plaćanja (`PmtInfId`, `InstrId`, `EndToEndId`),
+  `RtrInf` `NARR` s `AddtlInf` kodom povrata i `ORIG:<ref>`. Djelomičan iznos (troškovi
+  usput) je dopušten, veći od plaćanja nije. Povrat koji bridge ne može povezati s našim
+  plaćanjem i dalje smije poslati kao običan `credit` na račun platitelja.
 - `payment.outcome`: prvi spremljeni ishod plaćanja vrijedi (odluka 1003). Drugačiji ishod
   za isti pokušaj (npr. `rejected` nakon `settled`) dobiva `applied: false`, ne knjiži se i
   zapisuje se u log; i odgovor na `POST /payments` se tako sprema. `scheme` (preporučeno)
