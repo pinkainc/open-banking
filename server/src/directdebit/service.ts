@@ -14,7 +14,8 @@
 //
 // Collections wait for their settlement date; tick() settles the due ones (main.ts calls
 // it every minute, tests and /_sim/direct-debit/settle call it directly).
-import { BoundedSet, DEFAULT_BOUNDS, type Bounds } from '../bounded.js'
+import { DEFAULT_BOUNDS, type Bounds } from '../bounded.js'
+import { memoryKeyed, type KeyedFactory, type KeyedStore } from '../keyed.js'
 import type { Clock } from '../clock.js'
 import { DAY_MS } from '../clock.js'
 import { keyOf, type Customer, type Directory } from '../directory.js'
@@ -105,6 +106,8 @@ export interface DirectDebitDeps {
   virtual?: VirtualAccounts
   strictIban?: boolean
   onBooking?: (customer: Customer, b: Booking) => void | Promise<void>
+  /** Where the pain.008 and pain.007 MsgIds are kept (decision 966); default in memory. */
+  keyed?: KeyedFactory
 }
 
 /** A collection from a creditor at another bank (the /_sim trigger). */
@@ -131,11 +134,12 @@ export class DirectDebitError extends Error {
 
 export class DirectDebitService {
   readonly collections: Collection[] = []
-  #seenMsgIds: BoundedSet<string>
-  #seenRefusals: BoundedSet<string>
+  #seenMsgIds: KeyedStore<true>
+  #seenRefusals: KeyedStore<true>
   constructor(private d: DirectDebitDeps) {
-    this.#seenMsgIds = new BoundedSet(d.clock, d.msgIds ?? DEFAULT_BOUNDS.msgIds)
-    this.#seenRefusals = new BoundedSet(d.clock, d.msgIds ?? DEFAULT_BOUNDS.msgIds)
+    const keyed = d.keyed ?? memoryKeyed(d.clock)
+    this.#seenMsgIds = keyed('dd-msgids', d.msgIds ?? DEFAULT_BOUNDS.msgIds)
+    this.#seenRefusals = keyed('dd-refusal-msgids', d.msgIds ?? DEFAULT_BOUNDS.msgIds)
   }
 
   // --- creditor: POST /direct-debit/collection ------------------------------------
@@ -157,9 +161,9 @@ export class DirectDebitService {
     const file = readPain008(doc)
     const missing = structuralProblem(file)
     if (missing) return reject(E.schema(missing))
-    const groupReason = this.#fileProblem(file, customer)
+    const groupReason = await this.#fileProblem(file, customer)
     if (groupReason) return reject(groupReason)
-    this.#seenMsgIds.add(`${keyOf(customer)}|${file.msgId}`)
+    await this.#seenMsgIds.set(`${keyOf(customer)}|${file.msgId}`, true)
 
     const report: DdReport = { originalMsgId: file.msgId!, originalMsgName: PAIN008, blocks: [] }
     const accepted: Collection[] = []
@@ -176,8 +180,8 @@ export class DirectDebitService {
     }
   }
 
-  #fileProblem(f: CollectionFile, customer: Customer): string | undefined {
-    if (this.#seenMsgIds.has(`${keyOf(customer)}|${f.msgId}`)) return E.duplicateMessage
+  async #fileProblem(f: CollectionFile, customer: Customer): Promise<string | undefined> {
+    if (await this.#seenMsgIds.has(`${keyOf(customer)}|${f.msgId}`)) return E.duplicateMessage
     const ids = f.blocks.map((b) => b.pmtInfId!)
     const dupBlock = ids.find((id, i) => ids.indexOf(id) !== i)
     if (dupBlock) return E.duplicateBlock(dupBlock)
@@ -334,10 +338,10 @@ export class DirectDebitService {
     if (!r.msgId || !r.nbOfTxs || r.txs.length === 0 || !r.txs[0].pmtInfId || !r.txs[0].endToEndId) {
       return reject(E.schema('GrpHdr/MsgId, NbOfTxs, OrgnlPmtInfId and TxInf/OrgnlEndToEndId are required.'))
     }
-    if (this.#seenRefusals.has(`${keyOf(customer)}|${r.msgId}`)) return reject(E.duplicateMessage)
+    if (await this.#seenRefusals.has(`${keyOf(customer)}|${r.msgId}`)) return reject(E.duplicateMessage)
     if (Number(r.nbOfTxs) !== r.txs.length) return reject(E.headerCount)
     if (r.txs.length !== 1) return reject(E.oneOnly)
-    this.#seenRefusals.add(`${keyOf(customer)}|${r.msgId}`)
+    await this.#seenRefusals.set(`${keyOf(customer)}|${r.msgId}`, true)
 
     const t = r.txs[0]
     const c = this.#find(t.pmtInfId!, t.endToEndId!, (x) => !!x.debtorCustomer && keyOf(x.debtorCustomer) === keyOf(customer))

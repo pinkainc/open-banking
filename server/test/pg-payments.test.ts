@@ -2,11 +2,13 @@
 // keyed store with OPEN_BANKING_STORE=postgres): an emulator restarted on the same
 // namespace refuses a file and a payment submitted before the restart as duplicates,
 // decides payments parked before it (SCA and manual review), still counts an in-flight
-// debit against the limits and books a scheme credit once. Registered only when DATABASE_URL is set.
+// debit against the limits, books a scheme credit once and refuses a SEPA Direct Debit file
+// again. Registered only when DATABASE_URL is set.
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 import { many } from '../src/xml.js'
-import { C1, C2, DE_IBAN, call, drain, pain001, postgresStore, seed, setup, type Ctx } from './helpers.js'
+import { E as DD } from '../src/directdebit/service.js'
+import { C1, C2, DE_IBAN, call, ddDrain, ddStatus, drain, pain001, pain008, postgresStore, seed, setup, type Ctx } from './helpers.js'
 
 const url = process.env.DATABASE_URL
 
@@ -101,5 +103,18 @@ if (url) describe('payment engine state across a restart (Postgres)', () => {
     assert.deepEqual(await b.emulator.engine.received(credit), first)
     const entries = (await b.emulator.journal.entries(C2.iban, 0, Infinity)).filter((e) => e.remittance === 'once')
     assert.equal(entries.length, 1)
+  })
+
+  test('a SEPA Direct Debit file submitted before the restart is a duplicate after it', async () => {
+    const opts = await postgresStore()
+    const collect = async (ctx: Ctx) => {
+      const res = await call(ctx, { method: 'POST', url: '/direct-debit/collection', body: pain008([{ txs: [{}] }], { msgId: 'DD-G-1' }) })
+      assert.equal(res.statusCode, 202, res.body)
+      const msgs = (await ddDrain(ctx)).filter((m) => m.type === 'DIRECT_DEBIT_OUTGOING')
+      return ddStatus(msgs[0])
+    }
+    assert.equal((await collect(await setup(opts))).grp, 'ACCP')
+    const again = await collect(await setup(opts))
+    assert.deepEqual([again.grp, again.grpInfo], ['RJCT', DD.duplicateMessage])
   })
 })

@@ -145,7 +145,7 @@ export class Emulator {
     this.rails.listen({ outcome: (ref, o) => this.engine.settle(ref, o), credit: (c) => this.engine.received(c) })
     this.directDebit = new DirectDebitService({
       directory: this.directory, ledger: this.ledger, rails: this.rails, inbox: this.inbox, clock: this.clock, bank: this.bank,
-      xsd, virtual: this.viban.registry, strictIban: opts.strictIban, onBooking: async (_c, b) => { await this.journal.record(b) }, msgIds,
+      xsd, virtual: this.viban.registry, strictIban: opts.strictIban, onBooking: async (_c, b) => { await this.journal.record(b) }, msgIds, keyed,
     })
     this.fx = new FxService({
       directory: this.directory, ledger: this.ledger, inbox: this.inbox, clock: this.clock, bank: this.bank,
