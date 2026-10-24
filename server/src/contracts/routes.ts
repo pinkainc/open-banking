@@ -78,8 +78,8 @@ export function contractsSimRoutes(emulator: Emulator) {
   return async (app: FastifyInstance) => {
     app.get('/', async () => {
       // Seeded connections become contracts on first look, for every provider.
-      for (const c of await emulator.directory.all()) if (c.connected) svc.of(c)
-      return { contracts: svc.all.map(view) }
+      for (const c of await emulator.directory.all()) if (c.connected) await svc.of(c)
+      return { contracts: (await svc.all()).map(view) }
     })
     app.post('/:id/activate', async (req) => run(() => svc.activate((req.params as { id: string }).id)))
     app.post('/:id/close', async (req) => run(() => svc.close((req.params as { id: string }).id)))

@@ -93,7 +93,7 @@ export function buildApp(opts: AppOptions): FastifyInstance {
 
   const caller = async (req: FastifyRequest): Promise<Caller> => {
     const c = await resolveCaller(req, emulator.directory, identify, emulator.clock.now())
-    c.services = keyOf(c.customer) === keyOf(c.user) ? c.user.services : emulator.contracts.servicesFor(c.user, c.customer)
+    c.services = keyOf(c.customer) === keyOf(c.user) ? c.user.services : await emulator.contracts.servicesFor(c.user, c.customer)
     return c
   }
   /** The caller, once the contract is known to grant the service (decision 501). */
