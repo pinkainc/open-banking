@@ -106,6 +106,7 @@ Legend: `[x]` done · `[ ]` open · `[~]` in progress · `(?)` needs a sandbox r
 - [x] Rails: DD returns and recalls (camt.056), reconciliation `GET /payments/{ref}` after a timeout, first stored outcome wins (S7b, 1000–1003)
 - [x] `OPEN_BANKING_STORE=deferred` is the fourth step of `npm run check` (S7b, 1004)
 - [ ] Conformance harness: record exchanges against connect.test.lhv.eu once a sandbox certificate exists, divergences file → S8
+  - 2026-10-25: Gmail draft to connect@lhv.ee ready (subject "Request for LHV Connect TEST sandbox access": services, two test customers, light manual use, asks for sandbox terms); waits for company name, registry code, country, role and phone, then the user sends it
 
 ## Za pregled ujutro
 
