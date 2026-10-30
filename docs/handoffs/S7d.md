@@ -6,7 +6,7 @@ Repoi:
 
 Pročitaj prvo: docs/handoffs/README.md (lanac i pravila), TODO.md („Still open from S7c”), docs/decisions.md (994, 999, 1002, 1005–1007, 1014).
 
-# S7d: preostale core rupe iz S7c (umetnut 2026-10-30, sandbox upit poslan)
+# S7d: preostale core rupe iz S7c (gotovo 2026-10-30, `9c51eff`; odluke 1017–1023)
 
 Polazni commit: `4cc1df6` + docs. `npm run check`: memory 857/857, Postgres 857/857, deferred 715/715, open-ledger 27/27, skipped 0. Odluke od **1017**.
 

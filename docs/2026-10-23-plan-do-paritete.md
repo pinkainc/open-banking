@@ -24,12 +24,13 @@ firme, odluka korisnika). Zato:
 - nova pitanja za sandbox dopisuju se u `sandbox-questions.md` (mirror repo, lokalno,
   nikad ne pushati).
 
-## Gdje smo (2026-10-25, nakon S7c)
+## Gdje smo (2026-10-30, nakon S7d)
 
-S1–S7c gotovi (`4cc1df6`): katalog pokriven 57/58 (`payment.oneoff` namjerni 404), 857 testova
-na memory storeu i 857 na Postgresu, 715 na deferred storeu, plus 27 protiv pravog open-ledgera;
-sandbox pitanja do 90. Restart na istom namespaceu ne gubi poslovno stanje (odluke 970–1004), krug
-datoteke se nastavlja nakon pada, a zapisi dvaju emulatora ne gube se (odluke 1005–1016).
+S1–S7d gotovi (`9c51eff`): katalog pokriven 57/58 (`payment.oneoff` namjerni 404), 931 test
+na memory storeu i 931 na Postgresu, 761 na deferred storeu, plus 27 protiv pravog open-ledgera;
+sandbox pitanja do 92, odluke do 1023. Restart na istom namespaceu ne gubi poslovno stanje (odluke 970–1004), zapisi dvaju
+emulatora ne gube se (1005–1016), a pad u bilo kojem trenutku obrade datoteke (pain.001, pain.008, pain.007, camt.060)
+ili kruga plaćanja više ne gubi posao (1017–1023). Upit za sandbox poslan je LHV-u 2026-10-30 (ITalk d.o.o.).
 Lanac stoji: S8 čeka sandbox certifikat.
 
 ## Polazno stanje (commit `bcc23e0`)

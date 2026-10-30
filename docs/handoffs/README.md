@@ -40,7 +40,7 @@ povijest.
 | S7 | Trajnost i jezgra | gotovo | 9ce3088 | 57/58 | 745 ×2 + 21 | noćni rad; odluke 900–968 (većina „potvrditi”), pitanje 87; suite na memoryju i Postgresu, open-ledger kao `Ledger`, async `Rails` + `HttpRails`; partner PSP primjeri replayani; ostatak stanja u S7b (odluka 968) |
 | S7b | Ostatak trajnog stanja | gotovo | 5496d3e | 57/58 | 817 ×2 + 690 + 27 | danju, 7 agenata; odluke 970–1004, pitanja 88–89; outbox i idempotentna knjiženja, `deferred` kao 4. korak checka |
 | S7c | Otvorene core stavke | gotovo | 4cc1df6 | 57/58 | 857 ×2 + 715 + 27 | danju, 3 agenta; odluke 1005–1016, pitanje 90; pain.002 kruga nakon pada, compare-and-set preko emulatora, `payment.returned` |
-| S7d | Preostale core rupe | u tijeku | | 57/58 | | umetnut 2026-10-30 dok se čeka sandbox; 4 stavke iz S7c, odluke od 1017 |
+| S7d | Preostale core rupe | gotovo | 9c51eff | 57/58 | 931 ×2 + 761 + 27 | danju, 6 agenata; odluke 1017–1023, pitanja 91–92; pad tijekom provjera datoteke (pain.001/.008/.007, camt.060), krugovi i rails ishodi nakon izvještaja, povrat plaćanja prije 1014 |
 | S8 | Conformance harness | blokirano | | | | treba sandbox certifikat |
 
 ## Zajednička pravila (vrijede u svakoj sesiji)

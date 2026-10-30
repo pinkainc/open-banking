@@ -102,7 +102,8 @@ Legend: `[x]` done · `[ ]` open · `[~]` in progress · `(?)` needs a sandbox r
 - [x] After a crash a file round's pain.002 and parked-payment decision reports are resent once; a DD rejection report kept in the outbox (S7c, 1005–1007)
 - [x] Two emulators writing the same VIBAN, FX pricing, webhook config or `/_sim/viban` fault: compare-and-set / `updateKeyed` / `claimName`; pg-contracts flake fixed (S7c, 1008–1013)
 - [x] Returns of our own payments as rails `payment.returned` (camt.054 per LHV return sample), recall-return camt.054 with the VIBAN/agency party (S7c, 1014–1016, sandbox question 90)
-- [ ] Still open from S7c: a crash during a file's checks loses the file (MsgId seen, nothing planned); a crash after a round's report and before rails leaves an external payment ACSP and reserved; later rounds (immediate rails outcomes) have no plan; payments settled before 1014 cannot be returned (1005, 1014)
+- [x] Crash safety after S7c: a payment file cut during its checks (1017), later rounds and rails outcomes after a round's report (1018, 1019), returns of payments settled before 1014 (1020), a SEPA DD file (1021), a DD refusal pain.007 (1022), statement and balance requests with one atomic MsgId claim (1023) (S7d, sandbox questions 91–92)
+- [ ] Still open from S7d: two processes resuming one saved item or round at once (994 (3)); a crash between another process's rails take and this one's removal reports an outcome twice (1018/1019); outcomes cut before the put wait for reconcile, which runs only with `RAILS=http`; open-ledger without Postgres keeps the journal in memory, so pre-1014 returns are not derivable after a restart (1020); an intraday balance answered after a crash shows the restart-time balance (1023)
 - [x] Rails: DD returns and recalls (camt.056), reconciliation `GET /payments/{ref}` after a timeout, first stored outcome wins (S7b, 1000–1003)
 - [x] `OPEN_BANKING_STORE=deferred` is the fourth step of `npm run check` (S7b, 1004)
 - [ ] Conformance harness: record exchanges against connect.test.lhv.eu once a sandbox certificate exists, divergences file → S8
@@ -191,3 +192,12 @@ Promjene ponašanja iz S7c (2026-10-25, autonomno, paket odobren; pogledati):
 - [ ] 1009 VIBAN clientReference jedinstven preko emulatora (`viban-client-refs`); gubitnik dobiva „must be unique”
 - [ ] 1011–1012 UK webhook: jedan config po vlasniku i tipu (400 za zauzet tip), `update` spaja polja; EE subscribe na isti URL daje istu pretplatu
 - [ ] 1014 povrat vlastitog plaćanja: camt.054 po LHV uzorku „Credit Notification (Return)” (RvslInd, PMNT/RCDT/OTHR, RtrInf NARR + kod + `ORIG:<ref>`), ne ISO PMNT/ICDT/RRTN; djelomičan povrat dopušten, jedan po plaćanju; returnRef i MsgId nisu u camt.054
+
+Promjene ponašanja iz S7d (2026-10-30, korisnik budan, paket odobren; pogledati):
+
+- [ ] 1017 / 1021 / 1022 / 1023 primljena datoteka (pain.001, pain.008, pain.007, camt.060) sprema se u outbox prije nego se MsgId zauzme; MsgId je sad „claim” (id spremljene stavke), a ne `true`; recovery dovrši datoteku, timer čeka 10 min
+- [ ] 1017 duplikat InstrId-a odbija se samo kad ključ pokazuje na drugi ref; „Rejected” obavijest za neaktivan VIBAN / zatvoren agency račun nosi ref transakcije
+- [ ] 1018 / 1019 id sljedećeg kruga izveden je hashom iz trenutnog (više nije slučajan UUID); trenutni ishod s railsa uzima zapis zadnji
+- [ ] 1020 povrat plaćanja bez `payment-settled` zapisa izvodi se iz camt.054 terećenja u journalu; MsgId u zapisu je sad opcionalan
+- [ ] 1022 refund koji kreditorov saldo više ne pokriva ostaje označen i ponavlja se svaki tick (dosad ACCP pa tiho ispušten)
+- [ ] 1023 dva zahtjeva za izvod s istim MsgId-om u isto vrijeme: jedan odgovor i jedan duplikat; odbijeni zahtjev i dalje oslobađa MsgId
