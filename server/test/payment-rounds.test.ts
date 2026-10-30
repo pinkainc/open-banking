@@ -660,3 +660,154 @@ if (process.env.DATABASE_URL) describe('callback outcomes across a crash (Postgr
     await checkLater(a, b, msgs0, { later: [ACWC, ROUND_TWO], sent: ['INST', 'SEPA'], d: d0 - 6, c: c0 + 3, debits: 3 })
   })
 })
+
+// --- A SEPA Direct Debit file across a crash (decision 1021) ------------------------------
+// The pain.008 is kept in the outbox before its MsgId is claimed, its collections' ids drawn
+// then: a crash during the checks, after the first pain.002 or between the collections' saves
+// resumes the file from the outbox. Each collection is saved, reported ACCP and notified to
+// the debtor once, and settled (ACSC, booked) once.
+
+const DD_FILE = () => pain008([{ pmtInfId: 'PMT-KEPT', txs: [{ endToEndId: 'E2E-K1', amount: '10.00' }, { endToEndId: 'E2E-K2', amount: '20.00' }] }])
+const DD_CUTS = ['before the report', 'after the report', 'after the first save'] as const
+type DdCut = typeof DD_CUTS[number]
+/**
+ * The process "dies" in a pain.008's handling, once: at the creditor's first pain.002 before
+ * it is added (the MsgId claimed, nothing reported or saved), right after it (nothing saved),
+ * or right after the first collection's debtor notification (one collection saved).
+ */
+function crashInFile(ctx: Ctx, at: DdCut) {
+  const inbox = ctx.emulator.inbox
+  const real = inbox.add.bind(inbox)
+  inbox.add = async (m) => {
+    const hit = at === 'after the first save' ? m.type === 'DIRECT_DEBIT_INCOMING_COLLECTION_NOTIFICATION' : m.type === 'DIRECT_DEBIT_OUTGOING'
+    if (!hit) return real(m)
+    inbox.add = real
+    if (at === 'before the report') throw new Error('crash during the checks')
+    await real(m)
+    throw new Error(`crash ${at}`)
+  }
+}
+/** The process "dies" right after the pain.008 is kept in the outbox, before its MsgId is claimed. Once. */
+function crashAfterKeep(ctx: Ctx) {
+  const o = ctx.emulator.ledger.outbox as any
+  const real = o.put
+  o.put = async (items: { kind: string }[]) => {
+    await real.call(o, items)
+    if (items.some((i) => i.kind === 'dd-file')) { o.put = real; throw new Error('crash before the MsgId is claimed') }
+  }
+}
+/** Each creditor pain.002 as [group status, EndToEndId:status...]. */
+const ddOutgoing = (msgs: { type: string; doc: any }[]) => msgs.filter((m) => m.type === 'DIRECT_DEBIT_OUTGOING').map((m) => {
+  const r = ddStatus(m)
+  return [r.grp, ...r.blocks.flatMap((b: any) => b.txs.map((t: any) => `${t.endToEndId}:${t.sts}`))]
+})
+const ACCP = ['ACCP', 'E2E-K1:ACCP', 'E2E-K2:ACCP']
+const ddDuplicate = async (ctx: Ctx) => {
+  const msgs = await ddDrain(ctx)
+  assert.deepEqual(ddOutgoing(msgs), [['RJCT']])
+  assert.ok(msgs[0].body.includes('Duplicate message.'))
+}
+/**
+ * After the resume: the creditor's first pain.002 of the file once (counting `before`, those
+ * drained already), both collections saved once and notified once; at the settlement one
+ * ACSC pain.002, each booked once.
+ */
+async function checkKeptFile(ctx: Ctx, c0: number, d0: number, before: string[][] = []) {
+  assert.deepEqual([...before, ...ddOutgoing(await ddDrain(ctx))], [ACCP], 'one first report')
+  assert.deepEqual((await ddDrain(ctx, C2.code)).map((m) => m.type), ['DIRECT_DEBIT_INCOMING_COLLECTION_NOTIFICATION', 'DIRECT_DEBIT_INCOMING_COLLECTION_NOTIFICATION'], 'each collection notified once')
+  const listed = (await call(ctx, { url: '/_sim/direct-debit/collections' })).json().collections
+  assert.deepEqual(listed.map((x: any) => `${x.endToEndId}:${x.status}`), ['E2E-K1:PENDING', 'E2E-K2:PENDING'], 'each collection saved once')
+  ctx.clock.set('2026-03-12T10:30:00Z')
+  assert.equal((await call(ctx, { method: 'POST', url: '/_sim/direct-debit/settle' })).statusCode, 200)
+  assert.deepEqual(ddOutgoing(await ddDrain(ctx)), [[undefined, 'E2E-K1:ACSC', 'E2E-K2:ACSC']], 'one settlement report (no group status)')
+  assert.equal(Number(await balance(ctx, C1.iban)), c0 + 30, 'credited once')
+  assert.equal(Number(await balance(ctx, C2.iban)), d0 - 30, 'debited once')
+  assert.deepEqual((await ddDrain(ctx, C2.code)).map((m) => m.type), ['CREDIT_DEBIT_NOTIFICATION', 'CREDIT_DEBIT_NOTIFICATION'], 'a camt.054 per debit')
+  assert.deepEqual(await ctx.emulator.ledger.outbox.pending(), [])
+}
+const collectDd = (ctx: Ctx, body: string) => call(ctx, { method: 'POST', url: '/direct-debit/collection', body })
+
+describe('a SEPA Direct Debit file across a crash (memory: recover on the same emulator, decision 1021)', () => {
+  for (const at of DD_CUTS) {
+    test(`a crash ${at}: a resubmission is a duplicate, recover saves, reports and settles each collection once`, async () => {
+      const ctx = await setup()
+      const [c0, d0] = [Number(await balance(ctx, C1.iban)), Number(await balance(ctx, C2.iban))]
+      const body = DD_FILE()
+      crashInFile(ctx, at)
+      assert.equal((await collectDd(ctx, body)).statusCode, 500)
+      const before = ddOutgoing(await ddDrain(ctx))
+      assert.deepEqual(before, at === 'before the report' ? [] : [ACCP])
+      assert.equal((await collectDd(ctx, body)).statusCode, 202)
+      await ddDuplicate(ctx)
+      assert.ok((await ctx.emulator.outbox.recover()) > 0, 'the kept file is resumed')
+      assert.equal(await ctx.emulator.outbox.recover(), 0)
+      await checkKeptFile(ctx, c0, d0, before)
+      assert.equal((await collectDd(ctx, body)).statusCode, 202)
+      await ddDuplicate(ctx)
+    })
+  }
+
+  for (const first of ['resubmission', 'recover'] as const) {
+    test(`a crash after the file is kept, before its MsgId is claimed: processed once (${first} first), the other a duplicate or dropped`, async () => {
+      const ctx = await setup()
+      const [c0, d0] = [Number(await balance(ctx, C1.iban)), Number(await balance(ctx, C2.iban))]
+      const body = DD_FILE()
+      crashAfterKeep(ctx)
+      assert.equal((await collectDd(ctx, body)).statusCode, 500)
+      if (first === 'resubmission') {
+        assert.equal((await collectDd(ctx, body)).statusCode, 202)
+        await ctx.emulator.outbox.recover() // the first submission's kept file: the MsgId is another's, dropped
+        await checkKeptFile(ctx, c0, d0)
+      } else {
+        assert.ok((await ctx.emulator.outbox.recover()) > 0)
+        await checkKeptFile(ctx, c0, d0)
+        assert.equal((await collectDd(ctx, body)).statusCode, 202)
+        await ddDuplicate(ctx)
+      }
+    })
+  }
+
+  test('the timer\'s recovery leaves a kept file to the process handling it for 10 minutes', async () => {
+    const ctx = await setup()
+    crashInFile(ctx, 'before the report')
+    assert.equal((await collectDd(ctx, DD_FILE())).statusCode, 500)
+    assert.equal(await ctx.emulator.outbox.recover({ minAgeMs: 60_000 }), 0, 'too young')
+    ctx.clock.set('2026-03-10T08:11:00Z')
+    assert.equal(await ctx.emulator.outbox.recover({ minAgeMs: 60_000 }), 1)
+    assert.deepEqual(ddOutgoing(await ddDrain(ctx)), [ACCP])
+  })
+})
+
+if (process.env.DATABASE_URL) describe('a SEPA Direct Debit file across a crash (Postgres: a restart on the same store, decision 1021)', () => {
+  for (const at of DD_CUTS) {
+    test(`a crash ${at}: after the restart each collection saved, reported and settled once, a resubmission a duplicate`, async () => {
+      const opts = await postgresStore()
+      const a = await setup(opts)
+      const [c0, d0] = [Number(await balance(a, C1.iban)), Number(await balance(a, C2.iban))]
+      const body = DD_FILE()
+      crashInFile(a, at)
+      assert.equal((await collectDd(a, body)).statusCode, 500)
+      const b = await setup(opts) // fromSeed recovers: the kept file is resumed
+      assert.equal((await collectDd(b, body)).statusCode, 202)
+      const msgs = await ddDrain(b)
+      assert.deepEqual(ddOutgoing(msgs), [ACCP, ['RJCT']], 'the first report once, the resubmission a duplicate')
+      await checkKeptFile(b, c0, d0, [ACCP])
+      const c = await setup(opts)
+      assert.deepEqual(await ddDrain(c), [], 'another restart sends nothing again')
+      assert.deepEqual(await ddDrain(c, C2.code), [])
+    })
+  }
+
+  test('a crash after the file is kept, before its MsgId is claimed: after the restart processed once, a resubmission a duplicate', async () => {
+    const opts = await postgresStore()
+    const a = await setup(opts)
+    const [c0, d0] = [Number(await balance(a, C1.iban)), Number(await balance(a, C2.iban))]
+    const body = DD_FILE()
+    crashAfterKeep(a)
+    assert.equal((await collectDd(a, body)).statusCode, 500)
+    const b = await setup(opts)
+    await checkKeptFile(b, c0, d0)
+    assert.equal((await collectDd(b, body)).statusCode, 202)
+    await ddDuplicate(b)
+  })
+})

@@ -18,7 +18,7 @@
 // settles them, once (a claim per collection, decision 976).
 import { randomUUID } from 'node:crypto'
 import { DEFAULT_BOUNDS, type Bounds } from '../bounded.js'
-import { memoryKeyed, UNBOUNDED, type KeyedFactory, type KeyedStore } from '../keyed.js'
+import { claimKey, memoryKeyed, UNBOUNDED, type KeyedFactory, type KeyedStore } from '../keyed.js'
 import type { Clock } from '../clock.js'
 import { DAY_MS } from '../clock.js'
 import { keyOf, type Customer, type CustomerKey, type DirectoryStore } from '../directory.js'
@@ -26,7 +26,7 @@ import { ibanChecksumOk, normalizeIban } from '../iban.js'
 import { notificationMsgId, servicerRef } from '../ids.js'
 import type { InboxStore } from '../inbox.js'
 import { InsufficientFunds, toMinor, type Ledger } from '../ledger.js'
-import type { Bank } from '../payments/engine.js'
+import { ROUND_RECOVER_MIN_AGE_MS, type Bank } from '../payments/engine.js'
 import type { Booking } from '../payments/camt054.js'
 import type { Outbox, OutboxItem } from '../outbox.js'
 import { decimalEq, decimalSum } from '../payments/pain001.js'
@@ -47,6 +47,14 @@ import { EARLIEST_DAYS, REFUND_DAYS, refusalCutoff, settlementAt, settlementDate
 const REPORT_KIND = 'dd-report'
 /** A creditor status report entry in the outbox (decision 999): the status without its collection, read again by id. */
 interface ReportPayload { group: string; customer: CustomerKey; requestId?: string; msgId: string; id: string; status: Omit<DdStatus, 'collection'> }
+const FILE_KIND = 'dd-file'
+/**
+ * A received pain.008 kept in the outbox before its MsgId is claimed (decision 1021): the body
+ * as sent, the request, when it came (the date checks) and an id per collection drawn then,
+ * so a crash before its collections are saved checks the same file again into the same ones.
+ * `id` the claim's owner in dd-msgids; its first pain.002 is added once by `dd-file:<id>`.
+ */
+interface KeptFile { id: string; customer: CustomerKey; requestId: string; msgId: string; xml: string; at: number; ids: string[] }
 
 export const DD_TYPES = {
   /** pain.002 about the creditor's collections (P 02 type list; docs/decisions.md 300). */
@@ -145,7 +153,8 @@ export class DirectDebitError extends Error {
 export const CLAIM_MS = 5 * 60 * 1000
 
 export class DirectDebitService {
-  #seenMsgIds: KeyedStore<true>
+  /** The value is the kept file that claimed the MsgId (decision 1021; `true` before). */
+  #seenMsgIds: KeyedStore<string | true>
   #seenRefusals: KeyedStore<true>
   /** Every collection by its id, in the order they came (decision 975). */
   #collections: KeyedStore<StoredCollection>
@@ -162,6 +171,9 @@ export class DirectDebitService {
     // The creditor's status report of a tick (decision 999): one pain.002 per file and tick,
     // its ACSC entries kept with each collection's booking; recovered as the group it was.
     d.outbox.onGroup(REPORT_KIND, (items) => this.#deliverReports(items))
+    // A file cut before its collections were all saved (decision 1021); the timer's recovery
+    // leaves it 10 minutes to the process handling it, as a payment round (1005).
+    d.outbox.on(FILE_KIND, (item) => this.#serial(() => this.#resumeFile(item)), { minAgeMs: ROUND_RECOVER_MIN_AGE_MS })
   }
 
   /** A creditor status report entry for a tick's report `group`; kept with the booking when ACSC. */
@@ -236,19 +248,55 @@ export class DirectDebitService {
     if (missing) return reject(E.schema(missing))
     const groupReason = await this.#fileProblem(file, customer)
     if (groupReason) return reject(groupReason)
-    await this.#seenMsgIds.set(`${keyOf(customer)}|${file.msgId}`, true)
+    // Kept before the MsgId is claimed (decision 1021, as 1017 for pain.001): a crash before
+    // the collections are saved resumes the file from the outbox; the claim (`add` with the
+    // kept file's id) lets one of two submissions of a MsgId, or a resubmission and a resumed
+    // file, go on; the loser removes its kept file and is refused as a duplicate.
+    const kept: KeptFile = {
+      id: randomUUID(), customer: customerKey(customer), requestId, msgId: file.msgId!, xml, at: this.d.clock.now().getTime(),
+      ids: file.blocks.flatMap((b) => b.txs.map(() => servicerRef())),
+    }
+    const item = this.d.outbox.item(FILE_KIND, kept)
+    await this.d.ledger.outbox.put([item])
+    if (!(await claimKey(this.#seenMsgIds, msgIdKey(kept), kept.id))) {
+      await this.d.ledger.outbox.remove([item.key])
+      return reject(E.duplicateMessage)
+    }
+    await this.#accept(file, customer, kept)
+    await this.d.ledger.outbox.remove([item.key])
+  }
 
+  /**
+   * A kept file's collections: checked as when it came, under their kept ids, reported in one
+   * pain.002 (once, by the kept file) and saved (each once), the debtor notified once each.
+   * Run again after a crash, it reports and saves only what the cut run did not.
+   */
+  async #accept(file: CollectionFile, customer: Customer, kept: KeptFile) {
+    const now = new Date(kept.at)
     const report: DdReport = { originalMsgId: file.msgId!, originalMsgName: PAIN008, blocks: [] }
     const accepted: Collection[] = []
+    let i = 0
     for (const b of file.blocks) {
       const txs: DdStatus[] = []
-      for (const t of b.txs) txs.push(await this.#collection(file, b, t, customer, requestId))
+      for (const t of b.txs) txs.push(await this.#collection(file, b, t, customer, kept.requestId, kept.ids[i++], now))
       for (const s of txs) if (s.status === 'ACCP') accepted.push(s.collection!)
       report.blocks.push({ pmtInfId: b.pmtInfId!, status: aggregate(txs.map((s) => s.status)), txs })
     }
     report.groupStatus = aggregate(report.blocks.flatMap((b) => b.txs.map((t) => t.status)))
-    await this.#report(customer, DD_TYPES.outgoing, requestId, report)
+    await this.#report(customer, DD_TYPES.outgoing, kept.requestId, report, `${FILE_KIND}:${kept.id}`)
     for (const c of accepted) await this.#add(c)
+  }
+
+  /**
+   * A kept file a crash cut (decision 1021): run again when its MsgId is its own, or still free
+   * (a crash between the keep and the claim) and claimed now; another submission's claim, or
+   * its creditor gone, drops it.
+   */
+  async #resumeFile(item: OutboxItem) {
+    const kept = item.payload as KeptFile
+    const customer = await this.d.directory.get(kept.customer)
+    if (!customer || !(await claimKey(this.#seenMsgIds, msgIdKey(kept), kept.id))) return
+    await this.#accept(readPain008(parseXml(kept.xml)), customer, kept)
   }
 
   async #fileProblem(f: CollectionFile, customer: Customer): Promise<string | undefined> {
@@ -289,11 +337,11 @@ export class DirectDebitService {
   }
 
   /** One collection of an accepted file: ACCP with the record, or RJCT with the reason. */
-  async #collection(f: CollectionFile, b: DdBlock, t: DdTx, customer: Customer, requestId: string): Promise<DdStatus> {
+  async #collection(f: CollectionFile, b: DdBlock, t: DdTx, customer: Customer, requestId: string, id: string, now: Date): Promise<DdStatus> {
     const debtorIban = normalizeIban(t.debtorIban!)
     const debtorCustomer = await this.d.directory.ownerOf(debtorIban)
     const c: Collection = {
-      id: servicerRef(), msgId: f.msgId!, pmtInfId: b.pmtInfId!, endToEndId: t.endToEndId!, instrId: t.instrId,
+      id, msgId: f.msgId!, pmtInfId: b.pmtInfId!, endToEndId: t.endToEndId!, instrId: t.instrId,
       amount: toMinor(t.amount!), currency: t.currency!, dueDate: b.dueDate!, settlementDate: settlementDate(b.dueDate!),
       scheme: DD_SCHEME, localInstrument: t.localInstrument ?? b.localInstrument ?? 'CORE', seqTp: t.seqTp ?? b.seqTp,
       mandateId: t.mandateId, signedOn: t.signedOn, creditorSchemeId: t.creditorSchemeId ?? b.creditorSchemeId,
@@ -308,7 +356,6 @@ export class DirectDebitService {
     if (!c.mandateId?.trim()) return rj(E.mandate)
     if (!/^[A-Z]{2}\d{2}[A-Z0-9]{1,30}$/.test(debtorIban) || (this.d.strictIban !== false && !ibanChecksumOk(debtorIban))) return rj(E.ibanFormat)
     if (debtorIban === c.creditor.iban || (await this.d.virtual?.resolve(debtorIban))) return rj(REASONS.AG01, 'AG01')
-    const now = this.d.clock.now()
     if (now.getTime() > submissionCutoff(c.settlementDate) || dateTallinn(now) < addDays(c.dueDate, -EARLIEST_DAYS)) return rj(E.date)
     return { ...base, status: 'ACCP' }
   }
@@ -597,13 +644,17 @@ export class DirectDebitService {
     return hits.find((c) => c.status === 'PENDING' || c.status === 'SETTLED') ?? hits[hits.length - 1]
   }
 
-  /** A new collection: stored, then the debtor here notified (its MsgId stored with it). */
+  /**
+   * A new collection: stored, then the debtor here notified (its MsgId stored with it). Once
+   * by its id (decision 1021): a resumed file's collection saved before the crash is kept as
+   * stored (also when settled since), its notification added at most once by the id.
+   */
   async #add(c: Collection) {
     // Enabled per customer by the account manager (P 09, decision 527).
     if (c.debtorCustomer?.directDebit?.debtorNotification) c.notificationMsgId = notificationMsgId()
-    await this.#collections.set(c.id, encodeCollection(c))
+    if (!(await this.#collections.add(c.id, encodeCollection(c)))) c.notificationMsgId = (await this.#collections.get(c.id))?.notificationMsgId
     if (c.notificationMsgId) {
-      await this.d.inbox.add({ customer: c.debtorCustomer!, type: DD_TYPES.notification, body: incomingCollection(c, c.notificationMsgId, this.d.clock.now()) })
+      await this.d.inbox.add({ customer: c.debtorCustomer!, type: DD_TYPES.notification, body: incomingCollection(c, c.notificationMsgId, this.d.clock.now()), key: `dd-notification:${c.id}` })
     }
   }
 
@@ -642,8 +693,9 @@ export class DirectDebitService {
     }
   }
 
-  async #report(customer: Customer, type: string, requestId: string | undefined, r: DdReport) {
-    await this.d.inbox.add({ customer, type, requestId, body: ddStatusReport(r, this.d.bank.bic, this.d.clock.now()) })
+  /** `key`: added once by it (decision 991), a resumed file's first report (1021). */
+  async #report(customer: Customer, type: string, requestId: string | undefined, r: DdReport, key?: string) {
+    await this.d.inbox.add({ customer, type, requestId, body: ddStatusReport(r, this.d.bank.bic, this.d.clock.now()), ...(key ? { key } : {}) })
   }
 
 }
@@ -657,6 +709,8 @@ type StoredCollection = Omit<Collection, 'amount' | 'creditorCustomer' | 'debtor
 }
 
 const customerKey = (c: Customer): CustomerKey => ({ code: c.code, country: c.country })
+/** A pain.008's MsgId as claimed, per creditor customer. */
+const msgIdKey = (f: { customer: CustomerKey; msgId: string }) => `${keyOf(f.customer)}|${f.msgId}`
 
 /** JSON-safe (undefined fields dropped), so memory hands back what Postgres would. */
 const encodeCollection = (c: Collection): StoredCollection => {

@@ -81,6 +81,15 @@ export async function updateKeyed<V>(store: KeyedStore<V>, key: string, f: (v: V
 }
 
 /**
+ * Claims `key` for `owner` (a file's MsgId for the work that carries it, decisions 1017,
+ * 1021): true when added now, or already held by `owner` (a resumed work claimed it before
+ * the crash); another value, also a `true` stored before claims had owners, is another's.
+ */
+export async function claimKey<V>(store: KeyedStore<V>, key: string, owner: V): Promise<boolean> {
+  return (await store.add(key, owner)) || (await store.get(key)) === owner
+}
+
+/**
  * Takes a unique name (a VIBAN clientReference, a webhook message type, a subscribed URL)
  * for `ref` in a store of names → holder refs, once for the namespace (decision 1012), and
  * answers its holder: `ref` when taken now or before, else the other holder. A holder that

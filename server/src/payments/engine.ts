@@ -22,7 +22,7 @@
 // through settle() and is reported then, the same reports and notifications as at once.
 import { createHash, randomUUID } from 'node:crypto'
 import { DEFAULT_BOUNDS, type Bounds } from '../bounded.js'
-import { memoryKeyed, UNBOUNDED, type KeyedFactory, type KeyedStore } from '../keyed.js'
+import { claimKey, memoryKeyed, UNBOUNDED, type KeyedFactory, type KeyedStore } from '../keyed.js'
 import type { Clock } from '../clock.js'
 import { codePage, fold } from '../cp1257.js'
 import { keyOf, type Customer, type CustomerKey, type DirectoryStore } from '../directory.js'
@@ -322,7 +322,7 @@ export class PaymentEngine {
     const kept: RoundFile = { type: 'file', round: round.id, file: fileKey(round.file), first: true, xml, refs: file.blocks.flatMap((b) => b.txs.map(() => servicerRef())) }
     const item = this.opts.outbox.item(ROUND_KIND, json(kept))
     await this.ledger.outbox.put([item])
-    if (!(await this.#seenMsgIds.add(msgIdKey(round.file), round.id))) {
+    if (!(await claimKey(this.#seenMsgIds, msgIdKey(round.file), round.id))) {
       await this.ledger.outbox.remove([item.key])
       return reject(R.duplicateMessage, version)
     }
@@ -391,8 +391,7 @@ export class PaymentEngine {
    */
   async #resumeFile(round: Round, item: OutboxItem) {
     const kept = item.payload as RoundFile
-    const key = msgIdKey(round.file)
-    if (!(await this.#seenMsgIds.add(key, round.id)) && (await this.#seenMsgIds.get(key)) !== round.id) return
+    if (!(await claimKey(this.#seenMsgIds, msgIdKey(round.file), round.id))) return
     const f = readPain001(parseXml(kept.xml), round.file.version)
     await this.#process(f, round, kept.refs, item)
   }

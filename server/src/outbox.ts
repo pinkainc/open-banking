@@ -74,7 +74,11 @@ export class Outbox {
   #minAge = new Map<string, number>()
   constructor(private ledger: Ledger, private clock: Clock, private bank: Bank) {}
 
-  on(kind: string, handler: Handler) { this.#handlers.set(kind, handler) }
+  /** A kind delivered item by item; `minAgeMs` as for onGroup (a kept DD file, decision 1021). */
+  on(kind: string, handler: Handler, o: { minAgeMs?: number } = {}) {
+    this.#handlers.set(kind, handler)
+    if (o.minAgeMs) this.#minAge.set(kind, o.minAgeMs)
+  }
   /**
    * A kind whose items one delivery hands over together (after the other kinds'); recover
    * hands over all pending ones together. `minAgeMs`: a recovery with an age limit (the
