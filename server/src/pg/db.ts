@@ -177,6 +177,7 @@ create table if not exists journal_entries (
 create index if not exists journal_entries_account on journal_entries (ns, account, booked_at, seq);
 alter table journal_entries add column if not exists entry_key text;
 create unique index if not exists journal_entries_key on journal_entries (ns, entry_key) where entry_key is not null;
+create index if not exists journal_entries_ref on journal_entries (ns, (entry->>'servicerRef'));
 `
 
 // The ledger's outbox (decision 990): items that report a booking, written in the booking's

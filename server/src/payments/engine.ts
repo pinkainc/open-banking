@@ -25,12 +25,13 @@ import { DEFAULT_BOUNDS, type Bounds } from '../bounded.js'
 import { memoryKeyed, UNBOUNDED, type KeyedFactory, type KeyedStore } from '../keyed.js'
 import type { Clock } from '../clock.js'
 import { codePage, fold } from '../cp1257.js'
-import { keyOf, type Customer, type DirectoryStore } from '../directory.js'
+import { keyOf, type Customer, type CustomerKey, type DirectoryStore } from '../directory.js'
+import type { JournalStore } from '../statements/journal.js'
 import { ibanChecksumOk, ibanCountry, isSepaCountry, normalizeIban } from '../iban.js'
 import { servicerRef } from '../ids.js'
 import type { InboxStore } from '../inbox.js'
 import { InsufficientFunds, toMinor, type Ledger } from '../ledger.js'
-import { sameOutcome, type CreditRecall, type CreditResult, type IncomingCredit, type PaymentReturn, type PaymentReturnResult, type Rails, type RailsOutcome, type RecallResult, type Scheme } from '../rails.js'
+import { SCHEMES as RAILS_SCHEMES, sameOutcome, type CreditRecall, type CreditResult, type IncomingCredit, type PaymentReturn, type PaymentReturnResult, type Rails, type RailsOutcome, type RecallResult, type Scheme } from '../rails.js'
 import { parseXml, XmlSyntaxError } from '../xml.js'
 import { isUkAccount } from '../routing.js'
 import type { Booking } from './camt054.js'
@@ -78,6 +79,8 @@ export interface EngineOptions {
   pending?: RailsPending
   /** Where duplicate sets, parked payments, in-flight limit amounts and credit results are kept (decision 963); default in memory. */
   keyed?: KeyedFactory
+  /** The statements journal: a settled payment's debit entry, for a return without its record (decision 1020). */
+  journal?: Pick<JournalStore, 'byRef'>
 }
 
 /**
@@ -962,7 +965,7 @@ export class PaymentEngine {
     const scheme = p.scheme!
     if (outcome.status === 'settled') {
       const debit = await this.#debitBooking(file.customer, p, scheme)
-      const notices = [this.#notice(file.customer, debit), this.opts.outbox.item(SETTLED_KIND, settledRecord(file, debit))]
+      const notices = [this.#notice(file.customer, debit), this.opts.outbox.item(SETTLED_KIND, settledRecord(file.customer, file.msgId, debit))]
       // `report`: its pain.002 goes with the commit too, before the camt.054 (decision 999).
       const status: TxStatus = { ...accepted, status: 'ACSC', reason: undefined, scheme }
       if (o.report) notices.unshift(this.opts.outbox.message(await this.#reportMessage(file.customer, file.requestId, { version: file.version, originalMsgId: file.msgId, blocks: [{ pmtInfId: block.pmtInfId!, txs: [status] }] })))
@@ -1281,7 +1284,7 @@ export class PaymentEngine {
    * scheme, another currency, or an amount above the payment's.
    */
   async returned(r: PaymentReturn): Promise<PaymentReturnResult> {
-    const seen = await this.#settled.get(r.ref)
+    const seen = (await this.#settled.get(r.ref)) ?? (await this.#settledBefore(r.ref))
     if (!seen || (r.scheme !== undefined && r.scheme !== seen.scheme)) return { applied: false }
     if (seen.returned) return { applied: false, servicerRef: seen.returned.servicerRef }
     const amount = r.amount ?? BigInt(seen.amount)
@@ -1304,6 +1307,26 @@ export class PaymentEngine {
     if (await this.#settled.replace(r.ref, { ...seen, returned }, seen)) return { applied: true, servicerRef: t.ref }
     const now = await this.#settled.get(r.ref)
     return { applied: false, servicerRef: now?.returned?.servicerRef ?? t.ref }
+  }
+
+  /**
+   * The record of a payment settled with no `payment-settled` record (before decision 1014,
+   * or forgotten past the bound), derived from its debit's journal entry (decision 1020):
+   * the camt.054 DBIT the settlement's commit wrote, the booking whole (account, VIBAN or
+   * agency party, amount, currency, scheme, PmtInfId, InstrId, EndToEndId, creditor). Only
+   * a payment the rails settled: a debit of a scheme the rails settle with no bank
+   * transaction code or return information (a recall's debit, a direct debit, Bacs and FX
+   * all have one; an internal payment is INTERNAL). The customer is the account's owner;
+   * the MsgId is not in the entry and stays absent. `add`ed, so of two at once (also in
+   * two emulators) one record is kept and both go on with it, the return then once by its
+   * compare-and-set as for a record kept at settlement.
+   */
+  async #settledBefore(ref: string): Promise<SettledRecord | undefined> {
+    const d = (await this.opts.journal?.byRef(ref))?.find((e) => e.direction === 'DBIT' && (RAILS_SCHEMES as readonly string[]).includes(e.scheme) && !e.bankTxCode && !e.returnInfo && !e.reversal && !e.mandateId)
+    const customer = d && await this.directory.ownerOf(d.account)
+    if (!d || !customer) return undefined
+    const record = settledRecord(customer, undefined, d)
+    return (await this.#settled.add(ref, record)) ? record : this.#settled.get(ref)
   }
 
   /** An incoming credit from outside (the simulator's SEPA / SEPA Instant credit). */
@@ -1344,16 +1367,17 @@ export class PaymentEngine {
 /**
  * What a return of a settled external payment needs (decision 1014), from its debit's
  * booking; JSON, the amount a decimal string of minor units. `returned` once it came back.
+ * No `msgId` when derived from the journal (decision 1020): the entry does not carry it.
  */
 type SettledRecord = {
   ref: string; customer: { code: string; country: string }; account: string; party?: Booking['virtual']
-  amount: string; currency: string; scheme: Scheme; msgId: string; pmtInfId?: string; instrId?: string; endToEndId?: string
+  amount: string; currency: string; scheme: Scheme; msgId?: string; pmtInfId?: string; instrId?: string; endToEndId?: string
   counterparty: Booking['counterparty']
   returned?: { returnRef: string; code: string; amount: string; servicerRef: string }
 }
-const settledRecord = (file: FileRef, d: Booking): SettledRecord => JSON.parse(JSON.stringify({
-  ref: d.servicerRef, customer: { code: file.customer.code, country: file.customer.country }, account: d.account, party: d.virtual,
-  amount: d.amount.toString(), currency: d.currency, scheme: d.scheme, msgId: file.msgId,
+const settledRecord = (customer: CustomerKey, msgId: string | undefined, d: Booking): SettledRecord => JSON.parse(JSON.stringify({
+  ref: d.servicerRef, customer: { code: customer.code, country: customer.country }, account: d.account, party: d.virtual,
+  amount: d.amount.toString(), currency: d.currency, scheme: d.scheme, msgId,
   pmtInfId: d.pmtInfId, instrId: d.instrId, endToEndId: d.endToEndId, counterparty: d.counterparty,
 }))
 

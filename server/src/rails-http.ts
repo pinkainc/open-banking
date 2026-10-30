@@ -15,7 +15,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto'
 import Fastify, { type FastifyInstance } from 'fastify'
 import { fromMinor, toMinor } from './ledger.js'
 import {
-  RailsRetryLater, type CollectionOutcome, type CreditRecall, type CreditResult, type IncomingCredit, type OutgoingCollection, type OutgoingPayment, type PaymentReturn, type Rails,
+  RailsRetryLater, SCHEMES, type CollectionOutcome, type CreditRecall, type CreditResult, type IncomingCredit, type OutgoingCollection, type OutgoingPayment, type PaymentReturn, type Rails,
   type RailsAnswer, type RailsEvents, type RailsOutcome, type RailsStatus, type Scheme,
 } from './rails.js'
 
@@ -24,7 +24,6 @@ export const HMAC_HEADER = 'x-rails-hmac'
 const R_CODE = /^[A-Z0-9]{4}$/
 /** A payment return's reason: ISO (four characters) or Faster Payments' eight digits (decision 1014). */
 const RETURN_CODE = /^[A-Z0-9]{4}$|^[0-9]{8}$/
-const SCHEMES: readonly Scheme[] = ['SEPA', 'INST', 'SWIFT', 'TARGET2', 'FAST']
 
 export function railsHmac(secret: string, body: string | Buffer): string {
   return createHmac('sha256', Buffer.from(secret, 'utf8')).update(body).digest('hex')

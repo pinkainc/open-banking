@@ -56,6 +56,11 @@ export class PgJournal implements JournalStore {
       [this.namespace, accounts, currency, clamp(from), clamp(to)])
     return BigInt(r.rows[0].total)
   }
+
+  async byRef(servicerRef: string): Promise<JournalEntry[]> {
+    const r = await this.db.pool.query(`select seq, entry from journal_entries where ns = $1 and entry->>'servicerRef' = $2 order by seq`, [this.namespace, servicerRef])
+    return r.rows.map(revive)
+  }
 }
 
 const LIMIT = 8.64e15 // the largest Date

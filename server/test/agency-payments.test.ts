@@ -186,6 +186,22 @@ describe('returns and recalls of agency payments (decisions 1014, 1015)', () => 
     assert.deepEqual(e.parties.DbtrAcct, { Id: { IBAN: DE_IBAN } })
   })
 
+  test('a payment from an agency account settled before decision 1014 (no record) returned the same: the agency party from the journal entry (decision 1020)', async () => {
+    ee.emulator.outbox.on('payment-settled', async () => {})
+    const msgs = await pay(ee, agencyPain(NL))
+    const ref = msgs[1].doc.Document.CstmrPmtStsRpt.OrgnlPmtInfAndSts.TxInfAndSts.AcctSvcrRef as string
+    assert.equal((await rails().returnPayment({ ref, returnRef: 'RTR-AG-OLD', code: 'AC04' })).applied, true)
+    assert.equal(await balance(ee, EEM), '1000.00')
+    const [m] = await drain(ee, AG.code)
+    assert.ok(await schemaValid(m.body))
+    const e = entry(m)
+    assert.deepEqual([e.account, e.ntry.CdtDbtInd, String(e.ntry.RvslInd)], [EEM, 'CRDT', 'true'])
+    assert.deepEqual(e.parties.Cdtr, { Nm: 'Jan Novak', PstlAdr: { Ctry: 'GB', AdrLine: 'London' } })
+    assert.deepEqual(e.parties.CdtrAcct, { Id: { IBAN: NL } })
+    assert.deepEqual(e.parties.DbtrAcct, { Id: { IBAN: DE_IBAN } })
+    assert.equal((await rails().returnPayment({ ref, returnRef: 'RTR-AG-OLD', code: 'AC04' })).applied, false, 'once')
+  })
+
   test('a recall of a credit to an agency account debits the master with the agency account as the debtor party', async () => {
     const c = await rails().credit({ ref: 'RC-AG', iban: NL, amount: 300n, currency: 'EUR', scheme: 'SEPA', debtor: { name: 'Katie Bell', iban: 'ES9121000418450200051332' } })
     assert.equal(c.status, 'booked')

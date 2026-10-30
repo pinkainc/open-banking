@@ -20,6 +20,8 @@ export interface JournalStore {
   balancesBefore(account: string, before: number): Promise<Map<string, bigint>>
   /** The sum of the accounts' debits in a currency booked in [from, to] (payment-limit usage). */
   debits(accounts: string[], currency: string, from: number, to: number): Promise<bigint>
+  /** Entries with this AcctSvcrRef (`servicerRef`), oldest first: a payment's debit, for its return (decision 1020). */
+  byRef(servicerRef: string): Promise<JournalEntry[]>
 }
 
 export class MemoryJournal implements JournalStore {
@@ -27,6 +29,7 @@ export class MemoryJournal implements JournalStore {
   #seq = 0
   /** Entries by outbox key; unbounded as the journal is (decision 915). */
   #keys = new Map<string, JournalEntry>()
+  #byRef = new Map<string, JournalEntry[]>()
 
   async record(b: Booking, key?: string): Promise<JournalEntry> {
     const known = key === undefined ? undefined : this.#keys.get(key)
@@ -36,8 +39,13 @@ export class MemoryJournal implements JournalStore {
     let list = this.#byAccount.get(b.account)
     if (!list) this.#byAccount.set(b.account, (list = []))
     list.push(e)
+    const same = this.#byRef.get(b.servicerRef)
+    if (same) same.push(e)
+    else this.#byRef.set(b.servicerRef, [e])
     return e
   }
+
+  async byRef(servicerRef: string): Promise<JournalEntry[]> { return [...(this.#byRef.get(servicerRef) ?? [])] }
 
   async entries(account: string, from: number, to: number): Promise<JournalEntry[]> {
     const out = (this.#byAccount.get(account) ?? []).filter((e) => {

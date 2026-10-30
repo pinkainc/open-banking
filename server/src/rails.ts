@@ -11,6 +11,8 @@ import { keepLast } from './bounded.js'
 
 /** FAST: UK Faster Payments (decision 840). */
 export type Scheme = 'SEPA' | 'INST' | 'SWIFT' | 'TARGET2' | 'FAST'
+/** Every scheme the rails send and settle. */
+export const SCHEMES: readonly Scheme[] = ['SEPA', 'INST', 'SWIFT', 'TARGET2', 'FAST']
 
 export interface OutgoingPayment {
   ref: string

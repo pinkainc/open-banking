@@ -399,6 +399,8 @@ describe('returns of our own payments the rails settled (pacs.004, decision 1014
     return acsc[0].ref!
   }
   const VIBAN = 'EE467777000010897825'
+  /** Settlements from now on keep no `payment-settled` record, as before decision 1014. */
+  const olderCode = (c = ctx) => c.emulator.outbox.on('payment-settled', async () => {})
   const addViban = (c = ctx) => c.emulator.viban.registry.add({
     iban: VIBAN, master: C1.iban, owner: { code: C1.code, country: 'EE' }, status: 'ACTIVE', createdAt: c.clock.now(),
     user: { company: { Name: 'Shop Holder OU' } as any, address: { Country: 'EE', StreetNo: 'Tartu mnt 2', CityCounty: 'Tallinn' } } as any,
@@ -475,6 +477,70 @@ describe('returns of our own payments the rails settled (pacs.004, decision 1014
     const r = await rails().credit({ ref: 'UNMATCHED-RTN', iban: C1.iban, amount: 600n, currency: 'EUR', scheme: 'SEPA', debtor: { name: 'Creditor Name', iban: DE_IBAN } })
     assert.equal(r.status, 'booked')
     assert.deepEqual((await messages()).notes.map((n) => [n.ind, n.amount]), [['CRDT', '6.00']])
+    assert.equal(await balance(ctx, C1.iban), '10000.00')
+  })
+
+  test('settled before decision 1014 (no record): returned once from its debit\'s journal entry, the same camt.054 (decision 1020)', async () => {
+    olderCode()
+    const ref = await paid()
+    assert.equal(await balance(ctx, C1.iban), '9993.00')
+    const a = (await ret({ ref, code: 'AC04', returnRef: 'RTR-OLD' })).json()
+    assert.equal(a.applied, true)
+    assert.ok(a.servicerRef && a.servicerRef !== ref)
+    assert.equal(await balance(ctx, C1.iban), '10000.00')
+    const msgs = await drain(ctx)
+    assert.equal(msgs.length, 1)
+    const n = msgs[0].doc.Document.BkToCstmrDbtCdtNtfctn.Ntfctn.Ntry
+    assert.deepEqual([n.CdtDbtInd, String(n.Amt['#text'] ?? n.Amt), n.AcctSvcrRef, String(n.RvslInd)], ['CRDT', '7.00', a.servicerRef, 'true'])
+    assert.match(msgs[0].body, /<Fmly><Cd>RCDT<\/Cd><SubFmlyCd>OTHR<\/SubFmlyCd><\/Fmly>/)
+    assert.match(msgs[0].body, /<Refs><AcctSvcrRef>[^<]+<\/AcctSvcrRef><PmtInfId>[^<]+<\/PmtInfId><InstrId>INSTR-RTN<\/InstrId><EndToEndId>E2E-RTN<\/EndToEndId><\/Refs>/)
+    assert.ok(msgs[0].body.includes(`<RtrInf><Rsn><Cd>NARR</Cd></Rsn><AddtlInf>AC04</AddtlInf><AddtlInf>ORIG:${ref}</AddtlInf></RtrInf>`), msgs[0].body)
+    assert.match(msgs[0].body, /<Dbtr><Nm>Creditor Name<\/Nm><\/Dbtr><DbtrAcct><Id><IBAN>DE89370400440532013000<\/IBAN>/, 'the creditor who returned it')
+    assert.equal(await schemaValid(msgs[0].body), true)
+    assert.deepEqual((await ret({ ref, code: 'AC04', returnRef: 'RTR-OLD' })).json(), { applied: false, servicerRef: a.servicerRef }, 'a repeat')
+    assert.deepEqual((await ret({ ref, code: 'MS03', returnRef: 'RTR-OLD-2' })).json(), { applied: false, servicerRef: a.servicerRef }, 'returned once')
+    assert.deepEqual(await drain(ctx), [])
+    assert.equal(await balance(ctx, C1.iban), '10000.00')
+  })
+
+  test('settled before decision 1014 from a VIBAN: back to its master with the VIBAN party from the journal entry (decision 1020)', async () => {
+    olderCode()
+    await addViban()
+    const ref = await paid('4.00', VIBAN)
+    assert.equal((await ret({ ref, code: 'AC04' })).json().applied, true)
+    assert.equal(await balance(ctx, C1.iban), '10000.00')
+    const [m] = await drain(ctx)
+    assert.match(m.body, new RegExp(`<Acct><Id><IBAN>${C1.iban}</IBAN>`))
+    assert.match(m.body, new RegExp(`<Cdtr><Nm>Shop Holder OU</Nm>.*</Cdtr><CdtrAcct><Id><IBAN>${VIBAN}</IBAN>`, 's'))
+    assert.equal(await schemaValid(m.body), true)
+  })
+
+  test('settled before decision 1014, not applied: another scheme, more than the payment, an internal payment, a recall\'s debit (decision 1020)', async () => {
+    olderCode()
+    await pay([{ amount: '2.00', creditorIban: C2.iban }])
+    const internal = (await messages()).reports.flatMap((r) => r.txs).find((t) => t.sts === 'ACSC')!.ref!
+    assert.deepEqual((await ret({ ref: internal, code: 'AC04' })).json(), { applied: false }, 'an internal payment')
+    assert.equal((await rails().credit({ ref: 'RC-OLD', iban: C1.iban, amount: 100n, currency: 'EUR', scheme: 'SEPA', debtor: { name: 'Hans Muster', iban: DE_IBAN } })).status, 'booked')
+    const recall = await rails().recall({ ref: 'RC-OLD', recallRef: 'CXL-OLD', code: 'DUPL' })
+    assert.equal(recall.status, 'returned')
+    assert.deepEqual((await ret({ ref: (recall as { servicerRef: string }).servicerRef, code: 'AC04' })).json(), { applied: false }, 'a recall\'s debit')
+    await drain(ctx)
+    const ref = await paid('3.00')
+    assert.deepEqual((await ret({ ref, code: 'AC04', scheme: 'SWIFT' })).json(), { applied: false }, 'another scheme')
+    assert.deepEqual((await ret({ ref, code: 'AC04', amount: '3.01' })).json(), { applied: false }, 'more than the payment')
+    assert.deepEqual(await drain(ctx), [])
+    assert.equal(await balance(ctx, C1.iban), '9995.00')
+    assert.equal((await ret({ ref, code: 'AC04', amount: '2.50' })).json().applied, true, 'a partial amount')
+    assert.equal(await balance(ctx, C1.iban), '9997.50')
+  })
+
+  test('two returns at once of a payment settled before decision 1014: booked once, one applied (decision 1020)', async () => {
+    olderCode()
+    const ref = await paid('5.00')
+    const both = await Promise.all([rails().returnPayment({ ref, returnRef: 'RTR-A', code: 'AC04' }), rails().returnPayment({ ref, returnRef: 'RTR-B', code: 'AC04' })])
+    assert.equal(both.filter((r) => r.applied).length, 1, JSON.stringify(both))
+    assert.equal(both[0].servicerRef, both[1].servicerRef)
+    assert.deepEqual((await messages()).notes.map((n) => [n.ind, n.amount, n.ref]), [['CRDT', '5.00', both[0].servicerRef]])
     assert.equal(await balance(ctx, C1.iban), '10000.00')
   })
 
@@ -580,4 +646,46 @@ if (process.env.DATABASE_URL) test('a return after a restart of a payment settle
   assert.deepEqual((await messages(c)).notes, [])
   assert.equal(await balance(c, C1.iban), '10000.00')
   assert.deepEqual(await c.emulator.engine.returned({ ref: 'NO-SUCH', returnRef: 'X', code: 'AC04' }), { applied: false })
+})
+
+if (process.env.DATABASE_URL) describe('returns of payments settled before decision 1014 on Postgres (decision 1020)', () => {
+  /** Settles one payment to DE_IBAN with no `payment-settled` record, as code before decision 1014: its ref. */
+  const settledByOlderCode = async (a: Ctx, amount: string) => {
+    a.emulator.outbox.on('payment-settled', async () => {})
+    await pay([{ amount, creditorIban: DE_IBAN, instrId: 'INSTR-OLD-PG', endToEndId: 'E2E-OLD-PG' }], a)
+    return (await messages(a)).reports.flatMap((r) => r.txs).find((t) => t.sts === 'ACSC')!.ref!
+  }
+
+  test('after a restart: booked once from the journal, the payment refs in the camt.054; a repeat after another restart books nothing', async () => {
+    const opts = await postgresStore()
+    const ref = await settledByOlderCode(await setup(opts), '8.00')
+    const b = await setup(opts)
+    assert.equal(await balance(b, C1.iban), '9992.00')
+    const r = await b.emulator.engine.returned({ ref, returnRef: 'RTR-OLD-PG', code: 'AC04' })
+    assert.equal(r.applied, true)
+    const msgs = await drain(b)
+    assert.deepEqual(msgs.map((m) => m.doc.Document.BkToCstmrDbtCdtNtfctn.Ntfctn.Ntry.AcctSvcrRef), [r.servicerRef])
+    assert.match(msgs[0].body, /<InstrId>INSTR-OLD-PG<\/InstrId><EndToEndId>E2E-OLD-PG<\/EndToEndId>/)
+    assert.ok(msgs[0].body.includes(`<AddtlInf>ORIG:${ref}</AddtlInf>`))
+    assert.equal(await schemaValid(msgs[0].body), true)
+    assert.equal(await balance(b, C1.iban), '10000.00')
+    const c = await setup(opts)
+    assert.deepEqual(await (c.emulator.rails as SimulatorRails).returnPayment({ ref, returnRef: 'RTR-OLD-PG', code: 'AC04' }), { applied: false, servicerRef: r.servicerRef })
+    assert.deepEqual((await messages(c)).notes, [])
+    assert.equal(await balance(c, C1.iban), '10000.00')
+  })
+
+  test('two emulators returning it at once: booked once, one camt.054, one applied', async () => {
+    const opts = await postgresStore()
+    const ref = await settledByOlderCode(await setup(opts), '6.00')
+    const [b, c] = [await setup(opts), await setup(opts)]
+    const both = await Promise.all([
+      b.emulator.engine.returned({ ref, returnRef: 'RTR-B', code: 'AC04' }),
+      c.emulator.engine.returned({ ref, returnRef: 'RTR-C', code: 'AC04' }),
+    ])
+    assert.equal(both.filter((r) => r.applied).length, 1, JSON.stringify(both))
+    assert.equal(both[0].servicerRef, both[1].servicerRef)
+    assert.deepEqual((await messages(b)).notes.map((n) => [n.ind, n.amount, n.ref]), [['CRDT', '6.00', both[0].servicerRef]])
+    assert.equal(await balance(c, C1.iban), '10000.00')
+  })
 })
