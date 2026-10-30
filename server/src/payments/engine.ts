@@ -145,12 +145,13 @@ export const MANUAL_REVIEW = new Set(['Robba Bank', 'Steela Koinz', 'Laundra Cas
 const normName = (n?: string) => (n ?? '').replace(/\s+/g, ' ').trim().toLowerCase()
 
 /**
- * One status of one payment; `next` yields its following status (a later report), given
- * the maker of its entry there. `reported`: its pain.002 went with its booking's first call
+ * One status of one payment; `then`: the plan whose following step (#nextOf: the rails,
+ * manual review) yields its status in a later report, planned with this round's entries
+ * (decision 1018). `reported`: its pain.002 went with its booking's first call
  * (decision 999), the round leaves it out. `i`: its place in the round; `entry`: its entry
  * in the round's report, kept with its booking (decision 1005).
  */
-interface Step { status: TxStatus; notices?: OutboxItem[]; next?: (entry: EntryOf) => Promise<Step | undefined>; reported?: boolean; i?: number; entry?: OutboxItem }
+interface Step { status: TxStatus; notices?: OutboxItem[]; then?: Plan; reported?: boolean; i?: number; entry?: OutboxItem }
 /** Makes a payment's entry in its round's report, to be kept with the booking that settles it. */
 type EntryOf = (status: TxStatus) => OutboxItem
 /** A round of a file's status reports: one pain.002, group and block statuses in the first. */
@@ -166,9 +167,11 @@ type StoredFile = PendingRecord['file']
 interface RoundEntry { type: 'entry'; round: string; file: StoredFile; first: boolean; i: number; status?: Record<string, unknown> }
 /**
  * A transaction of a round planned before anything books (decision 1005): a status from the
- * checks, a checked plan to execute (or park for SCA), or a parked payment decided (1006).
+ * checks, a checked plan to execute (or park for SCA), a parked payment decided (1006), or
+ * the step that follows a status of the previous round (1018: #nextOf of the plan and status).
  */
 type PlannedTx = { i: number; status: Record<string, unknown> } | { i: number; plan: Record<string, unknown>; park?: boolean } | { i: number; ref: string; parked: ParkedRecord }
+  | { i: number; next: { plan: Record<string, unknown>; status: Record<string, unknown> } }
 /**
  * A received file kept in its first round's group before its MsgId is marked (decision 1017):
  * the body as sent and a reference per transaction, so a crash before the round is planned
@@ -397,6 +400,20 @@ export class PaymentEngine {
       if (o.resume) await this.ledger.release(plan.ref)
       return at(await this.#execute(file, plan, entryOf))
     }
+    if ('next' in t) {
+      // The step after a status reported in the previous round, run after a crash (decision
+      // 1018): that report told ACSP, so the reservation is kept (not released as above); a
+      // payment the rails have is not sent again, one already parked is not parked again.
+      const plan = await this.#decodePlan(t.next.plan)
+      const go = plan && this.#nextOf(file, plan, t.next.status as unknown as TxStatus)
+      if (!plan || !go) return undefined
+      const waiting = await this.#resumeRails(plan.ref, entryOf)
+      if (waiting !== false) return at(waiting)
+      if ((await this.#settled.has(plan.ref)) || (await this.#decided.has(plan.ref))) return undefined
+      const parked = await this.#parked.get(plan.ref)
+      if (parked) return at({ status: parked.status as unknown as TxStatus })
+      return at(await go(entryOf))
+    }
     // A parked payment decided (decision 1006): claimed by this round once, also when the
     // round is resumed after a crash (the claim names it); another round's claim skips it.
     if (!(await this.#decided.add(t.ref, round.id)) && (await this.#decided.get(t.ref)) !== round.id) return undefined
@@ -426,8 +443,11 @@ export class PaymentEngine {
       await this.#incomingOf(p.file, p.plan, 'Booked')
       return at(booked)
     }
-    // Sent before the crash: waiting at the rails, settled from there (reconcile).
-    if (o.resume && (await this.#pending.get(t.ref))) return undefined
+    // Sent before the crash: waiting at the rails, settled from there (decision 1018).
+    if (o.resume) {
+      const waiting = await this.#resumeRails(t.ref, entryOf)
+      if (waiting !== false) return at(waiting)
+    }
     return at(await this.#rails(p.file, p.plan, { ...p.status, status: 'ACSP', reason: undefined }, entryOf))
   }
 
@@ -451,19 +471,29 @@ export class PaymentEngine {
       }
       // A planned transaction without a step reports nothing now; its empty entry completes the round.
       for (const t of plan?.txs ?? []) if (!have.has(t.i) && !steps.some((s) => s.i === t.i)) fresh(t.i)
-      await this.ledger.outbox.put(put)
+      // The next round is planned with this round's entries (decision 1018): a crash after this
+      // report resumes the steps that follow (the rails, manual review) from the plan, once.
+      const next: Round = { id: randomUUID(), file: round.file, first: false }
+      const then = steps.filter((s) => s.then && this.#nextOf(round.file, s.then, s.status))
+      const nextPlan = then.length
+        ? this.#planItem(next, then.map((s) => ({ i: s.i!, next: { plan: encodePlan(s.then!), status: json(s.status) as unknown as Record<string, unknown> } })))
+        : undefined
+      await this.ledger.outbox.put(nextPlan ? [...put, nextPlan] : put)
       await this.opts.outbox.deliver(entries)
       for (const s of steps) await this.opts.outbox.deliver(s.notices ?? [])
-      const next: Round = { id: randomUUID(), file: round.file, first: false }
       const following: Step[] = []
-      for (const s of steps) {
-        const n = s.next && (await s.next(this.#entryOf(next, s.i!)))
+      for (const s of then) {
+        const n = await this.#nextOf(round.file, s.then!, s.status)!(this.#entryOf(next, s.i!))
         if (n) following.push({ ...n, i: s.i })
       }
-      if (!following.length) return
+      // Every step waits (at the rails): nothing to report, the plan goes.
+      if (!following.length) {
+        if (nextPlan) await this.ledger.outbox.remove([nextPlan.key])
+        return
+      }
       steps = following
       round = next
-      carried = []
+      carried = [nextPlan!]
     }
   }
 
@@ -496,6 +526,7 @@ export class PaymentEngine {
         await this.#resumeFile(round, kept)
         continue
       }
+      if (plan) await this.#takeReported(plan, entries)
       if (plan && plan.txs.some((t) => !entries.has(t.i))) {
         await this.#resume(round, plan, [planItem!, ...(kept ? [kept] : [])], entries)
         continue
@@ -532,14 +563,41 @@ export class PaymentEngine {
       }
       if (!e.status) continue
       const status = e.status as unknown as TxStatus
-      const p = 'plan' in t ? await this.#decodePlan(t.plan) : 'parked' in t ? (await this.#unpark(t.parked))?.plan : undefined
-      steps.push({ status, i: t.i, ...(p ? { next: this.#nextOf(round.file, p, status) } : {}) })
+      const p = 'plan' in t ? await this.#decodePlan(t.plan) : 'parked' in t ? (await this.#unpark(t.parked))?.plan : 'next' in t ? await this.#decodePlan(t.next.plan) : undefined
+      steps.push({ status, i: t.i, ...(p ? { then: p } : {}) })
     }
     await this.#flow(steps, round, [...carried, ...entries.values()])
   }
 
+  /**
+   * A rails outcome of a round cut by a crash whose entry was kept before its record was
+   * taken (decision 1018): the record, still waiting with its outcome, is taken now (the
+   * entry reports it; reconcile would report it again).
+   */
+  async #takeReported(plan: RoundPlan, entries: Map<number, OutboxItem>) {
+    for (const t of plan.txs) {
+      const ref = 'next' in t ? String(t.next.plan.ref) : 'parked' in t ? t.ref : undefined
+      if (!ref || !(entries.get(t.i)?.payload as RoundEntry | undefined)?.status) continue
+      const r = await this.#pending.get(ref)
+      if (r?.outcome) await this.#pending.take(ref, r.scheme)
+    }
+  }
+
+  /**
+   * A payment of a resumed round that a crash left at the rails (decisions 1006, 1018):
+   * `false` when nothing waits under its ref. One whose outcome was stored goes on from it
+   * as #rails would have (its entry in this round); one without waits for the outcome
+   * (the bridge's callback, reconcile).
+   */
+  async #resumeRails(ref: string, entryOf: EntryOf): Promise<Step | undefined | false> {
+    const r = await this.#pending.get(ref)
+    if (!r) return false
+    const w = r.outcome && (await this.#decode(r))
+    return w ? this.#answered(w.file, w.plan, w.accepted, r.outcome!, entryOf) : undefined
+  }
+
   /** What follows a status in a later round: the rails for an accepted external payment (SEPA after ACWC), manual review's PDNG. */
-  #nextOf(file: FileRef, p: Plan, s: TxStatus): Step['next'] {
+  #nextOf(file: FileRef, p: Plan, s: TxStatus): ((entry: EntryOf) => Promise<Step | undefined>) | undefined {
     if (s.status === 'ACWC') {
       const sepa: Plan = { ...p, scheme: 'SEPA' }
       return (e) => this.#rails(file, sepa, { ...s, status: 'ACSP', reason: undefined }, e)
@@ -675,7 +733,7 @@ export class PaymentEngine {
     await this.#hold(file.customer, p)
     const accepted: TxStatus = { block, tx, status: 'ACSP', servicerRef: p.ref, scheme, ...(p.creditorOwner ? { creditorBic: this.bank.bic } : {}) }
     // Manual review (sanctions screening): accepted first, then PDNG until /_sim decides; else the rails.
-    return { status: accepted, next: this.#nextOf(file, p, accepted) }
+    return { status: accepted, then: p }
   }
 
   /** Booked internally: ACSC, camt.054 DBIT to the debtor and CRDT to the creditor (made before the booking, which carries them). */
@@ -698,7 +756,7 @@ export class PaymentEngine {
    * Sends a reserved external payment to the rails. An immediate outcome is the step that
    * follows; `accepted` leaves it waiting for settle() (nothing more is reported now).
    */
-  async #rails(file: FileRef, p: Plan, accepted: TxStatus, entryOf?: EntryOf): Promise<Step | undefined> {
+  async #rails(file: FileRef, p: Plan, accepted: TxStatus, entryOf: EntryOf): Promise<Step | undefined> {
     const { block, tx } = p
     // Registered before sending: a bridge may call back before its answer arrives.
     await this.#pending.put(this.#encode(file, p, accepted))
@@ -710,17 +768,41 @@ export class PaymentEngine {
     })
     // `unknown` (a bridge timeout) waits as `accepted` and is reconciled (decision 1002).
     if (answer.status === 'accepted' || answer.status === 'unknown') return undefined
+    return this.#answered(file, p, accepted, answer, entryOf)
+  }
+
+  /**
+   * An immediate outcome of the rails (or one stored before a crash, decision 1018). Its
+   * record is taken last, after what reports it is kept: a crash before leaves the payment
+   * waiting with the outcome stored, and the resumed round (or reconcile) goes on from it.
+   * Settled: booked with its entry (the commit's key is the ref, decision 995), then taken.
+   * Otherwise the funds are released (RJCT) and its entry kept, then the record taken; of
+   * two takers (an outcome from the events at once), the one that takes it reports.
+   */
+  async #answered(file: FileRef, p: Plan, accepted: TxStatus, answer: RailsOutcome, entryOf: EntryOf): Promise<Step | undefined> {
     // The first stored outcome wins (decision 1003): a callback with another one that came
-    // first goes on, this answer is dropped.
+    // first goes on, this answer is dropped. No record: settled through the events while the
+    // answer was on its way, already reported (a SEPA fallback waits with another scheme).
     const d = await this.#pending.decide(p.ref, answer, p.scheme!)
-    if (d?.outcome && !sameOutcome(d.outcome, answer)) {
+    if (!d) return undefined
+    if (d.outcome && !sameOutcome(d.outcome, answer)) {
       console.warn(`rails: payment ${p.ref} (${p.scheme}) answered ${JSON.stringify(answer)} after ${JSON.stringify(d.outcome)} was stored; ignored`)
       return undefined
     }
-    // Settled through the events while the answer was on its way: already reported (and a
-    // SEPA fallback of it waits under the same ref with another scheme).
-    if (!(await this.#pending.take(p.ref, p.scheme))) return undefined
-    return this.#outcome(file, p, accepted, answer, { entryOf })
+    if (answer.status === 'settled') {
+      // A repeat (the events booked it at once) is `reported`; either way the record goes.
+      const step = await this.#outcome(file, p, accepted, answer, { entryOf })
+      await this.#pending.take(p.ref, p.scheme)
+      return step
+    }
+    const step = await this.#outcome(file, p, accepted, answer)
+    const entry = entryOf(step.status)
+    await this.ledger.outbox.put([entry])
+    if (!(await this.#pending.take(p.ref, p.scheme))) {
+      await this.ledger.outbox.remove([entry.key])
+      return undefined
+    }
+    return { ...step, entry }
   }
 
   /**
@@ -826,7 +908,7 @@ export class PaymentEngine {
     // SEPA Instant attempted and failed: an automatic choice goes on as SEPA (ACWC first).
     if (outcome.status === 'unavailable' && scheme === 'INST' && p.automatic) {
       const changed: TxStatus = { ...accepted, status: 'ACWC', reason: R.europeanPayment, scheme: 'SEPA' }
-      return { status: changed, next: this.#nextOf(file, p, changed) }
+      return { status: changed, then: p }
     }
     await this.#release(p)
     const reason = outcome.status === 'rejected' ? outcome.reason : scheme === 'INST' ? R.declinedTryEuropean : R.technical
