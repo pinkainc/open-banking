@@ -295,6 +295,26 @@ Sandbox certifikata još nema, pa je korisnik umjesto S8 izabrao tri otvorene st
 - Prvi check nakon agenta 1 pao je na jednom memory testu (log se prepisao); dva ponovljena checka bila su zelena. Brief agenta 2 dobio je flake kao sporedni zadatak i pokazalo se da je bio stvaran.
 - Agent 3 je odstupio od briefa gdje je dokumentacija imala uzorak (PMNT/RCDT/OTHR s RvslInd umjesto ISO PMNT/ICDT/RRTN): dokumentacija ima prednost pred pretpostavkom u briefu.
 
+## S7d: preostale core rupe (2026-10-30, danju)
+
+Upit za sandbox je poslan isti dan, pa je S7d umetnut prije S8. Šest agenata strogo jedan za drugim, Opus 5.5, effort high, svaki implementira i testira, svaki prima nalaze prethodnoga u briefu.
+
+| Agent | Poziva | Tokena | Ishod |
+|---|---|---|---|
+| 1 pad tijekom provjera pain.001 | 32 | 122k | datoteka u outboxu prije MsgId-a, MsgId kao claim, `#resumeFile`, pitanje 91, 862 ×2 (1017) |
+| 2 krugovi nakon izvještaja (stavke 2 i 3) | 42 | 158k | plan sljedećeg kruga u istom outbox putu, `Step.then: Plan`, trenutni ishod uzima zapis zadnji, 875 ×2 (1018) |
+| 3 callback ishodi RJCT/ACWC | 34 | 132k | outbox put prije `take`, id sljedećeg kruga izveden hashom (`afterOf`), našao istu rupu u trenutnom ACWC-u, 884 ×2 (1019) |
+| 4 povrat plaćanja prije 1014 | 50 | 125k | zapis izveden lijeno iz camt.054 u journalu (`JournalStore.byRef`), bez backfilla, 891 ×2 (1020) |
+| 5 pad tijekom provjera pain.008 | 41 | 145k | obrazac iz 1017 za DD, zajednički `claimKey` u `keyed.ts`, pitanje 92, 901 ×2 (1021) |
+| 6 pain.007 i camt.060 | 45 | 158k | isti obrazac za DD odbijanje i zahtjeve za izvod, atomski claim MsgId-a, 931 ×2 + 761 (1022–1023) |
+
+Što se pokazalo:
+
+- Stavke 4 i 5 iz briefa nisu bile na početnom popisu: rupu u callback ishodima prijavio je agent 2, rupu u DD datoteci agent 1, a pain.007 i camt.060 agent 5. Pitanje „što još ima istu rupu” na kraju briefa isplatilo se triput.
+- Stavke 2 i 3 dane su jednom agentu jer je agent 1 pokazao da ih zatvara isti mehanizam; stalo je u 158k.
+- Svi agenti 120–160k, nijedan blizu guarda. Ukupno ~840k tokena subagenata, oko 1 h 05 min rada agenata.
+- Svaki popravak imao je crveni test prije (ukupno 74 nova testa, gotovo svi padali na staroj verziji); utrka dvaju zahtjeva za izvod ne reproducira se na čistom memory storeu, samo na deferredu i Postgresu.
+
 ## Noćni lanac: `scripts/overnight.sh` (2026-10-24)
 
 S3–S7 su odrađeni bez čovjeka, od 01:03 do 06:18. Svaku sesiju je pokrenula shell petlja kao
