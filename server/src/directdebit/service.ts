@@ -40,7 +40,7 @@ import {
   aggregate, ddStatusReport, incomingCollection, type Collection, type DdReport, type DdStatus,
 } from './messages.js'
 import {
-  creditorIdOk, isoMessage, PAIN007, PAIN008, readPain007, readPain008, structuralProblem, type CollectionFile, type DdBlock, type DdTx,
+  creditorIdOk, isoMessage, PAIN007, PAIN008, readPain007, readPain008, structuralProblem, type CollectionFile, type DdBlock, type DdTx, type Refusal,
 } from './pain008.js'
 import { EARLIEST_DAYS, REFUND_DAYS, refusalCutoff, settlementAt, settlementDate, submissionCutoff } from './target2.js'
 
@@ -55,6 +55,21 @@ const FILE_KIND = 'dd-file'
  * `id` the claim's owner in dd-msgids; its first pain.002 is added once by `dd-file:<id>`.
  */
 interface KeptFile { id: string; customer: CustomerKey; requestId: string; msgId: string; xml: string; at: number; ids: string[] }
+const REFUSAL_KIND = 'dd-refusal'
+/**
+ * A received pain.007 kept in the outbox before its MsgId is claimed (decision 1022): the body
+ * as sent, the request and when it came (the date checks). `id` the claim's owner in
+ * dd-refusal-msgids and the key of its outcome; the debtor's answer is added once by `dd-refusal:<id>`.
+ */
+interface KeptRefusal { id: string; customer: CustomerKey; requestId: string; msgId: string; xml: string; at: number }
+/**
+ * A refusal's outcome, stored before any of its effects (decision 1022), so a rerun after a
+ * crash answers and acts as the cut run decided: RJCT with the reason, or ACCP and what is
+ * done to the collection (cancelled before the cut-off, returned once settled, refunded now).
+ */
+type RefusalOutcome =
+  | { status: 'RJCT'; text: string; code?: string; collection?: string }
+  | { status: 'ACCP'; collection: string; action: 'cancel' | 'return' | 'refund'; reason: string }
 
 export const DD_TYPES = {
   /** pain.002 about the creditor's collections (P 02 type list; docs/decisions.md 300). */
@@ -155,7 +170,10 @@ export const CLAIM_MS = 5 * 60 * 1000
 export class DirectDebitService {
   /** The value is the kept file that claimed the MsgId (decision 1021; `true` before). */
   #seenMsgIds: KeyedStore<string | true>
-  #seenRefusals: KeyedStore<true>
+  /** The value is the kept refusal that claimed the MsgId (decision 1022; `true` before). */
+  #seenRefusals: KeyedStore<string | true>
+  /** A kept refusal's outcome by its id (decision 1022). */
+  #refusalOutcomes: KeyedStore<RefusalOutcome>
   /** Every collection by its id, in the order they came (decision 975). */
   #collections: KeyedStore<StoredCollection>
   /** Who is settling or refunding a collection right now (decision 976). */
@@ -166,6 +184,7 @@ export class DirectDebitService {
     const keyed = d.keyed ?? memoryKeyed(d.clock)
     this.#seenMsgIds = keyed('dd-msgids', d.msgIds ?? DEFAULT_BOUNDS.msgIds)
     this.#seenRefusals = keyed('dd-refusal-msgids', d.msgIds ?? DEFAULT_BOUNDS.msgIds)
+    this.#refusalOutcomes = keyed('dd-refusal-outcomes', d.msgIds ?? DEFAULT_BOUNDS.msgIds)
     this.#collections = keyed('dd-collections', UNBOUNDED)
     this.#claims = keyed('dd-claims', { ttlMs: CLAIM_MS, max: 100_000 })
     // The creditor's status report of a tick (decision 999): one pain.002 per file and tick,
@@ -174,6 +193,8 @@ export class DirectDebitService {
     // A file cut before its collections were all saved (decision 1021); the timer's recovery
     // leaves it 10 minutes to the process handling it, as a payment round (1005).
     d.outbox.on(FILE_KIND, (item) => this.#serial(() => this.#resumeFile(item)), { minAgeMs: ROUND_RECOVER_MIN_AGE_MS })
+    // A refusal cut before its effects were all done (decision 1022), likewise.
+    d.outbox.on(REFUSAL_KIND, (item) => this.#serial(() => this.#resumeRefusal(item)), { minAgeMs: ROUND_RECOVER_MIN_AGE_MS })
   }
 
   /** A creditor status report entry for a tick's report `group`; kept with the booking when ACSC. */
@@ -520,33 +541,86 @@ export class DirectDebitService {
     if (await this.#seenRefusals.has(`${keyOf(customer)}|${r.msgId}`)) return reject(E.duplicateMessage)
     if (Number(r.nbOfTxs) !== r.txs.length) return reject(E.headerCount)
     if (r.txs.length !== 1) return reject(E.oneOnly)
-    await this.#seenRefusals.set(`${keyOf(customer)}|${r.msgId}`, true)
+    // Kept before the MsgId is claimed (decision 1022, as 1021 for pain.008): a crash before
+    // the refusal's effects are done resumes it from the outbox; the claim (the kept
+    // refusal's id) lets one of two submissions of a MsgId, or a resubmission and a resumed
+    // refusal, go on; the loser removes its kept refusal and is refused as a duplicate.
+    const kept: KeptRefusal = { id: randomUUID(), customer: customerKey(customer), requestId, msgId: r.msgId, xml, at: this.d.clock.now().getTime() }
+    const item = this.d.outbox.item(REFUSAL_KIND, kept)
+    await this.d.ledger.outbox.put([item])
+    if (!(await claimKey(this.#seenRefusals, msgIdKey(kept), kept.id))) {
+      await this.d.ledger.outbox.remove([item.key])
+      return reject(E.duplicateMessage)
+    }
+    await this.#applyRefusal(r, customer, kept)
+    await this.d.ledger.outbox.remove([item.key])
+  }
 
+  /**
+   * A kept refusal's outcome, decided once as of when it came and stored before its effects;
+   * then the effects, each once: the collection changed (a cancel, a return once settled, a
+   * refund: saved first, so the tick returns it if the run is cut), the debtor answered (by
+   * the kept refusal), the cancel notification and the creditor's RJCT (by the collection),
+   * the refund booked (by the collection, decision 995). Run again after a crash, it does
+   * only what the cut run did not.
+   */
+  async #applyRefusal(r: Refusal, customer: Customer, kept: KeptRefusal) {
     const t = r.txs[0]
-    const c = await this.#find(t.pmtInfId!, t.endToEndId!, (x) => !!x.debtorCustomer && keyOf(x.debtorCustomer) === keyOf(customer))
+    let o = await this.#refusalOutcomes.get(kept.id)
+    if (!o) {
+      const decided = await this.#decideRefusal(r, customer, new Date(kept.at))
+      o = (await this.#refusalOutcomes.add(kept.id, decided)) ? decided : (await this.#refusalOutcomes.get(kept.id))!
+    }
+    const c = o.collection ? await this.#get(o.collection) : undefined
     const tx = (status: 'ACCP' | 'RJCT', text?: string, code?: string): DdStatus =>
       ({ pmtInfId: t.pmtInfId!, endToEndId: t.endToEndId, instrId: c?.instrId, status, text, code: text ? code ?? 'NARR' : undefined, collection: c })
-    const answer = (s: DdStatus) => report({ blocks: [{ pmtInfId: t.pmtInfId!, txs: [s] }] })
-
-    if (!c) return answer(tx('RJCT', E.notFound))
-    if (r.ctrlSum !== undefined && !decimalEq(r.ctrlSum, decimalSum([fromMinorString(c.amount)]))) return answer(tx('RJCT', E.headerSum))
-    if (!t.reason) return answer(tx('RJCT', E.noReason))
-    if (c.status === 'REFUSED' || c.status === 'REFUNDED' || c.returnOnSettle) return answer(tx('RJCT', E.alreadyRefused))
-    if (c.status === 'REJECTED') return answer(tx('RJCT', E.alreadyRejected))
-    const now = this.d.clock.now().getTime()
-
-    if (c.status === 'PENDING') {
-      await answer(tx('ACCP'))
-      // After 10:30 CET on the settlement date the refusal is processed as a return.
-      if (now >= refusalCutoff(c.settlementDate)) { c.returnOnSettle = t.reason; await this.#save(c); return }
-      await this.#cancel(c, t.reason, requestId)
-      return
+    const answer = (s: DdStatus) => this.#report(customer, DD_TYPES.incoming, kept.requestId,
+      { originalMsgId: kept.msgId, originalMsgName: PAIN007, blocks: [{ pmtInfId: t.pmtInfId!, txs: [s] }] }, `${REFUSAL_KIND}:${kept.id}`)
+    if (o.status === 'RJCT') return answer(tx('RJCT', o.text, o.code))
+    if (!c) return answer(tx('ACCP')) // the collection gone from the store since (its customer from the directory)
+    // The change, unless made (by the cut run) or overtaken (settled since: then returned).
+    if (o.action === 'cancel' && c.status === 'PENDING') {
+      c.status = 'REFUSED'
+      c.reason = o.reason
+      await this.#save(c)
+    } else if ((c.status === 'PENDING' || c.status === 'SETTLED') && !c.returnOnSettle) {
+      c.returnOnSettle = o.reason
+      await this.#save(c)
     }
-    // SETTLED: a refund through Connect for 8 weeks.
-    if (now > c.settledAt!.getTime() + REFUND_DAYS * DAY_MS) return answer(tx('RJCT', E.refundPeriod))
-    if (c.creditorCustomer && (await this.d.ledger.available(c.creditor.iban, c.currency)) < c.amount) return answer(tx('RJCT', REASONS.AM04, 'AM04'))
     await answer(tx('ACCP'))
-    await this.#refund(c, t.reason)
+    if (o.action === 'cancel' && c.status === 'REFUSED') await this.#cancelReports(c, kept.requestId)
+    if (c.status === 'SETTLED') await this.#claimed(c.id, async (x) => { if (x.status === 'SETTLED' && x.returnOnSettle) await this.#refund(x, x.returnOnSettle) })
+  }
+
+  /** What a refusal does, as of `at` (when it came); no effect. */
+  async #decideRefusal(r: Refusal, customer: Customer, at: Date): Promise<RefusalOutcome> {
+    const t = r.txs[0]
+    const c = await this.#find(t.pmtInfId!, t.endToEndId!, (x) => !!x.debtorCustomer && keyOf(x.debtorCustomer) === keyOf(customer))
+    const rjct = (text: string, code?: string): RefusalOutcome => ({ status: 'RJCT', text, ...(code ? { code } : {}), ...(c ? { collection: c.id } : {}) })
+    if (!c) return rjct(E.notFound)
+    if (r.ctrlSum !== undefined && !decimalEq(r.ctrlSum, decimalSum([fromMinorString(c.amount)]))) return rjct(E.headerSum)
+    if (!t.reason) return rjct(E.noReason)
+    if (c.status === 'REFUSED' || c.status === 'REFUNDED' || c.returnOnSettle) return rjct(E.alreadyRefused)
+    if (c.status === 'REJECTED') return rjct(E.alreadyRejected)
+    const now = at.getTime()
+    // After 10:30 CET on the settlement date the refusal is processed as a return.
+    if (c.status === 'PENDING') return { status: 'ACCP', collection: c.id, action: now >= refusalCutoff(c.settlementDate) ? 'return' : 'cancel', reason: t.reason }
+    // SETTLED: a refund through Connect for 8 weeks.
+    if (now > c.settledAt!.getTime() + REFUND_DAYS * DAY_MS) return rjct(E.refundPeriod)
+    if (c.creditorCustomer && (await this.d.ledger.available(c.creditor.iban, c.currency)) < c.amount) return rjct(REASONS.AM04, 'AM04')
+    return { status: 'ACCP', collection: c.id, action: 'refund', reason: t.reason }
+  }
+
+  /**
+   * A kept refusal a crash cut (decision 1022): run again when its MsgId is its own, or still
+   * free (a crash between the keep and the claim) and claimed now; another submission's claim,
+   * or its debtor gone, drops it.
+   */
+  async #resumeRefusal(item: OutboxItem) {
+    const kept = item.payload as KeptRefusal
+    const customer = await this.d.directory.get(kept.customer)
+    if (!customer || !(await claimKey(this.#seenRefusals, msgIdKey(kept), kept.id))) return
+    await this.#applyRefusal(readPain007(parseXml(kept.xml)), customer, kept)
   }
 
   /** Refused before settlement: nothing is booked; the debtor gets the cancel notification, the creditor RJCT. */
@@ -554,14 +628,20 @@ export class DirectDebitService {
     c.status = 'REFUSED'
     c.reason = code
     await this.#save(c)
+    await this.#cancelReports(c, requestId)
+  }
+
+  /** A cancel's reports, each once by the collection (decision 1022): a cancel is made once. */
+  async #cancelReports(c: Collection, requestId?: string) {
+    const code = c.reason!
     const s: DdStatus = { pmtInfId: c.pmtInfId, endToEndId: c.endToEndId, instrId: c.instrId, status: 'RJCT', code, text: REASONS[code], collection: c }
     if (c.debtorCustomer) {
       await this.#report(c.debtorCustomer, DD_TYPES.cancel, requestId, {
         originalMsgId: c.notificationMsgId ?? c.msgId, originalMsgName: PAIN008, blocks: [{ pmtInfId: c.pmtInfId, txs: [s] }],
-      })
+      }, `dd-cancel:${c.id}`)
     }
     if (c.creditorCustomer) {
-      await this.#report(c.creditorCustomer, DD_TYPES.outgoing, c.requestId, { originalMsgId: c.msgId, originalMsgName: PAIN008, blocks: [{ pmtInfId: c.pmtInfId, txs: [s] }] })
+      await this.#report(c.creditorCustomer, DD_TYPES.outgoing, c.requestId, { originalMsgId: c.msgId, originalMsgName: PAIN008, blocks: [{ pmtInfId: c.pmtInfId, txs: [s] }] }, `dd-cancel-creditor:${c.id}`)
     }
   }
 
@@ -658,6 +738,12 @@ export class DirectDebitService {
     }
   }
 
+  /** The stored collection by its id, decoded; undefined when gone. */
+  async #get(id: string): Promise<Collection | undefined> {
+    const o = await this.#collections.get(id)
+    return o && this.#decode(o)
+  }
+
   async #save(c: Collection) {
     if (!(await this.#collections.replace(c.id, encodeCollection(c)))) throw new Error(`collection ${c.id} is not stored`)
   }
@@ -709,7 +795,7 @@ type StoredCollection = Omit<Collection, 'amount' | 'creditorCustomer' | 'debtor
 }
 
 const customerKey = (c: Customer): CustomerKey => ({ code: c.code, country: c.country })
-/** A pain.008's MsgId as claimed, per creditor customer. */
+/** A pain.008's (or pain.007's) MsgId as claimed, per creditor (debtor) customer. */
 const msgIdKey = (f: { customer: CustomerKey; msgId: string }) => `${keyOf(f.customer)}|${f.msgId}`
 
 /** JSON-safe (undefined fields dropped), so memory hands back what Postgres would. */

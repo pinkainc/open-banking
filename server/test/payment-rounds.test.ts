@@ -5,10 +5,12 @@
 // reported twice. The same for a decision on parked payments, and for a crash before the
 // round is planned: the file kept before its MsgId is marked is checked again (1017). On
 // memory the "restart" is recover() on the same emulator (its outbox survives); on Postgres
-// a new emulator on the same store (registered when DATABASE_URL is set).
+// a new emulator on the same store (registered when DATABASE_URL is set). A SEPA DD file
+// (1021) and the debtor's pain.007 refusal (1022) the same way.
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
-import { C1, C2, DE_IBAN, balance, call, ddDrain, ddStatus, drain, pain001, pain008, postgresStore, seed, setup, type Ctx } from './helpers.js'
+import { C1, C2, DE_IBAN, balance, call, ddDrain, ddStatus, drain, pain001, pain007, pain008, postgresStore, seed, setup, type Ctx } from './helpers.js'
+import { ManualClock } from '../src/clock.js'
 import type { EmulatorOptions } from '../src/emulator.js'
 import type { SimulatorRails } from '../src/rails.js'
 import { MemoryRailsPending } from '../src/payments/pending.js'
@@ -809,5 +811,228 @@ if (process.env.DATABASE_URL) describe('a SEPA Direct Debit file across a crash 
     await checkKeptFile(b, c0, d0)
     assert.equal((await collectDd(b, body)).statusCode, 202)
     await ddDuplicate(b)
+  })
+})
+
+// --- A debtor's pain.007 refusal across a crash (decision 1022) ---------------------------
+// The refusal is kept in the outbox before its MsgId is claimed and its outcome stored before
+// any effect: a crash before the answer, after it, or after the cancel notification or the
+// refund's booking resumes it from the outbox. The debtor is answered once, the collection
+// cancelled (or refunded) once, its notifications and bookings once.
+
+type Msg = Awaited<ReturnType<typeof drain>>[number]
+const RF = { pmtInfId: 'PMT-RF', endToEndId: 'E2E-R1' }
+const REFUSAL = () => pain007([{ ...RF, reason: 'MS02' }])
+const refuseDd = (ctx: Ctx, body: string) => call(ctx, { method: 'POST', url: '/direct-debit/incoming-collection', body, as: C2.code })
+const SETTLE_AT = '2026-03-12T10:30:00Z'
+const settleDd = async (ctx: Ctx, at = SETTLE_AT) => {
+  ctx.clock.set(at)
+  assert.equal((await call(ctx, { method: 'POST', url: '/_sim/direct-debit/settle' })).statusCode, 200)
+}
+/** C1 collects 10.00 from C2 (both inboxes emptied); `settled`: and it settles. */
+async function ddCollected(ctx: Ctx, settled = false) {
+  assert.equal((await collectDd(ctx, pain008([{ pmtInfId: RF.pmtInfId, txs: [{ endToEndId: RF.endToEndId, amount: '10.00' }] }]))).statusCode, 202)
+  if (settled) await settleDd(ctx)
+  await ddDrain(ctx)
+  await ddDrain(ctx, C2.code)
+}
+const RF_CUTS = {
+  cancel: ['before the answer', 'after the answer', 'after the cancel notification'],
+  refund: ['before the answer', 'after the answer', 'at the refund booking'],
+} as const
+type RfCut = typeof RF_CUTS[keyof typeof RF_CUTS][number]
+/**
+ * The process "dies" in a pain.007's handling, once: at the debtor's answer before it is added,
+ * right after it, right after the debtor's cancel notification, or right after the refund is
+ * booked (before the collection is saved REFUNDED).
+ */
+function crashInRefusal(ctx: Ctx, at: RfCut) {
+  if (at === 'at the refund booking') {
+    const l = ctx.emulator.ledger as any
+    const real = l.transfer
+    l.transfer = async (...a: unknown[]) => {
+      l.transfer = real
+      await real.apply(l, a)
+      throw new Error('crash after the refund is booked')
+    }
+    return
+  }
+  const inbox = ctx.emulator.inbox
+  const real = inbox.add.bind(inbox)
+  inbox.add = async (m) => {
+    if (m.type !== (at === 'after the cancel notification' ? 'DIRECT_DEBIT_INCOMING_CANCEL_NOTIFICATION' : 'DIRECT_DEBIT_INCOMING')) return real(m)
+    inbox.add = real
+    if (at === 'before the answer') throw new Error('crash before the answer')
+    await real(m)
+    throw new Error(`crash ${at}`)
+  }
+}
+/** The process "dies" right after the pain.007 is kept in the outbox, before its MsgId is claimed. Once. */
+function crashAfterRefusalKept(ctx: Ctx) {
+  const o = ctx.emulator.ledger.outbox as any
+  const real = o.put
+  o.put = async (items: { kind: string }[]) => {
+    await real.call(o, items)
+    if (items.some((i) => i.kind === 'dd-refusal')) { o.put = real; throw new Error('crash before the MsgId is claimed') }
+  }
+}
+const txsOf = (m: Msg) => ddStatus(m).blocks.flatMap((b: any) => b.txs.map((t: any) => `${t.endToEndId}:${t.sts}${t.code ? `:${t.code}` : ''}`))
+/**
+ * What the debtor got over the whole run (`debtor`, drained as it went): one ACCP answer under
+ * the refusal's request id, a duplicate RJCT per resubmission, and `others` once each; the
+ * creditor `creditor` once each; nothing pending.
+ */
+async function checkRefusal(ctx: Ctx, debtor: Msg[], o: { requestId: string; duplicates: number; others: string[]; creditor: string[] }) {
+  debtor = [...debtor, ...(await ddDrain(ctx, C2.code))]
+  const answers = debtor.filter((m) => m.type === 'DIRECT_DEBIT_INCOMING')
+  const accp = answers.filter((m) => ddStatus(m).grp !== 'RJCT')
+  assert.deepEqual(accp.map(txsOf), [['E2E-R1:ACCP']], 'one ACCP answer')
+  assert.equal(accp[0].requestId, o.requestId, 'under the refusal\'s request id')
+  assert.equal(answers.length - 1, o.duplicates)
+  for (const m of answers) if (m !== accp[0]) assert.ok(m.body.includes('Duplicate message.'))
+  assert.deepEqual(debtor.filter((m) => m.type !== 'DIRECT_DEBIT_INCOMING').map((m) => m.type).sort(), [...o.others].sort(), 'the debtor\'s other messages once')
+  assert.deepEqual((await ddDrain(ctx)).map((m) => m.type === 'DIRECT_DEBIT_OUTGOING' ? `${m.type}:${txsOf(m)}` : m.type), o.creditor, 'the creditor\'s once')
+  assert.deepEqual(await ctx.emulator.ledger.outbox.pending(), [])
+}
+const statusOf = async (ctx: Ctx) => (await call(ctx, { url: '/_sim/direct-debit/collections' })).json().collections.map((x: any) => `${x.endToEndId}:${x.status}`)
+const CANCELLED = { others: ['DIRECT_DEBIT_INCOMING_CANCEL_NOTIFICATION'], creditor: ['DIRECT_DEBIT_OUTGOING:E2E-R1:RJCT:MS02'] }
+const REFUNDED = { others: ['CREDIT_DEBIT_NOTIFICATION'], creditor: ['CREDIT_DEBIT_NOTIFICATION'] }
+/** After a cancel: never settled, nothing booked. */
+async function checkCancelled(ctx: Ctx, c0: number, d0: number) {
+  assert.deepEqual(await statusOf(ctx), ['E2E-R1:REFUSED'])
+  await settleDd(ctx)
+  assert.deepEqual(await ddDrain(ctx), [])
+  assert.deepEqual(await ddDrain(ctx, C2.code), [])
+  assert.deepEqual([Number(await balance(ctx, C1.iban)), Number(await balance(ctx, C2.iban))], [c0, d0], 'nothing booked')
+}
+/** After a refund: paid back once. */
+async function checkRefunded(ctx: Ctx, c0: number, d0: number) {
+  assert.deepEqual(await statusOf(ctx), ['E2E-R1:REFUNDED'])
+  assert.deepEqual([Number(await balance(ctx, C1.iban)), Number(await balance(ctx, C2.iban))], [c0 - 10, d0 + 10], 'refunded once')
+}
+/** The request id of the refusal kept in the outbox (a 500 answer carries none). */
+const keptRequestId = async (ctx: Ctx) => ((await ctx.emulator.ledger.outbox.pending()).find((i) => i.kind === 'dd-refusal')!.payload as { requestId: string }).requestId
+const balances = async (ctx: Ctx) => [Number(await balance(ctx, C1.iban)), Number(await balance(ctx, C2.iban))] as const
+const REFUND_AT = '2026-03-20T10:00:00Z'
+
+describe('a debtor\'s refusal across a crash (memory: recover on the same emulator, decision 1022)', () => {
+  for (const kind of ['cancel', 'refund'] as const) {
+    for (const at of RF_CUTS[kind]) {
+      test(`${kind}, a crash ${at}: a resubmission is a duplicate, recover answers once and ${kind === 'cancel' ? 'cancels' : 'refunds'} once`, async () => {
+        const ctx = await setup()
+        await ddCollected(ctx, kind === 'refund')
+        if (kind === 'refund') ctx.clock.set(REFUND_AT)
+        const [c0, d0] = await balances(ctx)
+        const body = REFUSAL()
+        crashInRefusal(ctx, at)
+        assert.equal((await refuseDd(ctx, body)).statusCode, 500)
+        const requestId = await keptRequestId(ctx)
+        const debtor = await ddDrain(ctx, C2.code)
+        assert.equal((await refuseDd(ctx, body)).statusCode, 202)
+        debtor.push(...(await ddDrain(ctx, C2.code)))
+        assert.ok((await ctx.emulator.outbox.recover()) > 0, 'the kept refusal is resumed')
+        assert.equal(await ctx.emulator.outbox.recover(), 0)
+        await checkRefusal(ctx, debtor, { requestId, duplicates: 1, ...(kind === 'cancel' ? CANCELLED : REFUNDED) })
+        if (kind === 'cancel') await checkCancelled(ctx, c0, d0)
+        else await checkRefunded(ctx, c0, d0)
+        assert.equal((await refuseDd(ctx, body)).statusCode, 202)
+        const again = (await ddDrain(ctx, C2.code)).map(txsOf)
+        assert.deepEqual(again, [[]], 'a duplicate (no transactions)')
+      })
+    }
+  }
+
+  test('after the cut-off, a crash before the answer: answered once, settled and returned once', async () => {
+    const ctx = await setup()
+    await ddCollected(ctx)
+    ctx.clock.set('2026-03-12T09:45:00Z')
+    const [c0, d0] = await balances(ctx)
+    const body = REFUSAL()
+    crashInRefusal(ctx, 'before the answer')
+    assert.equal((await refuseDd(ctx, body)).statusCode, 500)
+    const requestId = await keptRequestId(ctx)
+    assert.ok((await ctx.emulator.outbox.recover()) > 0)
+    await checkRefusal(ctx, [], { requestId, duplicates: 0, others: [], creditor: [] })
+    await settleDd(ctx)
+    assert.deepEqual(await statusOf(ctx), ['E2E-R1:REFUNDED'])
+    assert.deepEqual(await balances(ctx), [c0, d0], 'booked and returned once')
+  })
+
+  for (const first of ['resubmission', 'recover'] as const) {
+    test(`a crash after the refusal is kept, before its MsgId is claimed: processed once (${first} first)`, async () => {
+      const ctx = await setup()
+      await ddCollected(ctx)
+      const [c0, d0] = await balances(ctx)
+      const body = REFUSAL()
+      crashAfterRefusalKept(ctx)
+      assert.equal((await refuseDd(ctx, body)).statusCode, 500)
+      if (first === 'resubmission') {
+        const res = await refuseDd(ctx, body)
+        assert.equal(res.statusCode, 202)
+        await ctx.emulator.outbox.recover() // the first one's kept refusal: the MsgId is another's, dropped
+        await checkRefusal(ctx, [], { requestId: res.headers['message-request-id'] as string, duplicates: 0, ...CANCELLED })
+      } else {
+        const id = await keptRequestId(ctx)
+        assert.ok((await ctx.emulator.outbox.recover()) > 0)
+        assert.equal((await refuseDd(ctx, body)).statusCode, 202)
+        await checkRefusal(ctx, [], { requestId: id, duplicates: 1, ...CANCELLED })
+      }
+      await checkCancelled(ctx, c0, d0)
+    })
+  }
+
+  test('the timer\'s recovery leaves a kept refusal to the process handling it for 10 minutes', async () => {
+    const ctx = await setup()
+    await ddCollected(ctx)
+    crashInRefusal(ctx, 'before the answer')
+    assert.equal((await refuseDd(ctx, REFUSAL())).statusCode, 500)
+    assert.equal(await ctx.emulator.outbox.recover({ minAgeMs: 60_000 }), 0, 'too young')
+    ctx.clock.set('2026-03-10T08:11:00Z')
+    assert.equal(await ctx.emulator.outbox.recover({ minAgeMs: 60_000 }), 1)
+    assert.deepEqual((await ddDrain(ctx, C2.code)).map((m) => m.type).sort(), ['DIRECT_DEBIT_INCOMING', 'DIRECT_DEBIT_INCOMING_CANCEL_NOTIFICATION'])
+  })
+})
+
+if (process.env.DATABASE_URL) describe('a debtor\'s refusal across a crash (Postgres: a restart on the same store, decision 1022)', () => {
+  for (const kind of ['cancel', 'refund'] as const) {
+    for (const at of RF_CUTS[kind]) {
+      test(`${kind}, a crash ${at}: after the restart answered once and ${kind === 'cancel' ? 'cancelled' : 'refunded'} once, a resubmission a duplicate`, async () => {
+        const opts = await postgresStore()
+        const a = await setup(opts)
+        await ddCollected(a, kind === 'refund')
+        const now = kind === 'refund' ? REFUND_AT : '2026-03-10T08:00:00Z'
+        a.clock.set(now)
+        const [c0, d0] = await balances(a)
+        const body = REFUSAL()
+        crashInRefusal(a, at)
+        assert.equal((await refuseDd(a, body)).statusCode, 500)
+        const requestId = await keptRequestId(a)
+        const debtor = await ddDrain(a, C2.code)
+        const clock = new ManualClock(now)
+        const b = { ...(await setup({ ...opts, clock })), clock } // fromSeed recovers: the kept refusal is resumed
+        assert.equal((await refuseDd(b, body)).statusCode, 202)
+        await checkRefusal(b, debtor, { requestId, duplicates: 1, ...(kind === 'cancel' ? CANCELLED : REFUNDED) })
+        if (kind === 'cancel') await checkCancelled(b, c0, d0)
+        else await checkRefunded(b, c0, d0)
+        const c = await setup({ ...opts, clock: new ManualClock(now) })
+        assert.deepEqual(await ddDrain(c), [], 'another restart sends nothing again')
+        assert.deepEqual(await ddDrain(c, C2.code), [])
+      })
+    }
+  }
+
+  test('a crash after the refusal is kept, before its MsgId is claimed: after the restart processed once, a resubmission a duplicate', async () => {
+    const opts = await postgresStore()
+    const a = await setup(opts)
+    await ddCollected(a)
+    const [c0, d0] = await balances(a)
+    const body = REFUSAL()
+    crashAfterRefusalKept(a)
+    assert.equal((await refuseDd(a, body)).statusCode, 500)
+    const id = await keptRequestId(a)
+    const b = await setup(opts)
+    assert.equal((await refuseDd(b, body)).statusCode, 202)
+    await checkRefusal(b, [], { requestId: id, duplicates: 1, ...CANCELLED })
+    await checkCancelled(b, c0, d0)
   })
 })
