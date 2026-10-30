@@ -1,10 +1,11 @@
-// A payment round's pain.002 across a crash (decisions 1005-1006): a file's transactions are
+// A payment round's pain.002 across a crash (decisions 1005-1006, 1017): a file's transactions are
 // checked and planned in the outbox before anything books, each booking keeps its entry of
 // the round's report, and a crash after any booking resumes the round from the plan: one
 // pain.002 with every transaction, the same grouping and group statuses, nothing booked or
-// reported twice. The same for a decision on parked payments. On memory the "restart" is
-// recover() on the same emulator (its outbox survives); on Postgres a new emulator on the
-// same store (registered when DATABASE_URL is set).
+// reported twice. The same for a decision on parked payments, and for a crash before the
+// round is planned: the file kept before its MsgId is marked is checked again (1017). On
+// memory the "restart" is recover() on the same emulator (its outbox survives); on Postgres
+// a new emulator on the same store (registered when DATABASE_URL is set).
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 import { C1, C2, DE_IBAN, balance, call, ddDrain, ddStatus, drain, pain001, pain008, postgresStore, seed, setup, type Ctx } from './helpers.js'
@@ -21,6 +22,27 @@ function crashAtBooking(ctx: Ctx, which: 'transfer' | 'commit', k: number) {
     return r
   }
   return () => { l[which] = real }
+}
+/**
+ * The process "dies" at the first `ledger.outbox.put` of a round's item of `type` (decision
+ * 1017): `plan` before it is put (a crash during the checks: the MsgId is marked, nothing is
+ * planned), `file` right after it is put (before the MsgId is marked). Once.
+ */
+function crashAtPut(ctx: Ctx, type: 'plan' | 'file') {
+  const o = ctx.emulator.ledger.outbox as any
+  const real = o.put
+  o.put = async (items: { kind: string; payload: any }[]) => {
+    const hit = items.some((i) => i.kind === 'pain002' && i.payload?.type === type)
+    if (hit) o.put = real
+    if (hit && type === 'plan') throw new Error('crash during the checks')
+    await real.call(o, items)
+    if (hit) throw new Error('crash before the MsgId is marked')
+  }
+}
+/** A file's group rejections as reported (a duplicate: RJCT, no blocks). */
+const duplicate = (msgs: { type: string; body: string; doc: any }[]) => {
+  assert.deepEqual(reports(msgs), [{ grp: 'RJCT', blocks: [] }])
+  assert.ok(msgs[0].body.includes('Duplicate message.'))
 }
 /** Each pain.002 as [group status, [tx status...] per block]. */
 const reports = (msgs: { type: string; doc: any }[]) => msgs.filter((m) => m.type === 'PAYMENT').map((m) => {
@@ -103,6 +125,44 @@ describe('a payment round across a crash (memory: recover on the same emulator)'
     assert.deepEqual(reports(await drain(ctx)).map((r) => r.blocks.map((b: unknown[]) => b.slice(1))), [[[undefined, 'ACSC']]], 'one report, the payment in it once')
     assert.equal(Number(await balance(ctx, C1.iban)), d0 - 1)
   })
+  test('a crash during the checks (the MsgId marked, nothing planned): a resubmission is a duplicate, recover processes the file once', async () => {
+    const ctx = await setup()
+    const [d0, c0] = [Number(await balance(ctx, C1.iban)), Number(await balance(ctx, C2.iban))]
+    const body = FILE()
+    crashAtPut(ctx, 'plan')
+    assert.equal((await call(ctx, { method: 'POST', url: '/payment', body })).statusCode, 500)
+    assert.equal((await call(ctx, { method: 'POST', url: '/payment', body })).statusCode, 202)
+    duplicate(await drain(ctx))
+    assert.ok((await ctx.emulator.outbox.recover()) > 0, 'the kept file is resumed')
+    await checkResumed(ctx, d0, c0)
+    assert.equal(await ctx.emulator.outbox.recover(), 0)
+    assert.deepEqual(await ctx.emulator.ledger.outbox.pending(), [])
+    assert.equal((await call(ctx, { method: 'POST', url: '/payment', body })).statusCode, 202)
+    duplicate(await drain(ctx))
+  })
+
+  for (const first of ['resubmission', 'recover'] as const) {
+    test(`a crash after the file is kept, before its MsgId is marked: processed once (${first} first), the other is a duplicate or dropped`, async () => {
+      const ctx = await setup()
+      const [d0, c0] = [Number(await balance(ctx, C1.iban)), Number(await balance(ctx, C2.iban))]
+      const body = FILE()
+      crashAtPut(ctx, 'file')
+      assert.equal((await call(ctx, { method: 'POST', url: '/payment', body })).statusCode, 500)
+      if (first === 'resubmission') {
+        assert.equal((await call(ctx, { method: 'POST', url: '/payment', body })).statusCode, 202)
+        await checkResumed(ctx, d0, c0)
+        await ctx.emulator.outbox.recover() // the kept file of the first submission: the MsgId is another's, dropped
+        assert.deepEqual(await drain(ctx), [])
+      } else {
+        assert.ok((await ctx.emulator.outbox.recover()) > 0)
+        await checkResumed(ctx, d0, c0)
+        assert.equal((await call(ctx, { method: 'POST', url: '/payment', body })).statusCode, 202)
+        duplicate(await drain(ctx))
+      }
+      assert.deepEqual(await ctx.emulator.ledger.outbox.pending(), [])
+      assert.equal(Number(await balance(ctx, C1.iban)), d0 - 6, 'booked once')
+    })
+  }
 })
 
 describe('SEPA Direct Debit rejections across a crash (memory: recover on the same emulator, decision 1007)', () => {
@@ -177,6 +237,37 @@ if (process.env.DATABASE_URL) describe('a payment round across a crash (Postgres
     // The file was seen before the crash: sent again it is a duplicate, as before.
     assert.equal((await call(b, { method: 'POST', url: '/payment', body })).statusCode, 202)
     assert.equal(reports(await drain(b))[0].grp, 'RJCT')
+  })
+
+  test('a crash during the checks (the MsgId marked, nothing planned): after the restart the file is processed once, a resubmission is a duplicate', async () => {
+    const opts = await postgresStore()
+    const a = await setup(opts)
+    const [d0, c0] = [Number(await balance(a, C1.iban)), Number(await balance(a, C2.iban))]
+    const body = FILE()
+    crashAtPut(a, 'plan')
+    assert.equal((await call(a, { method: 'POST', url: '/payment', body })).statusCode, 500)
+    const b = await setup(opts) // fromSeed recovers: the kept file is checked again and planned
+    await checkResumed(b, d0, c0)
+    assert.deepEqual(await b.emulator.ledger.outbox.pending(), [])
+    assert.equal((await call(b, { method: 'POST', url: '/payment', body })).statusCode, 202)
+    duplicate(await drain(b))
+    const c = await setup(opts)
+    assert.deepEqual(await drain(c), [], 'another restart sends nothing again')
+    assert.equal(Number(await balance(c, C1.iban)), d0 - 6)
+  })
+
+  test('a crash after the file is kept, before its MsgId is marked: after the restart processed once, a resubmission is a duplicate', async () => {
+    const opts = await postgresStore()
+    const a = await setup(opts)
+    const [d0, c0] = [Number(await balance(a, C1.iban)), Number(await balance(a, C2.iban))]
+    const body = FILE()
+    crashAtPut(a, 'file')
+    assert.equal((await call(a, { method: 'POST', url: '/payment', body })).statusCode, 500)
+    const b = await setup(opts)
+    await checkResumed(b, d0, c0)
+    assert.equal((await call(b, { method: 'POST', url: '/payment', body })).statusCode, 202)
+    duplicate(await drain(b))
+    assert.deepEqual(await b.emulator.ledger.outbox.pending(), [])
   })
 
   test('a decision on parked payments cut after its first booking: after the restart one pain.002 with both, each booked once', async () => {

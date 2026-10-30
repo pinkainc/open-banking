@@ -23,8 +23,8 @@ if (process.env.DATABASE_URL) describe('outbox (Postgres)', () => {
     a.emulator.outbox.deliver = async () => { throw new Error('crash') }
     await pay(a)
     assert.equal(Number(await balance(a, C1.iban)), d0 - 1.25, 'booked')
-    // Its two notices wait with it, and the round's plan and entry (its pain.002, decision 1005).
-    assert.equal((await a.emulator.ledger.outbox.pending()).length, 4, 'its two notices and its round wait with it')
+    // Its two notices wait with it, and the round's kept file, plan and entry (its pain.002, decisions 1005, 1017).
+    assert.equal((await a.emulator.ledger.outbox.pending()).length, 5, 'its two notices and its round wait with it')
     assert.deepEqual(await journal(a, C1.iban), [])
 
     const b = await setup(opts) // the restart: fromSeed recovers
@@ -48,8 +48,8 @@ if (process.env.DATABASE_URL) describe('outbox (Postgres)', () => {
     a.emulator.ledger.outbox.remove = async () => { throw new Error('crash') }
     await pay(a)
     a.emulator.ledger.outbox.remove = remove
-    // The round's pain.002 delivered first (its plan and entry), not removed: the crash; the notices wait with them.
-    assert.equal((await a.emulator.ledger.outbox.pending()).length, 4, 'delivered, not removed')
+    // The round's pain.002 delivered first (its kept file, plan and entry), not removed: the crash; the notices wait with them.
+    assert.equal((await a.emulator.ledger.outbox.pending()).length, 5, 'delivered, not removed')
     const b = await setup(opts)
     assert.equal((await b.emulator.ledger.outbox.pending()).length, 0)
     const msgs = await drain(b, C1.code)

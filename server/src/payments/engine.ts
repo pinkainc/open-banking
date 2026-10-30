@@ -169,6 +169,12 @@ interface RoundEntry { type: 'entry'; round: string; file: StoredFile; first: bo
  * checks, a checked plan to execute (or park for SCA), or a parked payment decided (1006).
  */
 type PlannedTx = { i: number; status: Record<string, unknown> } | { i: number; plan: Record<string, unknown>; park?: boolean } | { i: number; ref: string; parked: ParkedRecord }
+/**
+ * A received file kept in its first round's group before its MsgId is marked (decision 1017):
+ * the body as sent and a reference per transaction, so a crash before the round is planned
+ * checks the same file again under the same references.
+ */
+interface RoundFile { type: 'file'; round: string; file: StoredFile; first: true; xml: string; refs: string[] }
 interface RoundPlan { type: 'plan'; round: string; file: StoredFile; first: boolean; txs: PlannedTx[]; decision?: { approve: boolean; reason?: string } }
 const json = <T>(v: T): T => JSON.parse(JSON.stringify(v))
 interface FileRef { customer: Customer; requestId: string; version: PainVersion; msgId: string }
@@ -193,6 +199,8 @@ interface Parked { kind: ParkedKind; file: FileRef; plan: Plan; status: TxStatus
 
 const fileKey = (file: FileRef): PendingRecord['file'] =>
   ({ customer: { code: file.customer.code, country: file.customer.country }, requestId: file.requestId, version: file.version, msgId: file.msgId })
+/** A file's MsgId as marked, per customer. */
+const msgIdKey = (file: FileRef) => `${keyOf(file.customer)}|${file.msgId}`
 const agencyToJson = (a: AgencyAccount) => ({ ...a, createdAt: a.createdAt.getTime(), updatedAt: a.updatedAt.getTime() })
 const agencyFromJson = (a: any): AgencyAccount => ({ ...a, createdAt: new Date(a.createdAt), updatedAt: new Date(a.updatedAt) })
 /**
@@ -219,7 +227,8 @@ const sameName = (a: string | undefined, b: string | undefined) =>
 
 export class PaymentEngine {
   // Kept in the keyed store (decision 963), so a restarted engine on a persistent one goes on.
-  #seenMsgIds: KeyedStore<true>
+  // The value is the first round of the file that claimed the MsgId (decision 1017; `true` before).
+  #seenMsgIds: KeyedStore<string | true>
   /** Payments with an InstrId that are not (yet) rejected: customer, InstrId, accounts, currency, amount (decision 525) → ref. */
   #instrIds: KeyedStore<string>
   /** EUR debits accepted but not yet in the journal, counted against the limits (amount as a decimal string). */
@@ -277,8 +286,18 @@ export class PaymentEngine {
     if (problem) return reject(R.corrupted(problem), version)
     const groupReason = await this.#fileProblem(file, customer)
     if (groupReason) return reject(groupReason, version)
-    await this.#seenMsgIds.set(`${keyOf(customer)}|${file.msgId}`, true)
-    await this.#process(file, customer, requestId)
+    // Kept before the MsgId is marked (decision 1017): a crash before the round is planned
+    // resumes the file from the outbox; the mark claims the MsgId once (`add`), so of two
+    // submissions of one MsgId at once, or a resubmission and a resumed file, one goes on.
+    const round: Round = { id: randomUUID(), file: { customer, requestId, version, msgId: file.msgId! }, first: true }
+    const kept: RoundFile = { type: 'file', round: round.id, file: fileKey(round.file), first: true, xml, refs: file.blocks.flatMap((b) => b.txs.map(() => servicerRef())) }
+    const item = this.opts.outbox.item(ROUND_KIND, json(kept))
+    await this.ledger.outbox.put([item])
+    if (!(await this.#seenMsgIds.add(msgIdKey(round.file), round.id))) {
+      await this.ledger.outbox.remove([item.key])
+      return reject(R.duplicateMessage, version)
+    }
+    await this.#process(file, round, kept.refs, item)
   }
 
   async #fileProblem(f: PaymentFile, customer: Customer): Promise<string | undefined> {
@@ -310,8 +329,9 @@ export class PaymentEngine {
     return undefined
   }
 
-  async #process(f: PaymentFile, customer: Customer, requestId: string) {
-    const file: FileRef = { customer, requestId, version: f.version, msgId: f.msgId! }
+  /** Checks a file's transactions under their kept references, plans the first round and runs it (decisions 1005, 1017). */
+  async #process(f: PaymentFile, round: Round, refs: string[], kept: OutboxItem) {
+    const customer = round.file.customer
     const pending = customer.payments === 'PENDING'
     // Checked, then planned in the outbox before anything books (decision 1005): a crash
     // after any booking resumes the round from the plan and reports it once.
@@ -319,13 +339,12 @@ export class PaymentEngine {
     const plans: (Plan | undefined)[] = []
     for (const block of f.blocks) {
       for (const tx of block.txs) {
-        const c = await this.#check(block, tx, customer)
         const i = txs.length
+        const c = await this.#check(block, tx, customer, refs[i])
         plans.push('plan' in c ? c.plan : undefined)
         txs.push('status' in c ? { i, status: json(c.status) as unknown as Record<string, unknown> } : { i, plan: encodePlan(c.plan), ...(pending ? { park: true } : {}) })
       }
     }
-    const round: Round = { id: randomUUID(), file, first: true }
     const plan = this.#planItem(round, txs)
     await this.ledger.outbox.put([plan])
     const steps: Step[] = []
@@ -333,7 +352,20 @@ export class PaymentEngine {
       const s = await this.#runPlanned(round, t, { live: plans[t.i] })
       if (s) steps.push(s)
     }
-    await this.#flow(steps, round, [plan])
+    await this.#flow(steps, round, [kept, plan])
+  }
+
+  /**
+   * A kept file whose round has no plan (decision 1017): a crash during its checks, or before
+   * its MsgId was marked. Checked again and run when the MsgId is this round's (or still
+   * free, then claimed); another submission's claim drops it, delivered with nothing to report.
+   */
+  async #resumeFile(round: Round, item: OutboxItem) {
+    const kept = item.payload as RoundFile
+    const key = msgIdKey(round.file)
+    if (!(await this.#seenMsgIds.add(key, round.id)) && (await this.#seenMsgIds.get(key)) !== round.id) return
+    const f = readPain001(parseXml(kept.xml), round.file.version)
+    await this.#process(f, round, kept.refs, item)
   }
 
   #planItem(round: Round, txs: PlannedTx[], decision?: RoundPlan['decision']): OutboxItem {
@@ -459,8 +491,13 @@ export class PaymentEngine {
       const file = await this.#fileOf(head.file)
       if (!file) continue // the customer is gone: nothing to report to
       const round: Round = { id, file, first: head.first }
+      const kept = group.find((i) => (i.payload as RoundFile).type === 'file')
+      if (!plan && kept) {
+        await this.#resumeFile(round, kept)
+        continue
+      }
       if (plan && plan.txs.some((t) => !entries.has(t.i))) {
-        await this.#resume(round, plan, planItem!, entries)
+        await this.#resume(round, plan, [planItem!, ...(kept ? [kept] : [])], entries)
         continue
       }
       const r: StatusReport = { version: file.version, originalMsgId: file.msgId, blocks: [] }
@@ -484,7 +521,7 @@ export class PaymentEngine {
    * decided before the crash; their next steps did not run, the round was not reported),
    * the others run again, then the round goes on as it would have.
    */
-  async #resume(round: Round, plan: RoundPlan, planItem: OutboxItem, entries: Map<number, OutboxItem>) {
+  async #resume(round: Round, plan: RoundPlan, carried: OutboxItem[], entries: Map<number, OutboxItem>) {
     const steps: Step[] = []
     for (const t of plan.txs) {
       const e = entries.get(t.i)?.payload as RoundEntry | undefined
@@ -498,7 +535,7 @@ export class PaymentEngine {
       const p = 'plan' in t ? await this.#decodePlan(t.plan) : 'parked' in t ? (await this.#unpark(t.parked))?.plan : undefined
       steps.push({ status, i: t.i, ...(p ? { next: this.#nextOf(round.file, p, status) } : {}) })
     }
-    await this.#flow(steps, round, [planItem, ...entries.values()])
+    await this.#flow(steps, round, [...carried, ...entries.values()])
   }
 
   /** What follows a status in a later round: the rails for an accepted external payment (SEPA after ACWC), manual review's PDNG. */
@@ -522,8 +559,11 @@ export class PaymentEngine {
     return customer && { ...f, customer, version: f.version as PainVersion }
   }
 
-  /** The checks that need no money: a rejection, or what to execute. */
-  async #check(rawBlock: Block, rawTx: Tx, customer: Customer): Promise<{ status: TxStatus } | { plan: Plan }> {
+  /**
+   * The checks that need no money: a rejection, or what to execute. `ref` the transaction's
+   * reference kept with its file (decision 1017), the same when the checks run again.
+   */
+  async #check(rawBlock: Block, rawTx: Tx, customer: Customer, ref: string): Promise<{ status: TxStatus } | { plan: Plan }> {
     // Free text as the core keeps it, for the receiver bank's country (decision 526): what
     // the reports echo, the notifications book and the rails receive.
     const country = await this.#receiverCountry(rawTx)
@@ -542,7 +582,9 @@ export class PaymentEngine {
     // same payment again is (decision 525).
     const instrKey = tx.instrId
       ? [keyOf(customer), tx.instrId, debtorIban, creditorIban ?? tx.creditorOther ?? '', tx.currency, amount].join('|') : undefined
-    if (instrKey && (await this.#instrIds.has(instrKey))) return rj(R.duplicatePayment)
+    // Its own key from checks a crash cut (decision 1017) is no duplicate.
+    const heldBy = instrKey && (await this.#instrIds.get(instrKey))
+    if (heldBy && heldBy !== ref) return rj(R.duplicatePayment)
     // A VIBAN debtor must be ACTIVE and named as its holder; the master account pays.
     const debtorV = block.debtorOther ? undefined : (await this.opts.virtual?.resolve(debtorIban))
     if (debtorV && debtorV.status !== 'ACTIVE') return rj(R.debtorInactive)
@@ -560,7 +602,7 @@ export class PaymentEngine {
     // A VIBAN creditor is credited on its master account, unless it is not ACTIVE.
     const creditorV = creditorIban ? (await this.opts.virtual?.resolve(creditorIban)) : undefined
     if (creditorV && creditorV.status !== 'ACTIVE') {
-      await this.opts.onIncoming?.({ ref: servicerRef(), status: 'Rejected', account: creditorIban!, master: creditorV.master, amount, currency: tx.currency!,
+      await this.opts.onIncoming?.({ ref, status: 'Rejected', account: creditorIban!, master: creditorV.master, amount, currency: tx.currency!,
         debtor: { name: block.debtorName ?? customer.name, iban: debtorIban } })
       return rj(inactiveCreditor(creditorV).reason, 'INTERNAL')
     }
@@ -568,14 +610,14 @@ export class PaymentEngine {
     const creditorId = creditorIban ?? (tx.creditorOther ? normalizeIban(tx.creditorOther) : undefined)
     const creditorA = !creditorV && creditorId && !(creditorIban && await this.directory.ownerOf(creditorIban)) ? (await this.#agency(creditorId))[0] : undefined
     if (creditorA && !receivable(creditorA, { instant: false })) {
-      await this.opts.onIncoming?.({ ref: servicerRef(), status: 'Rejected', account: creditorId!, master: creditorA.master, amount, currency: tx.currency!,
+      await this.opts.onIncoming?.({ ref, status: 'Rejected', account: creditorId!, master: creditorA.master, amount, currency: tx.currency!,
         debtor: { name: block.debtorName ?? customer.name, iban: debtorIban } })
       return rj(R.creditorClosed, 'INTERNAL')
     }
     if (creditorA && creditorA.master === debtorAccount && debtorA) return rj(R.sameAccount)
     const creditorAccount = creditorV?.master ?? creditorA?.master ?? creditorIban
     const creditorOwner = creditorAccount ? await this.directory.ownerOf(creditorAccount) : undefined
-    const base = { block, tx, amount, currency: tx.currency!, debtorIban, debtorAccount, creditorIban, creditorAccount, creditorV, creditorA, debtorA, ref: servicerRef(), instrKey }
+    const base = { block, tx, amount, currency: tx.currency!, debtorIban, debtorAccount, creditorIban, creditorAccount, creditorV, creditorA, debtorA, ref, instrKey }
     const planned = async (plan: Plan) => {
       if (instrKey) await this.#instrIds.set(instrKey, plan.ref)
       return { plan }
