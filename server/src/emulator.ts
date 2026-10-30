@@ -185,7 +185,7 @@ export class Emulator {
     this.agency = new Agency({ directory: this.directory, inbox: this.inbox, clock: this.clock, bank: this.bank }, opts.memory?.agency, opts.agency)
     this.acquiring = new Acquiring({ directory: this.directory, inbox: this.inbox, clock: this.clock }, undefined, opts.acquiring)
     this.reports = new AccountReports({
-      directory: this.directory, ledger: this.ledger, journal: this.journal, inbox: this.inbox, clock: this.clock, bank: this.bank, xsd, msgIds, keyed,
+      directory: this.directory, ledger: this.ledger, journal: this.journal, inbox: this.inbox, clock: this.clock, bank: this.bank, xsd, msgIds, keyed, outbox: this.outbox,
     }, opts.reports)
   }
 

@@ -11,7 +11,7 @@ import { MemoryJournal } from '../src/statements/journal.js'
 import { MAX_TRANSACTIONS, PAGE_SIZE } from '../src/statements/reports.js'
 import { many, parseXml, text } from '../src/xml.js'
 import {
-  C1, C2, HAVE_ISO, HAVE_REFERENCE, SP, call, camt060, drain, pain001, report, reportError, sample, schemaValid, seed, setup, xsd, type Ctx, type ReportReq,
+  C1, C2, HAVE_ISO, HAVE_REFERENCE, SP, call, camt060, drain, pain001, postgresStore, report, reportError, sample, schemaValid, seed, setup, xsd, type Ctx, type ReportReq,
 } from './helpers.js'
 
 let ctx: Ctx
@@ -496,5 +496,110 @@ describe('bank postal address in Svcr (decision 553)', () => {
       s.bank = { address: address as any }
       await assert.rejects(setup({}, s), /bank\.address/)
     }
+  })
+})
+
+// --- A statement or balance request across a crash, one MsgId twice at once (decision 1023) ---
+// The camt.060 is kept in the outbox before its MsgId is claimed (one atomic add): of two
+// requests with one MsgId at once one is answered, the other is a duplicate; a crash before
+// or after the answer is added resumes the request from the outbox, answered once.
+
+type Kind = 'statement' | 'balance'
+const postReport = (c: Ctx, kind: Kind, body: string) => call(c, { method: 'POST', url: kind === 'statement' ? '/account-statement' : '/account-balance', body })
+/** The process "dies" at the first answer of a statement or balance request, before it is added or right after. Once. */
+function crashAtAnswer(c: Ctx, at: 'before' | 'after') {
+  const inbox = c.emulator.inbox
+  const real = inbox.add.bind(inbox)
+  inbox.add = async (m) => {
+    if (m.type !== 'ACCOUNT_STATEMENT' && m.type !== 'ACCOUNT_BALANCE') return real(m)
+    inbox.add = real
+    if (at === 'after') await real(m)
+    throw new Error(`crash ${at} the answer`)
+  }
+}
+/** The request id of the request kept in the outbox (a 500 answer carries none). */
+const keptRequest = async (c: Ctx) => ((await c.emulator.ledger.outbox.pending()).find((i) => i.kind === 'report-request')!.payload as { requestId: string }).requestId
+const DUPLICATE = { code: 'errStatement_DuplicateRequest', description: 'Duplicate request.', field: undefined }
+/** All the answers so far: one (not an error) under `requestId`, each other one a duplicate; nothing pending. */
+async function checkAnswered(c: Ctx, msgs: Msg[], requestId: string, duplicates: number) {
+  msgs = [...msgs, ...(await drain(c))]
+  assert.deepEqual(msgs.filter((m) => !reportError(m)).map((m) => m.requestId), [requestId], 'answered once')
+  assert.deepEqual(msgs.filter((m) => reportError(m)).map(reportError), Array(duplicates).fill(DUPLICATE))
+  assert.deepEqual(await c.emulator.ledger.outbox.pending(), [])
+}
+
+describe('a statement or balance request across a crash (memory: recover on the same emulator, decision 1023)', () => {
+  for (const kind of ['statement', 'balance'] as const) {
+    test(`${kind}: one MsgId twice at once, one answered, the other a duplicate`, async () => {
+      const body = camt060({ msgId: `TWICE-${kind}`, kind })
+      const res = await Promise.all([postReport(ctx, kind, body), postReport(ctx, kind, body)])
+      assert.deepEqual(res.map((r) => r.statusCode), [202, 202])
+      const msgs = await drain(ctx)
+      assert.equal(msgs.filter((m) => !reportError(m)).length, 1, 'answered once')
+      assert.deepEqual(msgs.filter((m) => reportError(m)).map(reportError), [DUPLICATE])
+    })
+
+    for (const at of ['before', 'after'] as const) {
+      test(`${kind}, a crash ${at} the answer: a resubmission is a duplicate, recover answers once`, async () => {
+        const body = camt060({ msgId: `CRASH-${kind}-${at}`, kind })
+        crashAtAnswer(ctx, at)
+        assert.equal((await postReport(ctx, kind, body)).statusCode, 500)
+        const requestId = await keptRequest(ctx)
+        const msgs = await drain(ctx)
+        assert.equal((await postReport(ctx, kind, body)).statusCode, 202)
+        assert.ok((await ctx.emulator.outbox.recover()) > 0, 'the kept request is resumed')
+        assert.equal(await ctx.emulator.outbox.recover(), 0)
+        await checkAnswered(ctx, msgs, requestId, 1)
+      })
+    }
+  }
+
+  test('a refused request across a crash: refused once, its MsgId not used up', async () => {
+    crashAtAnswer(ctx, 'before')
+    assert.equal((await postReport(ctx, 'statement', camt060({ msgId: 'RETRY-CRASH', frDt: '2026-03-11' }))).statusCode, 500)
+    assert.ok((await ctx.emulator.outbox.recover()) > 0)
+    assert.deepEqual((await drain(ctx)).map((m) => reportError(m)?.code), ['errStatement_PeriodInvalid'])
+    assert.equal(reportError((await report(ctx, { msgId: 'RETRY-CRASH' })).msgs[0]), undefined)
+    assert.deepEqual(await ctx.emulator.ledger.outbox.pending(), [])
+  })
+
+  test('the timer\'s recovery leaves a kept request to the process handling it for 10 minutes', async () => {
+    crashAtAnswer(ctx, 'before')
+    assert.equal((await postReport(ctx, 'balance', camt060({ kind: 'balance' }))).statusCode, 500)
+    assert.equal(await ctx.emulator.outbox.recover({ minAgeMs: 60_000 }), 0, 'too young')
+    ctx.clock.set(new Date(ctx.clock.now().getTime() + 11 * 60_000).toISOString())
+    assert.equal(await ctx.emulator.outbox.recover({ minAgeMs: 60_000 }), 1)
+    assert.deepEqual((await drain(ctx)).map((m) => m.type), ['ACCOUNT_BALANCE'])
+  })
+})
+
+if (process.env.DATABASE_URL) describe('a statement or balance request across a crash (Postgres: a restart on the same store, decision 1023)', () => {
+  for (const kind of ['statement', 'balance'] as const) {
+    for (const at of ['before', 'after'] as const) {
+      test(`${kind}, a crash ${at} the answer: after the restart answered once, a resubmission a duplicate`, async () => {
+        const opts = await postgresStore()
+        const a = await setup(opts)
+        const body = camt060({ msgId: `PG-CRASH-${kind}-${at}`, kind })
+        crashAtAnswer(a, at)
+        assert.equal((await postReport(a, kind, body)).statusCode, 500)
+        const requestId = await keptRequest(a)
+        const msgs = await drain(a)
+        const b = await setup(opts) // fromSeed recovers: the kept request is answered
+        assert.equal((await postReport(b, kind, body)).statusCode, 202)
+        await checkAnswered(b, msgs, requestId, 1)
+        assert.deepEqual(await drain(await setup(opts)), [], 'another restart sends nothing again')
+      })
+    }
+  }
+
+  test('one MsgId twice at once on two emulators of one store: one answered, the other a duplicate', async () => {
+    const opts = await postgresStore()
+    const [a, b] = [await setup(opts), await setup(opts)]
+    const body = camt060({ msgId: 'PG-TWICE' })
+    const res = await Promise.all([postReport(a, 'statement', body), postReport(b, 'statement', body)])
+    assert.deepEqual(res.map((r) => r.statusCode), [202, 202])
+    const msgs = await drain(a)
+    assert.equal(msgs.filter((m) => !reportError(m)).length, 1, 'answered once')
+    assert.deepEqual(msgs.filter((m) => reportError(m)).map(reportError), [DUPLICATE])
   })
 })

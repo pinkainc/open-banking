@@ -1,14 +1,16 @@
 // Account information: statements (camt.060 → camt.053) and balances (camt.060 →
 // camt.052), answered through the inbox like every Connect request, plus the automatic
 // end-of-day statement the bank sends unasked to customers who have it in their contract.
+import { randomUUID } from 'node:crypto'
 import { DEFAULT_BOUNDS, type Bounds } from '../bounded.js'
-import { memoryKeyed, UNBOUNDED, type KeyedFactory, type KeyedStore } from '../keyed.js'
+import { claimKey, memoryKeyed, UNBOUNDED, type KeyedFactory, type KeyedStore } from '../keyed.js'
 import type { Clock } from '../clock.js'
 import { keyOf, type Customer, type CustomerKey, type DirectoryStore } from '../directory.js'
 import { errorsXml } from '../errors.js'
 import type { InboxStore } from '../inbox.js'
 import { toMinor, type Ledger } from '../ledger.js'
-import type { Bank } from '../payments/engine.js'
+import type { Outbox, OutboxItem } from '../outbox.js'
+import { ROUND_RECOVER_MIN_AGE_MS, type Bank } from '../payments/engine.js'
 import type { XsdValidator } from '../payments/xsd.js'
 import { dateTallinn } from '../time.js'
 import { camt052, type ReportBalance } from './camt052.js'
@@ -18,6 +20,14 @@ import type { JournalEntry, JournalStore } from './journal.js'
 
 export const STATEMENT_TYPE = 'ACCOUNT_STATEMENT'
 export const BALANCE_TYPE = 'ACCOUNT_BALANCE'
+const REQUEST_KIND = 'report-request'
+/**
+ * A received camt.060 kept in the outbox before its MsgId is claimed (decision 1023): the body
+ * as sent, the request and when it came (the date checks and the period's end), so a crash
+ * before its answer is added answers it from the outbox. `id` the claim's owner in
+ * report-msgids; its answers are added once by `report-request:<id>:<n>`.
+ */
+interface KeptRequest { id: string; kind: 'statement' | 'balance'; customer: CustomerKey; requestId: string; msgId: string; xml: string; at: number }
 /** Entries per camt.053 message and per request (the documented limits). */
 export const PAGE_SIZE = 10_000
 export const MAX_TRANSACTIONS = 100_000
@@ -65,13 +75,16 @@ export interface ReportsDeps {
   xsd?: XsdValidator
   /** Where settings and camt.060 MsgIds are kept (decision 962); default in memory. */
   keyed?: KeyedFactory
+  /** Where a request is kept while it is answered (decision 1023). */
+  outbox: Outbox
 }
 
 export class AccountReports {
   pageSize: number
   maxTransactions: number
   #settings: KeyedStore<ReportSettings>
-  #seen: KeyedStore<true>
+  /** The value is the kept request that claimed the MsgId (decision 1023; `true` before). */
+  #seen: KeyedStore<string | true>
   #eodDone = new Set<string>()
   #eodFrom: string
 
@@ -83,6 +96,9 @@ export class AccountReports {
     this.maxTransactions = opts.maxTransactions ?? MAX_TRANSACTIONS
     // Automatic statements start with the day the server starts on: no backfill.
     this.#eodFrom = dateTallinn(d.clock.now())
+    // A request cut before its answer was added (decision 1023); the timer's recovery leaves
+    // it 10 minutes to the process answering it, as a kept payment file (1017).
+    d.outbox.on(REQUEST_KIND, (item) => this.#resume(item), { minAgeMs: ROUND_RECOVER_MIN_AGE_MS })
   }
 
   /** Merges into the customer's settings; ifAbsent: only when it has none yet (the seed on a persistent store). */
@@ -104,21 +120,61 @@ export class AccountReports {
   }
 
   async #handle(kind: 'statement' | 'balance', xml: string, customer: Customer, requestId: string) {
-    const type = kind === 'statement' ? STATEMENT_TYPE : BALANCE_TYPE
-    const add = (body: string) => this.d.inbox.add({ customer, type, requestId, body })
+    const refuse = (e: unknown) => this.d.inbox.add({ customer, type: typeOf(kind), requestId, body: errorAnswer(e) })
+    let req: ReportRequest
     try {
-      const req = await this.#parse(kind, xml)
-      const seenKey = `${keyOf(customer)}|${kind}`
-      if (await this.#seen.has(`${seenKey}|${req.msgId}`)) throw new StatementError(E.duplicate)
+      req = await this.#parse(kind, xml)
+      if (await this.#seen.has(seenKey(customer, kind, req.msgId!))) throw new StatementError(E.duplicate)
+    } catch (e) {
+      return refuse(e)
+    }
+    // Kept before the MsgId is claimed (decision 1023, as 1017 for pain.001): the claim (one
+    // `add`, the kept request's id) lets one of two requests with a MsgId, or a resubmission
+    // and a resumed request, go on; the loser removes its kept request and is a duplicate.
+    const kept: KeptRequest = { id: randomUUID(), kind, customer: { code: customer.code, country: customer.country }, requestId, msgId: req.msgId!, xml, at: this.d.clock.now().getTime() }
+    const item = this.d.outbox.item(REQUEST_KIND, kept)
+    await this.d.ledger.outbox.put([item])
+    if (!(await claimKey(this.#seen, seenKey(customer, kind, kept.msgId), kept.id))) {
+      await this.d.ledger.outbox.remove([item.key])
+      return refuse(new StatementError(E.duplicate))
+    }
+    await this.#answer(req, customer, kept)
+    await this.d.ledger.outbox.remove([item.key])
+  }
+
+  /**
+   * A kept request's answer, as of when it came (its date checks and the period's end), each
+   * message added once. A refusal gives the MsgId back first (a refused request does not use
+   * it up), so a crash after it answers the request again, refused again as it came.
+   */
+  async #answer(req: ReportRequest, customer: Customer, kept: KeptRequest) {
+    const add = (body: string, n: number) =>
+      this.d.inbox.add({ customer, type: typeOf(kept.kind), requestId: kept.requestId, body, key: `${REQUEST_KIND}:${kept.id}:${n}` })
+    let bodies: string[]
+    try {
       const owner = await this.d.directory.ownerOf(req.iban!)
       if (!owner || keyOf(owner) !== keyOf(customer)) throw new StatementError(E.noAccess)
-      const bodies = kind === 'statement' ? await this.#statementRequest(req, owner) : [await this.#balanceRequest(req, owner)]
-      await this.#seen.set(`${seenKey}|${req.msgId}`, true)
-      for (const b of bodies) await add(b)
+      const at = new Date(kept.at)
+      bodies = kept.kind === 'statement' ? await this.#statementRequest(req, owner, at) : [await this.#balanceRequest(req, owner, at)]
     } catch (e) {
-      const err = e instanceof StatementError ? e : new StatementError(E.technical)
-      await add(errorsXml([{ code: err.err[0], description: err.err[1], field: err.field }]))
+      const key = seenKey(customer, kept.kind, kept.msgId)
+      if ((await this.#seen.get(key)) === kept.id) await this.#seen.take(key) // held by this request, nobody else can claim it meanwhile
+      await add(errorAnswer(e), 0)
+      return
     }
+    for (const [n, b] of bodies.entries()) await add(b, n)
+  }
+
+  /**
+   * A kept request a crash cut (decision 1023): answered when its MsgId is its own, or still
+   * free (a crash between the keep and the claim, or after a refusal gave it back) and claimed
+   * now; another request's claim, or its customer gone, drops it.
+   */
+  async #resume(item: OutboxItem) {
+    const kept = item.payload as KeptRequest
+    const customer = await this.d.directory.get(kept.customer)
+    if (!customer || !(await claimKey(this.#seen, seenKey(customer, kept.kind, kept.msgId), kept.id))) return
+    await this.#answer(await this.#parse(kept.kind, kept.xml), customer, kept)
   }
 
   async #parse(kind: 'statement' | 'balance', xml: string): Promise<ReportRequest> {
@@ -144,8 +200,9 @@ export class AccountReports {
 
   // --- Statements -------------------------------------------------------------------
 
-  async #statementRequest(req: ReportRequest, owner: Customer): Promise<string[]> {
-    const now = this.d.clock.now().getTime()
+  /** `at`: when the request came (decision 1023), for its date checks and the period's end. */
+  async #statementRequest(req: ReportRequest, owner: Customer, at: Date): Promise<string[]> {
+    const now = at.getTime()
     if (!req.frDt) throw new StatementError(E.fromRequired)
     const datetime = req.prtry === 'DATETIME'
     const toDt = req.toDt ?? dateTallinn(new Date(now))
@@ -212,13 +269,14 @@ export class AccountReports {
 
   // --- Balances ---------------------------------------------------------------------
 
-  async #balanceRequest(req: ReportRequest, owner: Customer): Promise<string> {
+  /** `at`: when the request came (decision 1023), for the end-of-day date check; balances are as of now. */
+  async #balanceRequest(req: ReportRequest, owner: Customer, at: Date): Promise<string> {
     const now = this.d.clock.now()
     const today = dateTallinn(now)
     const version = req.version === '05' ? '08' : '06'
     if (version === '08' && req.prtry === 'END_OF_DAY_BALANCE') {
       if (!req.frDt) throw new StatementError(E.fromRequired)
-      if (req.frDt >= today) throw new StatementError(E.fromFuture)
+      if (req.frDt >= dateTallinn(at)) throw new StatementError(E.fromFuture)
       const end = instant(addDays(req.frDt, 1))
       const bal = await this.d.journal.balancesBefore(req.iban!, end)
       const currencies = [...bal.keys()].sort(ccyOrder)
@@ -302,4 +360,13 @@ export class AccountReports {
     if (this.#eodFrom <= yesterday) this.#eodFrom = addDays(yesterday, 1)
     return n
   }
+}
+
+const typeOf = (kind: 'statement' | 'balance') => kind === 'statement' ? STATEMENT_TYPE : BALANCE_TYPE
+/** A request's MsgId as claimed, per customer and endpoint (each keeps its own). */
+const seenKey = (c: CustomerKey, kind: 'statement' | 'balance', msgId: string) => `${keyOf(c)}|${kind}|${msgId}`
+/** The <Errors> answer of a refused request (a StatementError), or a technical error. */
+function errorAnswer(e: unknown): string {
+  const err = e instanceof StatementError ? e : new StatementError(E.technical)
+  return errorsXml([{ code: err.err[0], description: err.err[1], field: err.field }])
 }
