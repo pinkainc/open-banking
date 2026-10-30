@@ -1,4 +1,4 @@
-// A payment round's pain.002 across a crash (decisions 1005-1006, 1017, 1018): a file's transactions are
+// A payment round's pain.002 across a crash (decisions 1005-1006, 1017, 1018, 1019): a file's transactions are
 // checked and planned in the outbox before anything books, each booking keeps its entry of
 // the round's report, and a crash after any booking resumes the round from the plan: one
 // pain.002 with every transaction, the same grouping and group statuses, nothing booked or
@@ -11,6 +11,7 @@ import { describe, test } from 'node:test'
 import { C1, C2, DE_IBAN, balance, call, ddDrain, ddStatus, drain, pain001, pain008, postgresStore, seed, setup, type Ctx } from './helpers.js'
 import type { EmulatorOptions } from '../src/emulator.js'
 import type { SimulatorRails } from '../src/rails.js'
+import { MemoryRailsPending } from '../src/payments/pending.js'
 
 /** From the k-th call on, the ledger's `which` books, then the process "dies" (the call throws); returns the restore. */
 function crashAtBooking(ctx: Ctx, which: 'transfer' | 'commit', k: number) {
@@ -521,5 +522,141 @@ if (process.env.DATABASE_URL) describe('later rounds across a crash (Postgres: a
     assert.equal(Number(await balance(b, C2.iban)), c0 + 3)
     assert.equal(await reservedOf(b), 0n)
     assert.deepEqual(await b.emulator.ledger.outbox.pending(), [])
+  })
+})
+
+// --- Outcomes from the bridge's callback across a crash (decision 1019) -------------------
+// An outcome that comes later through the events (settle) and is not settled keeps its round's
+// entry and plan (and, after SEPA Instant failed, the plan of the SEPA round) before its rails
+// record is taken: a crash at the take reports it once, the SEPA leg is sent once, the funds
+// are released once. The same for an immediate ACWC cut after its record was taken.
+
+/**
+ * Rails records whose next `take` the test can make the process "die" at, once: before it
+ * takes (`before`) or right after. `opts` with the wrapped store, `arm` sets the crash.
+ */
+function crashingTakes(opts: EmulatorOptions = {}) {
+  let armed: 'before' | 'after' | undefined
+  const make = opts.railsPending ?? (() => new MemoryRailsPending())
+  const railsPending = () => {
+    const p = make()
+    const real = p.take.bind(p)
+    p.take = async (ref, scheme) => {
+      const a = armed
+      if (!a) return real(ref, scheme)
+      armed = undefined
+      if (a === 'after') await real(ref, scheme)
+      throw new Error(`crash ${a} the take`)
+    }
+    return p
+  }
+  return { opts: { ...opts, railsPending }, arm: (a: 'before' | 'after') => { armed = a } }
+}
+
+describe('callback outcomes across a crash (memory: recover on the same emulator, decision 1019)', () => {
+  for (const at of ['before', 'after'] as const) {
+    test(`a rejection from the callback, a crash ${at} its record is taken: recover reports it once, the funds released once`, async () => {
+      const t = crashingTakes()
+      const ctx = await setup(t.opts)
+      const [d0, c0] = [Number(await balance(ctx, C1.iban)), Number(await balance(ctx, C2.iban))]
+      sim(ctx).defer()
+      assert.equal((await call(ctx, { method: 'POST', url: '/payment', body: FILE() })).statusCode, 202)
+      const msgs0 = await drain(ctx)
+      t.arm(at)
+      await assert.rejects(sim(ctx).deliver(undefined, { status: 'rejected', reason: 'Account closed.' }))
+      await ctx.emulator.outbox.recover()
+      await checkLater(ctx, ctx, msgs0, { later: [ROUND_TWO_RJCT], sent: ['INST'], d: d0 - 3, c: c0 + 3, debits: 2 })
+    })
+
+    test(`SEPA Instant failed (ACWC) from the callback, a crash ${at} its record is taken: recover reports ACWC once and sends SEPA once`, async () => {
+      const t = crashingTakes()
+      const ctx = await setup(t.opts)
+      const [d0, c0] = [Number(await balance(ctx, C1.iban)), Number(await balance(ctx, C2.iban))]
+      sim(ctx).defer()
+      sim(ctx).instantFails(DE_IBAN)
+      assert.equal((await call(ctx, { method: 'POST', url: '/payment', body: FILE() })).statusCode, 202)
+      const msgs0 = await drain(ctx)
+      t.arm(at)
+      await assert.rejects(sim(ctx).deliver())
+      await ctx.emulator.outbox.recover()
+      assert.deepEqual(reports(await drain(ctx)), [ACWC], 'ACWC reported once')
+      assert.deepEqual(sim(ctx).sent.map((p) => p.scheme), ['INST', 'SEPA'], 'SEPA sent once')
+      assert.equal(await reservedOf(ctx), 300n, 'still reserved once for SEPA')
+      assert.equal(await sim(ctx).deliver(), 1)
+      await checkLater(ctx, ctx, msgs0, { later: [ROUND_TWO], sent: ['INST', 'SEPA'], d: d0 - 6, c: c0 + 3, debits: 3 })
+    })
+  }
+
+  test('an immediate ACWC cut after its record is taken, before the SEPA round is planned: recover sends SEPA once', async () => {
+    const t = crashingTakes()
+    const ctx = await setup(t.opts)
+    const [d0, c0] = [Number(await balance(ctx, C1.iban)), Number(await balance(ctx, C2.iban))]
+    sim(ctx).instantFails(DE_IBAN)
+    t.arm('after')
+    assert.equal((await call(ctx, { method: 'POST', url: '/payment', body: FILE() })).statusCode, 500)
+    const msgs0 = await drain(ctx)
+    await ctx.emulator.outbox.recover()
+    await checkLater(ctx, ctx, msgs0, { later: [ACWC, ROUND_TWO], sent: ['INST', 'SEPA'], d: d0 - 6, c: c0 + 3, debits: 3 })
+  })
+})
+
+if (process.env.DATABASE_URL) describe('callback outcomes across a crash (Postgres: a restart on the same store, decision 1019)', () => {
+  test('a rejection from the callback, a crash after its record is taken: after the restart reported once, the funds released once', async () => {
+    const opts = await postgresStore()
+    const t = crashingTakes(opts)
+    const a = await setup(t.opts)
+    const [d0, c0] = [Number(await balance(a, C1.iban)), Number(await balance(a, C2.iban))]
+    sim(a).defer()
+    assert.equal((await call(a, { method: 'POST', url: '/payment', body: FILE() })).statusCode, 202)
+    const msgs0 = await drain(a)
+    t.arm('after')
+    await assert.rejects(sim(a).deliver(undefined, { status: 'rejected', reason: 'Account closed.' }))
+    const b = await setup(opts)
+    await checkLater(a, b, msgs0, { later: [ROUND_TWO_RJCT], sent: ['INST'], d: d0 - 3, c: c0 + 3, debits: 2 })
+    assert.deepEqual(await drain(await setup(opts)), [], 'another restart sends nothing again')
+  })
+
+  for (const at of ['before', 'after'] as const) {
+    test(`SEPA Instant failed (ACWC) from the callback, a crash ${at} its record is taken: after the restart ACWC once, SEPA once`, async () => {
+      const opts = await postgresStore()
+      const t = crashingTakes(opts)
+      const a = await setup(t.opts)
+      const [d0, c0] = [Number(await balance(a, C1.iban)), Number(await balance(a, C2.iban))]
+      sim(a).defer()
+      sim(a).instantFails(DE_IBAN)
+      assert.equal((await call(a, { method: 'POST', url: '/payment', body: FILE() })).statusCode, 202)
+      const msgs0 = await drain(a)
+      t.arm(at)
+      await assert.rejects(sim(a).deliver())
+      const b = await setup(opts)
+      sim(b).defer()
+      // The restart's recovery runs at start, before deferring: SEPA may have settled at once.
+      await sim(b).deliver()
+      const msgs = await drain(b)
+      assert.deepEqual(reports(msgs0), [ROUND_ONE])
+      assert.deepEqual(reports(msgs), [ACWC, ROUND_TWO], 'ACWC once, then SEPA settled once')
+      assert.deepEqual([...sim(a).sent, ...sim(b).sent].map((p) => p.scheme), ['INST', 'SEPA'])
+      assert.equal(debits(msgs0) + debits(msgs), 3)
+      assert.equal(Number(await balance(b, C1.iban)), d0 - 6)
+      assert.equal(Number(await balance(b, C2.iban)), c0 + 3)
+      assert.equal(await reservedOf(b), 0n)
+      assert.deepEqual(await b.emulator.engine.atRails(), [])
+      assert.deepEqual(await b.emulator.ledger.outbox.pending(), [])
+      assert.equal(await b.emulator.engine.reconcile({ minAgeMs: 0 }), 0)
+      assert.deepEqual(await drain(await setup(opts)), [], 'another restart sends nothing again')
+    })
+  }
+
+  test('an immediate ACWC cut after its record is taken: after the restart SEPA once', async () => {
+    const opts = await postgresStore()
+    const t = crashingTakes(opts)
+    const a = await setup(t.opts)
+    const [d0, c0] = [Number(await balance(a, C1.iban)), Number(await balance(a, C2.iban))]
+    sim(a).instantFails(DE_IBAN)
+    t.arm('after')
+    assert.equal((await call(a, { method: 'POST', url: '/payment', body: FILE() })).statusCode, 500)
+    const msgs0 = await drain(a)
+    const b = await setup(opts)
+    await checkLater(a, b, msgs0, { later: [ACWC, ROUND_TWO], sent: ['INST', 'SEPA'], d: d0 - 6, c: c0 + 3, debits: 3 })
   })
 })
