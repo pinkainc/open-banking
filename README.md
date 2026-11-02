@@ -1,6 +1,6 @@
 # open-banking
 
-[Pinka](https://github.com/pinkainc) · [open-ledger](https://github.com/pinkainc/open-ledger) · **open-banking** · [docs.minka.io](https://github.com/pinkainc/docs.minka.io)
+[Pinka](https://github.com/pinkainc) · [open-ledger](https://github.com/pinkainc/open-ledger) · **open-banking**
 
 An open-source bank server compatible with the LHV Connect API: corporate clients and
 service providers talk to it over mutual TLS exactly as they would to the bank —
@@ -14,6 +14,10 @@ platform is a black box in the same way: what is public is the API its clients s
 directory, ledger, inbox, payment engine, rails — is our own design. Today it runs as a
 local emulator with simulated payment schemes; the `Ledger` and `Rails` interfaces are
 where a real ledger and real scheme bridges plug in.
+
+Only our implementation is published here. The API itself is described in the bank's own
+documentation ([partners.lhv.ee/en/connect](https://partners.lhv.ee/en/connect/)); the copy of it we
+work from is kept privately and is not redistributed (see [Legal](#legal)).
 
 ## How compatibility is established
 
