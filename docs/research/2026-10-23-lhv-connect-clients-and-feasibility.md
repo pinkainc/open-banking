@@ -10,7 +10,7 @@ payment institutions and crypto firms: safeguarding accounts, virtual IBANs, GBP
 instant payments, FX, statements. LHV is a direct member of UK Faster Payments (Bank of
 England account since 2019/2020), SEPA Instant and TARGET Instant Payment Settlement (TIPS).
 The implementation is closed source; the API is public. That makes it the same situation
-as Minka (`../minka/open-ledger`) and S3/MinIO: implement the contract, own the internals.
+as Minka (`../open-ledger`) and S3/MinIO: implement the contract, own the internals.
 
 ## Publicly confirmed clients
 

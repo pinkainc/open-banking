@@ -1,5 +1,5 @@
 // A real open-ledger server for the open-ledger ledger tests (decision 927): started once
-// per test process from its repo (OPEN_LEDGER_DIR, default ../../minka/open-ledger from the
+// per test process from its repo (OPEN_LEDGER_DIR, default ../open-ledger from the
 // repo root), memory store, a free port; stopped when the process exits.
 import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync } from 'node:fs'
@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 
-export const OPEN_LEDGER_DIR = resolve(process.env.OPEN_LEDGER_DIR ?? join(ROOT, '../../minka/open-ledger'))
+export const OPEN_LEDGER_DIR = resolve(process.env.OPEN_LEDGER_DIR ?? join(ROOT, '../open-ledger'))
 
 let started: Promise<string> | undefined
 

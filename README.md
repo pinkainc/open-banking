@@ -157,7 +157,7 @@ Not part of the compatible API. JSON in and out, amounts as decimal strings.
 ## Development
 
 ```bash
-npm run check      # typecheck + all tests twice (memory, then project Postgres) + open-ledger ledger tests if ../../minka/open-ledger exists
+npm run check      # typecheck + all tests twice (memory, then project Postgres) + open-ledger ledger tests if ../open-ledger exists
 npm test           # tests only
 npm run coverage   # c8 report in .rec/coverage/
 ```

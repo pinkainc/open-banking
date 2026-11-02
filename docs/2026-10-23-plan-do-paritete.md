@@ -1,7 +1,7 @@
 # Plan do pune paritete s LHV Connectom (2026-10-23)
 
 Ovo je plan za buduće Claude Code sesije, složen po uzoru na open-ledger
-(`/Users/ms/git/minka/open-ledger/docs/2026-10-10-plan-do-paritete.md`). Cilj je da
+(`/Users/ms/git/pinkainc/open-ledger/docs/2026-10-10-plan-do-paritete.md`). Cilj je da
 open-banking pokrije svih 58 operacija iz `docs.lhv-connect/ssot/operations.yaml`,
 svaku s testovima. Svaka sesija je jedan paket. Završava se zelenim `npm run check`,
 commitom i `/wrap-up` handoffom koji imenuje sljedeći paket iz ove tablice.

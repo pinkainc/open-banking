@@ -37,10 +37,10 @@ echo "==> unit tests (deferred store)"
 [ "$(cat .rec/test-deferred.status 2>/dev/null)" = ok ] && ok=1 || ok=0
 summary .rec/test-deferred.log $ok
 # Third (decision 927): the ledger contract and an emulator end to end on OpenLedgerLedger,
-# against a real open-ledger server (OPEN_LEDGER_DIR, default ../../minka/open-ledger; the
+# against a real open-ledger server (OPEN_LEDGER_DIR, default ../open-ledger; the
 # tests start it on a free port, memory store). Not there: said loudly, not skipped silently.
 unset DATABASE_URL
-ol_dir=$(cd "${OPEN_LEDGER_DIR:-../../minka/open-ledger}" 2>/dev/null && pwd || echo "${OPEN_LEDGER_DIR:-../../minka/open-ledger}")
+ol_dir=$(cd "${OPEN_LEDGER_DIR:-../open-ledger}" 2>/dev/null && pwd || echo "${OPEN_LEDGER_DIR:-../open-ledger}")
 if [ -d "$ol_dir/node_modules" ]; then
   echo "==> open-ledger ledger tests ($ol_dir)"
   OPEN_LEDGER_DIR="$ol_dir" OPEN_LEDGER_TESTS=1 node --import tsx --test server/test/ledger.test.ts server/test/open-ledger.e2e.ts > .rec/test-open-ledger.log 2>&1 && ok=1 || ok=0
