@@ -1,5 +1,7 @@
 # open-banking
 
+[Pinka](https://github.com/pinkainc) · [open-ledger](https://github.com/pinkainc/open-ledger) · **open-banking** · [docs.minka.io](https://github.com/pinkainc/docs.minka.io)
+
 An open-source bank server compatible with the LHV Connect API: corporate clients and
 service providers talk to it over mutual TLS exactly as they would to the bank —
 heartbeat, the message inbox, pain.001 payment initiation answered with pain.002 status
@@ -34,7 +36,7 @@ server follows that catalog. The test suite uses the mirror by path, never by co
 script of questions only the sandbox can answer (repeat DELETE status, bulk-delete
 statuses, heartbeat/mq response type, idempotency on the EE host, 413 on the EE host,
 …) is recorded verbatim, and the server is then judged against those recordings the
-way open-ledger (our Minka-compatible ledger) is judged against Minka's sandbox, with a
+way [open-ledger](https://github.com/pinkainc/open-ledger) (our Minka-compatible ledger) is judged against Minka's sandbox, with a
 divergences file for the places where we answer differently on purpose. Where docs
 and sandbox disagree, the sandbox wins.
 
@@ -188,4 +190,6 @@ programming language and its data file formats are not protected by copyright. N
 of the bank and its products are used only to say what this server is compatible
 with; this project is not affiliated with or endorsed by the bank.
 
-License: MIT.
+## License
+
+MIT, see [LICENSE](LICENSE).
